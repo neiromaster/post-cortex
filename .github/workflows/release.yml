@@ -35,6 +35,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+        # timeout-minutes: 10
+        # continue-on-error: false
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} --features embeddings
