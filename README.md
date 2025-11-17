@@ -44,20 +44,35 @@ Post-Cortex addresses the fundamental limitation of transient AI conversations t
 
 ### Installation
 
+**Homebrew (macOS/Linux) - Recommended:**
 ```bash
-# Build with semantic search (recommended)
-cargo build --release --features embeddings
+brew install julymetodiev/tap/post-cortex
+```
 
-# Or basic build without embeddings
-cargo build --release
+**Direct Download:**
+```bash
+# macOS Intel
+curl -L https://github.com/julymetodiev/post-cortex/releases/latest/download/post-cortex-macos-x64 -o /usr/local/bin/post-cortex && chmod +x /usr/local/bin/post-cortex
+
+# macOS Apple Silicon
+curl -L https://github.com/julymetodiev/post-cortex/releases/latest/download/post-cortex-macos-arm64 -o /usr/local/bin/post-cortex && chmod +x /usr/local/bin/post-cortex
+
+# Linux
+curl -L https://github.com/julymetodiev/post-cortex/releases/latest/download/post-cortex-linux-x64 -o /usr/local/bin/post-cortex && chmod +x /usr/local/bin/post-cortex
+```
+
+**Build from source:**
+```bash
+# With semantic search (recommended)
+cargo install --git https://github.com/julymetodiev/post-cortex --features embeddings
+
+# Or build locally
+cargo build --release --features embeddings
 ```
 
 ### Using with Claude Desktop
 
-**1. Build the server:**
-```bash
-cargo build --release --features embeddings
-```
+**1. Install Post-Cortex** (see Installation above)
 
 **2. Add to `~/.claude.json` or `claude_desktop_config.json`:**
 ```json
@@ -65,10 +80,7 @@ cargo build --release --features embeddings
   "mcpServers": {
     "post-cortex": {
       "type": "stdio",
-      "command": "mcp-server",
-      "args": [],
-      "env": {},
-      "cwd": "/absolute/path/to/post-cortex/target/release"
+      "command": "post-cortex"
     }
   }
 }
@@ -78,18 +90,13 @@ cargo build --release --features embeddings
 
 ### Using with Zed Editor
 
-**1. Build the server:**
-```bash
-cargo build --release --features embeddings
-```
+**1. Install Post-Cortex** (see Installation above)
 
 **2. Open Zed Settings (Cmd+,) → Add Server:**
 ```json
 {
   "post-cortex": {
-    "command": "/absolute/path/to/post-cortex/target/release/mcp-server",
-    "args": [],
-    "env": {}
+    "command": "post-cortex"
   }
 }
 ```
@@ -424,7 +431,7 @@ Lock-free design eliminates these issues in hot paths through atomic operations 
 cargo test --features embeddings
 
 # Run with debug logging
-RUST_LOG=post_cortex=debug cargo run --bin mcp-server --features embeddings
+RUST_LOG=post_cortex=debug cargo run --bin post-cortex --features embeddings
 
 # Benchmarks
 cargo bench
