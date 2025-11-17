@@ -18,6 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use clap::Parser;
 use dashmap::DashMap;
 use post_cortex::ConversationMemorySystem;
 use post_cortex::tools::mcp::*;
@@ -28,6 +29,13 @@ use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument};
 use uuid::Uuid;
+
+/// Post-Cortex MCP Server - Intelligent conversation memory system
+#[derive(Parser)]
+#[command(name = "post-cortex")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(about = "Production-grade intelligent conversation memory system for AI assistants", long_about = None)]
+struct Cli {}
 
 /// Universal error response generator - eliminates 24+ code duplications
 fn create_error_response(id: Value, code: i32, message: String) -> Value {
@@ -1694,6 +1702,8 @@ fn init_logging() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _cli = Cli::parse();
+
     // Initialize simple sync logging system
     if let Err(e) = init_logging() {
         eprintln!("Failed to initialize logging: {e}");

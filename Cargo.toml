@@ -55,7 +55,7 @@ tempfile = "3.0"
 criterion = "0.5"
 
 [[bin]]
-name = "mcp-server"
+name = "post-cortex"
 path = "src/bin/mcp-server.rs"
 
 [features]
