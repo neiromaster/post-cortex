@@ -21,6 +21,7 @@
 //! Post-Cortex daemon binary for manual HTTP server management
 //!
 //! Usage:
+//!   post-cortex-daemon init     - Create example config file
 //!   post-cortex-daemon start    - Start daemon server (foreground)
 //!   post-cortex-daemon status   - Check if daemon is running
 //!   post-cortex-daemon stop     - Stop running daemon
@@ -48,6 +49,7 @@ async fn main() -> Result<(), String> {
         "start" => start_daemon().await,
         "status" => check_status().await,
         "stop" => stop_daemon().await,
+        "init" => init_config(),
         "help" | "--help" | "-h" => {
             print_usage();
             Ok(())
@@ -70,35 +72,46 @@ fn print_usage() {
     println!("    start     Start daemon server in foreground");
     println!("    status    Check if daemon is running");
     println!("    stop      Stop running daemon (sends SIGTERM to port 3737)");
+    println!("    init      Create example config file at ~/.post-cortex/daemon.toml");
     println!("    help      Print this help message");
     println!();
     println!("CONFIGURATION:");
-    println!("    Host:           127.0.0.1 (localhost only)");
-    println!("    Port:           3737");
-    println!("    Data Directory: ~/.post-cortex/data");
+    println!("    Config File:    ~/.post-cortex/daemon.toml (optional)");
+    println!("    Defaults:");
+    println!("      Host:           127.0.0.1 (localhost only)");
+    println!("      Port:           3737");
+    println!("      Data Directory: ~/.post-cortex/data");
+    println!();
+    println!("    Priority: Environment variables > Config file > Defaults");
     println!();
     println!("ENVIRONMENT VARIABLES:");
     println!("    RUST_LOG        Set logging level (e.g., RUST_LOG=debug)");
-    println!("    PC_HOST         Override default host (default: 127.0.0.1)");
-    println!("    PC_PORT         Override default port (default: 3737)");
+    println!("    PC_HOST         Override host");
+    println!("    PC_PORT         Override port");
     println!("    PC_DATA_DIR     Override data directory");
     println!();
     println!("EXAMPLES:");
+    println!("    # Create config file");
+    println!("    post-cortex-daemon init");
+    println!();
     println!("    # Start daemon with debug logging");
     println!("    RUST_LOG=debug post-cortex-daemon start");
     println!();
     println!("    # Check daemon status");
     println!("    post-cortex-daemon status");
     println!();
-    println!("    # Start daemon on custom port");
+    println!("    # Start daemon with environment override");
     println!("    PC_PORT=8080 post-cortex-daemon start");
 }
 
 async fn start_daemon() -> Result<(), String> {
     println!("Starting Post-Cortex daemon...");
 
-    // Load configuration from environment or use defaults
-    let config = load_config();
+    // Load configuration (priority: env vars > config file > defaults)
+    let config = DaemonConfig::load();
+
+    // Validate configuration
+    config.validate()?;
 
     println!("Configuration:");
     println!("  Host: {}", config.host);
@@ -122,7 +135,7 @@ async fn start_daemon() -> Result<(), String> {
 }
 
 async fn check_status() -> Result<(), String> {
-    let config = load_config();
+    let config = DaemonConfig::load();
     let url = format!("http://{}:{}/health", config.host, config.port);
 
     println!("Checking daemon status at {}...", url);
@@ -159,7 +172,7 @@ async fn check_status() -> Result<(), String> {
 }
 
 async fn stop_daemon() -> Result<(), String> {
-    let config = load_config();
+    let config = DaemonConfig::load();
 
     println!("Stopping daemon at {}:{}...", config.host, config.port);
     println!();
@@ -177,26 +190,26 @@ async fn stop_daemon() -> Result<(), String> {
     Ok(())
 }
 
-fn load_config() -> DaemonConfig {
-    let host = env::var("PC_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+fn init_config() -> Result<(), String> {
+    println!("Creating example config file...");
+    println!();
 
-    let port = env::var("PC_PORT")
-        .ok()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(3737);
-
-    let data_directory = env::var("PC_DATA_DIR").unwrap_or_else(|_| {
-        dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".post-cortex/data")
-            .to_str()
-            .unwrap()
-            .to_string()
-    });
-
-    DaemonConfig {
-        host,
-        port,
-        data_directory,
+    match DaemonConfig::create_example_config() {
+        Ok(path) => {
+            println!("Success! Config file created at:");
+            println!("  {:?}", path);
+            println!();
+            println!("You can now edit this file to customize daemon settings.");
+            println!("Environment variables will override config file values.");
+            println!();
+            println!("To start the daemon:");
+            println!("  post-cortex-daemon start");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("Failed to create config file: {}", e);
+            Err(e)
+        }
     }
 }
+

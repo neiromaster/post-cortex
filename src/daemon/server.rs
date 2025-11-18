@@ -42,28 +42,8 @@ use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
-/// Configuration for daemon server
-#[derive(Debug, Clone)]
-pub struct DaemonConfig {
-    pub host: String,
-    pub port: u16,
-    pub data_directory: String,
-}
-
-impl Default for DaemonConfig {
-    fn default() -> Self {
-        Self {
-            host: "127.0.0.1".to_string(),
-            port: 3737,
-            data_directory: dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".post-cortex/data")
-                .to_str()
-                .unwrap()
-                .to_string(),
-        }
-    }
-}
+// DaemonConfig is now in config.rs module
+use super::config::DaemonConfig;
 
 /// Connection information (lock-free)
 #[allow(dead_code)] // Will be used for connection tracking in future

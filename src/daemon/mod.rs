@@ -23,8 +23,10 @@
 //! Provides lock-free HTTP/SSE transport for MCP JSON-RPC, enabling multiple
 //! Claude Code instances to share a single RocksDB instance.
 
+pub mod config;
 pub mod server;
 pub mod sse;
 
-pub use server::{LockFreeDaemonServer, DaemonConfig};
+pub use config::DaemonConfig;
+pub use server::LockFreeDaemonServer;
 pub use sse::LockFreeSSEBroadcaster;
