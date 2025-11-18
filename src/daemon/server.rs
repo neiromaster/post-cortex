@@ -341,6 +341,14 @@ async fn handle_tool_call(
         "get_session_statistics" => handle_get_session_statistics(server, arguments).await,
         "get_tool_catalog" => handle_get_tool_catalog(server).await,
 
+        // Workspace Management
+        "create_workspace" => handle_create_workspace(server, arguments).await,
+        "get_workspace" => handle_get_workspace(server, arguments).await,
+        "list_workspaces" => handle_list_workspaces(server).await,
+        "delete_workspace" => handle_delete_workspace(server, arguments).await,
+        "add_session_to_workspace" => handle_add_session_to_workspace(server, arguments).await,
+        "remove_session_from_workspace" => handle_remove_session_from_workspace(server, arguments).await,
+
         _ => Err(format!("Unknown tool: {}", tool_name)),
     }
 }
@@ -930,6 +938,168 @@ async fn handle_get_summary(
     )
     .await
     .map_err(|e| format!("Failed to get summary: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+// ============================================================================
+// Workspace Management Handlers
+// ============================================================================
+
+async fn handle_create_workspace(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::create_workspace;
+
+    let name = arguments["name"]
+        .as_str()
+        .ok_or_else(|| "Missing name".to_string())?
+        .to_string();
+
+    let description = arguments["description"]
+        .as_str()
+        .ok_or_else(|| "Missing description".to_string())?
+        .to_string();
+
+    let result = create_workspace(name, description)
+        .await
+        .map_err(|e| format!("Failed to create workspace: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_get_workspace(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::get_workspace;
+
+    let workspace_id_str = arguments["workspace_id"]
+        .as_str()
+        .ok_or_else(|| "Missing workspace_id".to_string())?;
+    let workspace_id = uuid::Uuid::parse_str(workspace_id_str)
+        .map_err(|e| format!("Invalid workspace_id: {}", e))?;
+
+    let result = get_workspace(workspace_id)
+        .await
+        .map_err(|e| format!("Failed to get workspace: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_list_workspaces(
+    _server: &Arc<LockFreeDaemonServer>,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::list_workspaces;
+
+    let result = list_workspaces()
+        .await
+        .map_err(|e| format!("Failed to list workspaces: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_delete_workspace(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::delete_workspace;
+
+    let workspace_id_str = arguments["workspace_id"]
+        .as_str()
+        .ok_or_else(|| "Missing workspace_id".to_string())?;
+    let workspace_id = uuid::Uuid::parse_str(workspace_id_str)
+        .map_err(|e| format!("Invalid workspace_id: {}", e))?;
+
+    let result = delete_workspace(workspace_id)
+        .await
+        .map_err(|e| format!("Failed to delete workspace: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_add_session_to_workspace(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::add_session_to_workspace;
+
+    let workspace_id_str = arguments["workspace_id"]
+        .as_str()
+        .ok_or_else(|| "Missing workspace_id".to_string())?;
+    let workspace_id = uuid::Uuid::parse_str(workspace_id_str)
+        .map_err(|e| format!("Invalid workspace_id: {}", e))?;
+
+    let session_id_str = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?;
+    let session_id = uuid::Uuid::parse_str(session_id_str)
+        .map_err(|e| format!("Invalid session_id: {}", e))?;
+
+    let role = arguments["role"]
+        .as_str()
+        .ok_or_else(|| "Missing role".to_string())?
+        .to_string();
+
+    let result = add_session_to_workspace(workspace_id, session_id, role)
+        .await
+        .map_err(|e| format!("Failed to add session to workspace: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_remove_session_from_workspace(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::remove_session_from_workspace;
+
+    let workspace_id_str = arguments["workspace_id"]
+        .as_str()
+        .ok_or_else(|| "Missing workspace_id".to_string())?;
+    let workspace_id = uuid::Uuid::parse_str(workspace_id_str)
+        .map_err(|e| format!("Invalid workspace_id: {}", e))?;
+
+    let session_id_str = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?;
+    let session_id = uuid::Uuid::parse_str(session_id_str)
+        .map_err(|e| format!("Invalid session_id: {}", e))?;
+
+    let result = remove_session_from_workspace(workspace_id, session_id)
+        .await
+        .map_err(|e| format!("Failed to remove session from workspace: {}", e))?;
 
     Ok(serde_json::json!({
         "content": [{
