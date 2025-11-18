@@ -149,6 +149,24 @@ pub enum ContextResponse {
 static MEMORY_SYSTEM: LazyLock<ArcSwap<Option<Arc<ConversationMemorySystem>>>> =
     LazyLock::new(|| ArcSwap::new(Arc::new(None)));
 
+/// Inject external memory system for daemon mode
+///
+/// This allows daemon server to share its memory system with MCP tools,
+/// enabling multiple Claude Code instances to use the same RocksDB database
+/// through a central daemon process.
+///
+/// # Usage
+/// ```rust
+/// // In daemon startup:
+/// let memory_system = Arc::new(ConversationMemorySystem::new(config).await?);
+/// inject_memory_system(memory_system.clone());
+/// ```
+pub fn inject_memory_system(system: Arc<ConversationMemorySystem>) {
+    info!("MCP-TOOLS: Injecting external memory system for daemon mode");
+    MEMORY_SYSTEM.store(Arc::new(Some(system)));
+    info!("MCP-TOOLS: Memory system injection complete");
+}
+
 pub async fn get_memory_system_with_config(
     config: SystemConfig,
 ) -> Result<ConversationMemorySystem> {

@@ -375,3 +375,189 @@ async fn test_daemon_shares_rocksdb() {
         );
     }
 }
+#[tokio::test]
+async fn test_update_conversation_context_tool() {
+    let (port, _temp_dir) = start_test_daemon().await;
+    let client = Client::new();
+
+    // First create a session
+    let create_request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "create_session",
+            "arguments": {
+                "name": "Test Session",
+                "description": "Testing update_conversation_context"
+            }
+        }
+    });
+
+    let response = client
+        .post(format!("http://127.0.0.1:{}/mcp", port))
+        .json(&create_request)
+        .send()
+        .await
+        .unwrap();
+
+    let body: serde_json::Value = response.json().await.unwrap();
+    let session_text = body["result"]["content"][0]["text"].as_str().unwrap();
+    let session_id = session_text.split("Created new session: ").nth(1).unwrap().trim();
+
+    // Now update context
+    let update_request = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "update_conversation_context",
+            "arguments": {
+                "session_id": session_id,
+                "interaction_type": "qa",
+                "content": {
+                    "question": "How does daemon mode work?",
+                    "answer": "Daemon mode allows multiple Claude instances to share RocksDB"
+                }
+            }
+        }
+    });
+
+    let response = client
+        .post(format!("http://127.0.0.1:{}/mcp", port))
+        .json(&update_request)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["result"].is_object());
+}
+
+#[tokio::test]
+async fn test_semantic_search_session_tool() {
+    let (port, _temp_dir) = start_test_daemon().await;
+    let client = Client::new();
+
+    // Create session and add context
+    let create_request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "create_session",
+            "arguments": {}
+        }
+    });
+
+    let response = client
+        .post(format!("http://127.0.0.1:{}/mcp", port))
+        .json(&create_request)
+        .send()
+        .await
+        .unwrap();
+
+    let body: serde_json::Value = response.json().await.unwrap();
+    let session_text = body["result"]["content"][0]["text"].as_str().unwrap();
+    let session_id = session_text.split("Created new session: ").nth(1).unwrap().trim();
+
+    // Search in session
+    let search_request = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "semantic_search_session",
+            "arguments": {
+                "session_id": session_id,
+                "query": "daemon mode",
+                "limit": 10
+            }
+        }
+    });
+
+    let response = client
+        .post(format!("http://127.0.0.1:{}/mcp", port))
+        .json(&search_request)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["result"].is_object());
+}
+
+#[tokio::test]
+async fn test_list_sessions_tool() {
+    let (port, _temp_dir) = start_test_daemon().await;
+    let client = Client::new();
+
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "list_sessions",
+            "arguments": {}
+        }
+    });
+
+    let response = client
+        .post(format!("http://127.0.0.1:{}/mcp", port))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["result"].is_object());
+}
+#[tokio::test]
+async fn test_list_sessions_debug() {
+    use post_cortex::daemon::{DaemonConfig, LockFreeDaemonServer};
+    use reqwest::Client;
+    use serde_json::json;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let config = DaemonConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        data_directory: temp_dir.path().to_str().unwrap().to_string(),
+    };
+
+    let server = LockFreeDaemonServer::new(config).await.unwrap();
+    tokio::spawn(async move {
+        server.start().await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client = Client::new();
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "list_sessions",
+            "arguments": {}
+        }
+    });
+
+    let response = client
+        .post(format!("http://127.0.0.1:{}/mcp", port))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+
+    let body: serde_json::Value = response.json().await.unwrap();
+    println!("Response body: {}", serde_json::to_string_pretty(&body).unwrap());
+}

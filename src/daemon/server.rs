@@ -107,7 +107,11 @@ impl LockFreeDaemonServer {
                 .map_err(|e| format!("Failed to initialize memory system: {}", e))?,
         );
 
-        info!("Memory system initialized successfully");
+        // Inject memory system into MCP tools global singleton
+        // This enables all MCP tool functions to use daemon's shared memory system
+        crate::tools::mcp::inject_memory_system(memory_system.clone());
+
+        info!("Memory system initialized and injected successfully");
 
         Ok(Self {
             memory_system,
