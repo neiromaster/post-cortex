@@ -65,6 +65,7 @@ impl Default for DaemonConfig {
 }
 
 /// Connection information (lock-free)
+#[allow(dead_code)] // Will be used for connection tracking in future
 struct ConnectionInfo {
     id: Uuid,
     connected_at: SystemTime,
@@ -164,9 +165,11 @@ impl LockFreeDaemonServer {
 /// MCP JSON-RPC request
 #[derive(Debug, Deserialize)]
 struct MCPRequest {
+    #[allow(dead_code)] // Used for validation
     jsonrpc: String,
     id: serde_json::Value,
     method: String,
+    #[allow(dead_code)] // Will be used for tool calls
     params: Option<serde_json::Value>,
 }
 
