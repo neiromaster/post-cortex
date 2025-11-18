@@ -1899,7 +1899,7 @@ pub async fn get_session_statistics(session_id: String) -> Result<MCPToolResult>
 /// Get comprehensive catalog of all available tools organized by category
 pub async fn get_tool_catalog() -> Result<MCPToolResult> {
     let catalog = serde_json::json!({
-        "total_tools": 20,
+        "total_tools": 26,
         "categories": {
             "Session Management": {
                 "description": "Tools for creating, loading, and managing conversation sessions",
@@ -2025,9 +2025,45 @@ pub async fn get_tool_catalog() -> Result<MCPToolResult> {
                     },
                     {
                         "name": "get_tool_catalog",
-                        "description": "View all 20 tools organized by category with usage guidance",
+                        "description": "View all 26 tools organized by category with usage guidance",
                         "use_when": "First time using post-cortex or discovering available tools",
                         "note": "Returns categories, workflows, tips, and most-used tools list"
+                    }
+                ]
+            },
+            "Workspace Management": {
+                "description": "Tools for organizing related sessions (e.g., microservices, monorepo projects)",
+                "tool_count": 6,
+                "tools": [
+                    {
+                        "name": "create_workspace",
+                        "description": "Create workspace to group related sessions",
+                        "use_when": "Starting a multi-service project or organizing session groups"
+                    },
+                    {
+                        "name": "get_workspace",
+                        "description": "Retrieve workspace details including all sessions and metadata",
+                        "use_when": "Viewing workspace configuration and session associations"
+                    },
+                    {
+                        "name": "list_workspaces",
+                        "description": "List all workspaces with session counts",
+                        "use_when": "Finding available workspaces or checking workspace overview"
+                    },
+                    {
+                        "name": "delete_workspace",
+                        "description": "Delete workspace (sessions remain intact)",
+                        "use_when": "Removing workspace organization without deleting sessions"
+                    },
+                    {
+                        "name": "add_session_to_workspace",
+                        "description": "Add session to workspace with role (primary/related/dependency/shared)",
+                        "use_when": "Organizing session into workspace with specific relationship role"
+                    },
+                    {
+                        "name": "remove_session_from_workspace",
+                        "description": "Remove session from workspace",
+                        "use_when": "Reorganizing sessions or removing from workspace group"
                     }
                 ]
             }
@@ -2055,7 +2091,7 @@ pub async fn get_tool_catalog() -> Result<MCPToolResult> {
     });
 
     Ok(MCPToolResult::success(
-        "Retrieved tool catalog with 20 tools across 4 categories".to_string(),
+        "Retrieved tool catalog with 26 tools across 5 categories".to_string(),
         Some(catalog),
     ))
 }
