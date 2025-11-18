@@ -150,7 +150,7 @@ impl LockFreeConcurrencyController {
     }
 
     /// Try to acquire a slot without blocking (lock-free)
-    fn try_acquire(&self) -> Option<LockFreeOperationPermit> {
+    fn try_acquire(self: &Arc<Self>) -> Option<LockFreeOperationPermit> {
         if !self.active.load(Ordering::Relaxed) {
             return None;
         }
@@ -168,14 +168,14 @@ impl LockFreeConcurrencyController {
             Ordering::Relaxed,
         ) {
             Ok(_) => Some(LockFreeOperationPermit {
-                controller: self as *const _,
+                controller: Arc::clone(self),
             }),
             Err(_) => None, // Someone else took the slot
         }
     }
 
     /// Acquire with waiting (lock-free busy wait)
-    async fn acquire(&self) -> Result<LockFreeOperationPermit> {
+    async fn acquire(self: &Arc<Self>) -> Result<LockFreeOperationPermit> {
         const MAX_WAIT_ITERATIONS: usize = 1000;
         const WAIT_DELAY_MS: u64 = 1;
 
@@ -222,16 +222,12 @@ impl LockFreeConcurrencyController {
 
 /// Lock-free operation permit (auto-releasing on drop)
 struct LockFreeOperationPermit {
-    controller: *const LockFreeConcurrencyController,
+    controller: Arc<LockFreeConcurrencyController>,
 }
 
 impl Drop for LockFreeOperationPermit {
     fn drop(&mut self) {
-        unsafe {
-            if !self.controller.is_null() {
-                (*self.controller).release();
-            }
-        }
+        self.controller.release();
     }
 }
 

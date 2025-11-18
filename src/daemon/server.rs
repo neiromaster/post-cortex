@@ -33,6 +33,7 @@ use axum::{
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -216,7 +217,7 @@ async fn get_stats(State(server): State<Arc<LockFreeDaemonServer>>) -> impl Into
 async fn handle_mcp_request(
     State(server): State<Arc<LockFreeDaemonServer>>,
     Json(request): Json<MCPRequest>,
-) -> Result<Json<MCPResponse>, AppError> {
+) -> impl IntoResponse {
     debug!("Handling MCP request: {}", request.method);
 
     server.total_requests.fetch_add(1, Ordering::Relaxed);
@@ -225,20 +226,18 @@ async fn handle_mcp_request(
     let result = match request.method.as_str() {
         "initialize" => handle_initialize(),
         "tools/list" => handle_tools_list(&server),
-        "tools/call" => {
-            handle_tool_call(&server, &request).await
-        }
+        "tools/call" => handle_tool_call(&server, &request).await,
         _ => Err(format!("Unknown method: {}", request.method)),
     };
 
-    match result {
-        Ok(result_data) => Ok(Json(MCPResponse {
+    Json(match result {
+        Ok(result_data) => MCPResponse {
             jsonrpc: "2.0".to_string(),
             id: request.id,
             result: Some(result_data),
             error: None,
-        })),
-        Err(error_msg) => Ok(Json(MCPResponse {
+        },
+        Err(error_msg) => MCPResponse {
             jsonrpc: "2.0".to_string(),
             id: request.id,
             result: None,
@@ -246,8 +245,8 @@ async fn handle_mcp_request(
                 code: -32603,
                 message: error_msg,
             }),
-        })),
-    }
+        },
+    })
 }
 
 fn handle_initialize() -> Result<serde_json::Value, String> {
@@ -272,15 +271,22 @@ fn handle_tools_list(_server: &Arc<LockFreeDaemonServer>) -> Result<serde_json::
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "Optional name for the session"
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Optional description for the session"
-                        }
+                        "name": {"type": "string", "description": "Optional name for the session"},
+                        "description": {"type": "string", "description": "Optional description for the session"}
                     }
+                }
+            },
+            {
+                "name": "update_conversation_context",
+                "description": "Add new interaction context to a session",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string", "description": "UUID of the session"},
+                        "interaction_type": {"type": "string", "description": "Type: qa, code_change, problem_solved, decision_made"},
+                        "content": {"type": "object", "description": "Content object with interaction data"}
+                    },
+                    "required": ["session_id", "interaction_type", "content"]
                 }
             }
         ]
@@ -302,7 +308,35 @@ async fn handle_tool_call(
     debug!("Tool call: {} with args: {:?}", tool_name, arguments);
 
     match tool_name {
+        // Session Management
         "create_session" => handle_create_session(server, arguments).await,
+        "load_session" => handle_load_session(server, arguments).await,
+        "list_sessions" => handle_list_sessions(server).await,
+        "search_sessions" => handle_search_sessions(server, arguments).await,
+        "update_session_metadata" => handle_update_session_metadata(server, arguments).await,
+
+        // Context Operations
+        "update_conversation_context" => handle_update_context(server, arguments).await,
+        "query_conversation_context" => handle_query_context(server, arguments).await,
+        "bulk_update_conversation_context" => handle_bulk_update_context(server, arguments).await,
+        "create_session_checkpoint" => handle_create_checkpoint(server, arguments).await,
+
+        // Semantic Search
+        "semantic_search_session" => handle_semantic_search(server, arguments).await,
+        "semantic_search_global" => handle_semantic_search_global(server, arguments).await,
+        "find_related_content" => handle_find_related_content(server, arguments).await,
+        "vectorize_session" => handle_vectorize_session(server, arguments).await,
+        "get_vectorization_stats" => handle_get_vectorization_stats(server).await,
+
+        // Analysis & Insights
+        "get_structured_summary" => handle_get_summary(server, arguments).await,
+        "get_key_decisions" => handle_get_key_decisions(server, arguments).await,
+        "get_key_insights" => handle_get_key_insights(server, arguments).await,
+        "get_entity_importance_analysis" => handle_get_entity_importance(server, arguments).await,
+        "get_entity_network_view" => handle_get_entity_network(server, arguments).await,
+        "get_session_statistics" => handle_get_session_statistics(server, arguments).await,
+        "get_tool_catalog" => handle_get_tool_catalog(server).await,
+
         _ => Err(format!("Unknown tool: {}", tool_name)),
     }
 }
@@ -328,7 +362,581 @@ async fn handle_create_session(
     }))
 }
 
+async fn handle_load_session(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::load_session;
+
+    let session_id = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?;
+
+    let uuid = uuid::Uuid::parse_str(session_id)
+        .map_err(|e| format!("Invalid session_id: {}", e))?;
+
+    let result = load_session(uuid)
+        .await
+        .map_err(|e| format!("Failed to load session: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_update_context(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::update_conversation_context;
+    use crate::core::context_update::CodeReference;
+
+    let interaction_type = arguments["interaction_type"]
+        .as_str()
+        .ok_or_else(|| "Missing interaction_type".to_string())?
+        .to_string();
+
+    // Convert content from JSON to HashMap
+    let content_obj = arguments["content"]
+        .as_object()
+        .ok_or_else(|| "Content must be an object".to_string())?;
+
+    let mut content = HashMap::new();
+    for (key, value) in content_obj {
+        let value_str = if value.is_string() {
+            value.as_str().unwrap().to_string()
+        } else {
+            value.to_string()
+        };
+        content.insert(key.clone(), value_str);
+    }
+
+    // Parse code_reference if provided
+    let code_reference: Option<CodeReference> = arguments.get("code_reference")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+    // Parse session_id
+    let session_id_str = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?;
+    let session_id = uuid::Uuid::parse_str(session_id_str)
+        .map_err(|e| format!("Invalid session_id: {}", e))?;
+
+    let result = update_conversation_context(interaction_type, content, code_reference, session_id)
+        .await
+        .map_err(|e| format!("Failed to update context: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_semantic_search(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::semantic_search_session;
+
+    let session_id_str = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?;
+    let session_id = uuid::Uuid::parse_str(session_id_str)
+        .map_err(|e| format!("Invalid session_id: {}", e))?;
+
+    let query = arguments["query"]
+        .as_str()
+        .ok_or_else(|| "Missing query".to_string())?
+        .to_string();
+
+    let limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let date_from = arguments.get("date_from").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let date_to = arguments.get("date_to").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let interaction_type = arguments.get("interaction_type")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<String>>()
+        });
+
+    let result = semantic_search_session(session_id, query, limit, date_from, date_to, interaction_type)
+        .await
+        .map_err(|e| format!("Failed to search: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_list_sessions(
+    _server: &Arc<LockFreeDaemonServer>,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::list_sessions;
+
+    let result = list_sessions()
+        .await
+        .map_err(|e| format!("Failed to list sessions: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_query_context(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::query_conversation_context;
+
+    let query_type = arguments["query_type"]
+        .as_str()
+        .ok_or_else(|| "Missing query_type".to_string())?
+        .to_string();
+
+    // Convert parameters from JSON to HashMap
+    let params_obj = arguments["parameters"]
+        .as_object()
+        .ok_or_else(|| "Parameters must be an object".to_string())?;
+
+    let mut parameters = HashMap::new();
+    for (key, value) in params_obj {
+        let value_str = if value.is_string() {
+            value.as_str().unwrap().to_string()
+        } else {
+            value.to_string()
+        };
+        parameters.insert(key.clone(), value_str);
+    }
+
+    // Parse session_id
+    let session_id_str = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?;
+    let session_id = uuid::Uuid::parse_str(session_id_str)
+        .map_err(|e| format!("Invalid session_id: {}", e))?;
+
+    let result = query_conversation_context(query_type, parameters, session_id)
+        .await
+        .map_err(|e| format!("Failed to query context: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_bulk_update_context(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::{bulk_update_conversation_context, ContextUpdateItem};
+
+    // Parse session_id
+    let session_id_str = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?;
+    let session_id = uuid::Uuid::parse_str(session_id_str)
+        .map_err(|e| format!("Invalid session_id: {}", e))?;
+
+    // Parse updates array into Vec<ContextUpdateItem>
+    let updates_json = arguments["updates"]
+        .as_array()
+        .ok_or_else(|| "Updates must be an array".to_string())?;
+
+    let mut updates: Vec<ContextUpdateItem> = Vec::new();
+    for update_val in updates_json {
+        let update: ContextUpdateItem = serde_json::from_value(update_val.clone())
+            .map_err(|e| format!("Failed to parse update: {}", e))?;
+        updates.push(update);
+    }
+
+    let result = bulk_update_conversation_context(updates, session_id)
+        .await
+        .map_err(|e| format!("Failed to bulk update: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_semantic_search_global(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::semantic_search_global;
+
+    let query = arguments["query"]
+        .as_str()
+        .ok_or_else(|| "Missing query".to_string())?
+        .to_string();
+
+    let limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let date_from = arguments.get("date_from").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let date_to = arguments.get("date_to").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let interaction_type = arguments.get("interaction_type")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<String>>()
+        });
+
+    let result = semantic_search_global(query, limit, date_from, date_to, interaction_type)
+        .await
+        .map_err(|e| format!("Failed to search globally: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_find_related_content(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::find_related_content;
+
+    let session_id_str = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?;
+    let session_id = uuid::Uuid::parse_str(session_id_str)
+        .map_err(|e| format!("Invalid session_id: {}", e))?;
+
+    let topic = arguments["topic"]
+        .as_str()
+        .ok_or_else(|| "Missing topic".to_string())?
+        .to_string();
+
+    let limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+
+    let result = find_related_content(session_id, topic, limit)
+        .await
+        .map_err(|e| format!("Failed to find related content: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_search_sessions(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::search_sessions;
+
+    let query = arguments["query"]
+        .as_str()
+        .ok_or_else(|| "Missing query".to_string())?
+        .to_string();
+
+    let result = search_sessions(query)
+        .await
+        .map_err(|e| format!("Failed to search sessions: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_update_session_metadata(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::update_session_metadata;
+
+    let session_id_str = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?;
+    let session_id = uuid::Uuid::parse_str(session_id_str)
+        .map_err(|e| format!("Invalid session_id: {}", e))?;
+
+    let name = arguments.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let description = arguments.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    let result = update_session_metadata(session_id, name, description)
+        .await
+        .map_err(|e| format!("Failed to update metadata: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_create_checkpoint(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::create_session_checkpoint;
+
+    let session_id_str = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?;
+    let session_id = uuid::Uuid::parse_str(session_id_str)
+        .map_err(|e| format!("Invalid session_id: {}", e))?;
+
+    let result = create_session_checkpoint(session_id)
+        .await
+        .map_err(|e| format!("Failed to create checkpoint: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_get_key_decisions(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::get_key_decisions;
+
+    let session_id = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?
+        .to_string();
+
+    let result = get_key_decisions(session_id)
+        .await
+        .map_err(|e| format!("Failed to get key decisions: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_get_key_insights(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::get_key_insights;
+
+    let session_id = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?
+        .to_string();
+
+    let limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+
+    let result = get_key_insights(session_id, limit)
+        .await
+        .map_err(|e| format!("Failed to get key insights: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_get_entity_importance(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::get_entity_importance_analysis;
+
+    let session_id = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?
+        .to_string();
+
+    let limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let min_importance = arguments.get("min_importance").and_then(|v| v.as_f64()).map(|v| v as f32);
+
+    let result = get_entity_importance_analysis(session_id, limit, min_importance)
+        .await
+        .map_err(|e| format!("Failed to get entity importance: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_get_entity_network(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::get_entity_network_view;
+
+    let session_id = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?
+        .to_string();
+
+    let center_entity = arguments.get("center_entity").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let max_entities = arguments.get("max_entities").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let max_relationships = arguments.get("max_relationships").and_then(|v| v.as_u64()).map(|v| v as usize);
+
+    let result = get_entity_network_view(session_id, center_entity, max_entities, max_relationships)
+        .await
+        .map_err(|e| format!("Failed to get entity network: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_get_session_statistics(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::get_session_statistics;
+
+    let session_id = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?
+        .to_string();
+
+    let result = get_session_statistics(session_id)
+        .await
+        .map_err(|e| format!("Failed to get statistics: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_vectorize_session(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::vectorize_session;
+
+    let session_id_str = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?;
+    let session_id = uuid::Uuid::parse_str(session_id_str)
+        .map_err(|e| format!("Invalid session_id: {}", e))?;
+
+    let result = vectorize_session(session_id)
+        .await
+        .map_err(|e| format!("Failed to vectorize session: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_get_vectorization_stats(
+    _server: &Arc<LockFreeDaemonServer>,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::get_vectorization_stats;
+
+    let result = get_vectorization_stats()
+        .await
+        .map_err(|e| format!("Failed to get vectorization stats: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_get_tool_catalog(
+    _server: &Arc<LockFreeDaemonServer>,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::get_tool_catalog;
+
+    let result = get_tool_catalog()
+        .await
+        .map_err(|e| format!("Failed to get tool catalog: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
+async fn handle_get_summary(
+    _server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use crate::tools::mcp::get_structured_summary;
+
+    let session_id = arguments["session_id"]
+        .as_str()
+        .ok_or_else(|| "Missing session_id".to_string())?
+        .to_string();
+
+    let compact = arguments.get("compact").and_then(|v| v.as_bool());
+    let decisions_limit = arguments.get("decisions_limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let entities_limit = arguments.get("entities_limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let questions_limit = arguments.get("questions_limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let concepts_limit = arguments.get("concepts_limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let min_confidence = arguments.get("min_confidence").and_then(|v| v.as_f64()).map(|v| v as f32);
+
+    let result = get_structured_summary(
+        session_id,
+        decisions_limit,
+        entities_limit,
+        questions_limit,
+        concepts_limit,
+        min_confidence,
+        compact
+    )
+    .await
+    .map_err(|e| format!("Failed to get summary: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": result.message
+        }]
+    }))
+}
+
 /// Error type for HTTP handlers
+#[derive(Debug)]
 struct AppError(String);
 
 impl IntoResponse for AppError {
