@@ -24,6 +24,7 @@ pub mod session;
 pub mod storage;
 pub mod summary;
 pub mod tools;
+pub mod workspace;
 
 pub use core::lockfree_memory_system::LockFreeConversationMemorySystem;
 pub use core::lockfree_memory_system::SystemConfig;

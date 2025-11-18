@@ -49,10 +49,18 @@ hf-hub = { version = "0.4", optional = true }
 
 ordered-float = "5.0.0"
 
+# HTTP daemon dependencies
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+hyper = "1.0"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.0"
 criterion = "0.5"
+reqwest = { version = "0.12", features = ["json"] }
+portpicker = "0.1"
 
 [[bin]]
 name = "post-cortex"

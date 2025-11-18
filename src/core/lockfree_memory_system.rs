@@ -21,6 +21,7 @@ use crate::core::lockfree_cache::{LockFreeCache, LockFreeSessionCache};
 use crate::core::lockfree_performance::LockFreePerformanceMonitor;
 use crate::session::active_session::ActiveSession;
 use crate::storage::rocksdb_storage::RealRocksDBStorage;
+use crate::workspace::LockFreeWorkspaceManager;
 use anyhow;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -62,6 +63,9 @@ pub struct LockFreeConversationMemorySystem {
 
     /// Graph management - lock-free
     pub graph_manager: LockFreeSimpleGraphManager,
+
+    /// Workspace management - lock-free
+    pub workspace_manager: Arc<LockFreeWorkspaceManager>,
 
     /// Storage actor handle
     pub storage_actor: StorageActorHandle,
@@ -348,6 +352,9 @@ impl LockFreeConversationMemorySystem {
 
         let system_metrics = Arc::new(LockFreeSystemMetrics::new());
 
+        // Create workspace manager
+        let workspace_manager = Arc::new(LockFreeWorkspaceManager::new());
+
         // Prepare embeddings configuration for lazy initialization
         #[cfg(feature = "embeddings")]
         let (content_vectorizer, semantic_query_engine, embedding_config_holder) = if config.enable_embeddings {
@@ -408,6 +415,7 @@ impl LockFreeConversationMemorySystem {
             session_manager,
             context_processor,
             graph_manager,
+            workspace_manager,
             storage_actor,
             config,
             performance_monitor,
