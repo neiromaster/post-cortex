@@ -224,13 +224,9 @@ async fn handle_mcp_request(
     // Route to appropriate handler based on method
     let result = match request.method.as_str() {
         "initialize" => handle_initialize(),
-        "tools/list" => handle_tools_list(),
+        "tools/list" => handle_tools_list(&server),
         "tools/call" => {
-            // TODO: Implement actual tool calls
-            Ok(serde_json::json!({
-                "success": true,
-                "message": "Tool call not yet implemented"
-            }))
+            handle_tool_call(&server, &request).await
         }
         _ => Err(format!("Unknown method: {}", request.method)),
     };
@@ -267,9 +263,68 @@ fn handle_initialize() -> Result<serde_json::Value, String> {
     }))
 }
 
-fn handle_tools_list() -> Result<serde_json::Value, String> {
+fn handle_tools_list(_server: &Arc<LockFreeDaemonServer>) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
-        "tools": []
+        "tools": [
+            {
+                "name": "create_session",
+                "description": "Create a new conversation session with optional name and description",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Optional name for the session"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Optional description for the session"
+                        }
+                    }
+                }
+            }
+        ]
+    }))
+}
+
+async fn handle_tool_call(
+    server: &Arc<LockFreeDaemonServer>,
+    request: &MCPRequest,
+) -> Result<serde_json::Value, String> {
+    let params = request.params.as_ref()
+        .ok_or_else(|| "Missing params in tool call".to_string())?;
+
+    let tool_name = params["name"].as_str()
+        .ok_or_else(|| "Missing tool name".to_string())?;
+
+    let arguments = &params["arguments"];
+
+    debug!("Tool call: {} with args: {:?}", tool_name, arguments);
+
+    match tool_name {
+        "create_session" => handle_create_session(server, arguments).await,
+        _ => Err(format!("Unknown tool: {}", tool_name)),
+    }
+}
+
+async fn handle_create_session(
+    server: &Arc<LockFreeDaemonServer>,
+    arguments: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let name = arguments["name"].as_str().map(|s| s.to_string());
+    let description = arguments["description"].as_str().map(|s| s.to_string());
+
+    let session_id = server
+        .memory_system
+        .create_session(name, description)
+        .await
+        .map_err(|e| format!("Failed to create session: {}", e))?;
+
+    Ok(serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": format!("Created new session: {}", session_id)
+        }]
     }))
 }
 

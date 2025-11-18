@@ -213,6 +213,136 @@ async fn test_stress_concurrent_requests() {
 }
 
 #[tokio::test]
+async fn test_create_session_tool() {
+    let (port, _temp_dir) = start_test_daemon().await;
+    let client = Client::new();
+
+    // Call create_session tool
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "create_session",
+            "arguments": {
+                "name": "Test Session",
+                "description": "Integration test session"
+            }
+        }
+    });
+
+    let response = client
+        .post(format!("http://127.0.0.1:{}/mcp", port))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+
+    let body: serde_json::Value = response.json().await.unwrap();
+
+    // Verify response structure
+    assert_eq!(body["jsonrpc"], "2.0");
+    assert_eq!(body["id"], 1);
+    assert!(body["result"].is_object());
+    assert!(body["result"]["content"].is_array());
+
+    // Verify session was created
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("Created new session"));
+    assert!(text.contains("-")); // UUID contains dashes
+}
+
+#[tokio::test]
+async fn test_tools_list_includes_create_session() {
+    let (port, _temp_dir) = start_test_daemon().await;
+    let client = Client::new();
+
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {}
+    });
+
+    let response = client
+        .post(format!("http://127.0.0.1:{}/mcp", port))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(body["result"]["tools"].is_array());
+
+    let tools = body["result"]["tools"].as_array().unwrap();
+    assert!(!tools.is_empty());
+
+    let create_session_tool = tools.iter()
+        .find(|t| t["name"] == "create_session");
+
+    assert!(create_session_tool.is_some());
+    let tool = create_session_tool.unwrap();
+    assert!(tool["description"].is_string());
+    assert!(tool["inputSchema"].is_object());
+}
+
+#[tokio::test]
+async fn test_concurrent_create_sessions() {
+    let (port, _temp_dir) = start_test_daemon().await;
+
+    // Create 10 sessions concurrently
+    let tasks: Vec<_> = (0..10)
+        .map(|i| {
+            let port = port;
+            tokio::spawn(async move {
+                let client = Client::new();
+
+                let request = json!({
+                    "jsonrpc": "2.0",
+                    "id": i,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "create_session",
+                        "arguments": {
+                            "name": format!("Session {}", i),
+                            "description": format!("Concurrent test {}", i)
+                        }
+                    }
+                });
+
+                let response = client
+                    .post(format!("http://127.0.0.1:{}/mcp", port))
+                    .json(&request)
+                    .send()
+                    .await
+                    .unwrap();
+
+                assert!(response.status().is_success());
+
+                let body: serde_json::Value = response.json().await.unwrap();
+                assert!(body["result"].is_object());
+
+                body["result"]["content"][0]["text"].as_str().unwrap().to_string()
+            })
+        })
+        .collect();
+
+    // Wait for all sessions to be created
+    let results = futures::future::join_all(tasks).await;
+
+    // Verify all succeeded
+    assert_eq!(results.len(), 10);
+    for result in results {
+        let text = result.unwrap();
+        assert!(text.contains("Created new session"));
+    }
+}
+
+#[tokio::test]
 async fn test_daemon_shares_rocksdb() {
     let (port, temp_dir) = start_test_daemon().await;
     let client = Client::new();
