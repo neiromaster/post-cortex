@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 pub mod core;
+pub mod daemon;
 pub mod graph;
 pub mod session;
 pub mod storage;
