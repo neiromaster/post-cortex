@@ -2504,3 +2504,278 @@ pub async fn get_vectorization_stats() -> Result<MCPToolResult> {
         "Vectorization stats require the 'embeddings' feature to be enabled. Please rebuild with --features embeddings".to_string()
     ))
 }
+
+// ============================================================================
+// Workspace Management Tools
+// ============================================================================
+
+/// Create a new workspace for organizing related sessions
+#[instrument(skip_all, fields(workspace_name = %name))]
+pub async fn create_workspace(
+    name: String,
+    description: String,
+) -> Result<MCPToolResult> {
+    info!("MCP-TOOLS: create_workspace() called with name: '{}'", name);
+    let system = get_memory_system().await?;
+
+    let workspace_id = system.workspace_manager.create_workspace(name.clone(), description.clone());
+
+    // Persist workspace to RocksDB
+    if let Err(e) = system.storage().save_workspace_metadata(
+        workspace_id,
+        &name,
+        &description,
+        &Vec::new(), // session_ids - empty initially
+    ).await {
+        error!("Failed to persist workspace: {}", e);
+        return Ok(MCPToolResult::error(format!("Failed to persist workspace: {}", e)));
+    }
+
+    info!("Created workspace {} with ID {}", name, workspace_id);
+
+    Ok(MCPToolResult::success(
+        format!("Created workspace '{}' successfully", name),
+        Some(serde_json::json!({
+            "workspace_id": workspace_id.to_string(),
+            "name": name,
+            "description": description,
+            "session_count": 0
+        })),
+    ))
+}
+
+/// Get workspace details by ID
+#[instrument(skip_all, fields(workspace_id = %workspace_id))]
+pub async fn get_workspace(workspace_id: Uuid) -> Result<MCPToolResult> {
+    info!("MCP-TOOLS: get_workspace() called for ID: {}", workspace_id);
+    let system = get_memory_system().await?;
+
+    match system.workspace_manager.get_workspace(&workspace_id) {
+        Some(workspace) => {
+            let sessions = workspace.get_all_sessions();
+            let metadata = workspace.metadata.load();
+
+            Ok(MCPToolResult::success(
+                format!("Retrieved workspace '{}'", workspace.name),
+                Some(serde_json::json!({
+                    "workspace_id": workspace.id.to_string(),
+                    "name": workspace.name,
+                    "description": workspace.description,
+                    "created_at": workspace.created_at.duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    "session_count": sessions.len(),
+                    "sessions": sessions.iter().map(|(id, role)| {
+                        serde_json::json!({
+                            "session_id": id.to_string(),
+                            "role": format!("{:?}", role)
+                        })
+                    }).collect::<Vec<_>>(),
+                    "metadata": {
+                        "project_type": metadata.project_type,
+                        "tags": metadata.tags,
+                        "root_paths": metadata.root_paths.iter()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .collect::<Vec<_>>()
+                    }
+                })),
+            ))
+        }
+        None => Ok(MCPToolResult::error(format!(
+            "Workspace {} not found",
+            workspace_id
+        ))),
+    }
+}
+
+/// List all workspaces
+#[instrument(skip_all)]
+pub async fn list_workspaces() -> Result<MCPToolResult> {
+    info!("MCP-TOOLS: list_workspaces() called");
+    let system = get_memory_system().await?;
+
+    let workspaces = system.workspace_manager.list_workspaces();
+    let total_count = workspaces.len();
+
+    let workspace_list: Vec<serde_json::Value> = workspaces
+        .iter()
+        .map(|ws| {
+            let sessions = ws.get_all_sessions();
+            serde_json::json!({
+                "workspace_id": ws.id.to_string(),
+                "name": ws.name,
+                "description": ws.description,
+                "session_count": sessions.len(),
+                "created_at": ws.created_at.duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            })
+        })
+        .collect();
+
+    Ok(MCPToolResult::success(
+        format!("Found {} workspace(s)", total_count),
+        Some(serde_json::json!({
+            "total_count": total_count,
+            "workspaces": workspace_list
+        })),
+    ))
+}
+
+/// Delete a workspace
+#[instrument(skip_all, fields(workspace_id = %workspace_id))]
+pub async fn delete_workspace(workspace_id: Uuid) -> Result<MCPToolResult> {
+    info!("MCP-TOOLS: delete_workspace() called for ID: {}", workspace_id);
+    let system = get_memory_system().await?;
+
+    match system.workspace_manager.delete_workspace(&workspace_id) {
+        Some(workspace) => {
+            // Delete from RocksDB
+            if let Err(e) = system.storage().delete_workspace(workspace_id).await {
+                error!("Failed to delete workspace from storage: {}", e);
+                return Ok(MCPToolResult::error(format!(
+                    "Failed to delete workspace from storage: {}",
+                    e
+                )));
+            }
+
+            info!("Deleted workspace '{}' ({})", workspace.name, workspace_id);
+
+            Ok(MCPToolResult::success(
+                format!("Deleted workspace '{}' successfully", workspace.name),
+                Some(serde_json::json!({
+                    "workspace_id": workspace_id.to_string(),
+                    "name": workspace.name
+                })),
+            ))
+        }
+        None => Ok(MCPToolResult::error(format!(
+            "Workspace {} not found",
+            workspace_id
+        ))),
+    }
+}
+
+/// Add a session to a workspace with a specific role
+#[instrument(skip_all, fields(workspace_id = %workspace_id, session_id = %session_id))]
+pub async fn add_session_to_workspace(
+    workspace_id: Uuid,
+    session_id: Uuid,
+    role: String,
+) -> Result<MCPToolResult> {
+    info!(
+        "MCP-TOOLS: add_session_to_workspace() called - workspace: {}, session: {}, role: {}",
+        workspace_id, session_id, role
+    );
+    let system = get_memory_system().await?;
+
+    // Parse role
+    use crate::workspace::SessionRole;
+    let session_role = match role.to_lowercase().as_str() {
+        "primary" => SessionRole::Primary,
+        "related" => SessionRole::Related,
+        "dependency" => SessionRole::Dependency,
+        "shared" => SessionRole::Shared,
+        _ => {
+            return Ok(MCPToolResult::error(format!(
+                "Invalid role '{}'. Must be one of: primary, related, dependency, shared",
+                role
+            )));
+        }
+    };
+
+    // Verify session exists
+    if system.get_session(session_id).await.is_err() {
+        return Ok(MCPToolResult::error(format!(
+            "Session {} not found",
+            session_id
+        )));
+    }
+
+    // Add session to workspace
+    if let Err(e) = system.workspace_manager.add_session_to_workspace(
+        &workspace_id,
+        session_id,
+        session_role,
+    ) {
+        return Ok(MCPToolResult::error(e));
+    }
+
+    // Persist to RocksDB
+    if let Err(e) = system.storage().add_session_to_workspace(
+        workspace_id,
+        session_id,
+        session_role,
+    ).await {
+        error!("Failed to persist workspace-session association: {}", e);
+        return Ok(MCPToolResult::error(format!(
+            "Failed to persist workspace-session association: {}",
+            e
+        )));
+    }
+
+    info!(
+        "Added session {} to workspace {} with role {:?}",
+        session_id, workspace_id, session_role
+    );
+
+    Ok(MCPToolResult::success(
+        format!(
+            "Added session to workspace with role '{}'",
+            role
+        ),
+        Some(serde_json::json!({
+            "workspace_id": workspace_id.to_string(),
+            "session_id": session_id.to_string(),
+            "role": format!("{:?}", session_role)
+        })),
+    ))
+}
+
+/// Remove a session from a workspace
+#[instrument(skip_all, fields(workspace_id = %workspace_id, session_id = %session_id))]
+pub async fn remove_session_from_workspace(
+    workspace_id: Uuid,
+    session_id: Uuid,
+) -> Result<MCPToolResult> {
+    info!(
+        "MCP-TOOLS: remove_session_from_workspace() called - workspace: {}, session: {}",
+        workspace_id, session_id
+    );
+    let system = get_memory_system().await?;
+
+    match system.workspace_manager.remove_session_from_workspace(&workspace_id, &session_id) {
+        Ok(Some(role)) => {
+            // Remove from RocksDB
+            if let Err(e) = system.storage().remove_session_from_workspace(
+                workspace_id,
+                session_id,
+            ).await {
+                error!("Failed to remove session from workspace in storage: {}", e);
+                return Ok(MCPToolResult::error(format!(
+                    "Failed to remove session from workspace in storage: {}",
+                    e
+                )));
+            }
+
+            info!(
+                "Removed session {} from workspace {} (was role {:?})",
+                session_id, workspace_id, role
+            );
+
+            Ok(MCPToolResult::success(
+                "Removed session from workspace successfully".to_string(),
+                Some(serde_json::json!({
+                    "workspace_id": workspace_id.to_string(),
+                    "session_id": session_id.to_string(),
+                    "previous_role": format!("{:?}", role)
+                })),
+            ))
+        }
+        Ok(None) => Ok(MCPToolResult::error(format!(
+            "Session {} not found in workspace {}",
+            session_id, workspace_id
+        ))),
+        Err(e) => Ok(MCPToolResult::error(e)),
+    }
+}

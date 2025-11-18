@@ -288,6 +288,150 @@ impl RealRocksDBStorage {
         let key = format!("session:{}", session_id);
         Ok(self.db.get(key.as_bytes())?.is_some())
     }
+
+    // ========================================================================
+    // Workspace Persistence Methods
+    // ========================================================================
+
+    /// Save workspace metadata to RocksDB
+    pub async fn save_workspace_metadata(
+        &self,
+        workspace_id: Uuid,
+        name: &str,
+        description: &str,
+        session_ids: &Vec<Uuid>,
+    ) -> Result<()> {
+        use crate::workspace::SessionRole;
+
+        info!(
+            "RealRocksDBStorage: Saving workspace {} ({})",
+            name, workspace_id
+        );
+
+        #[derive(Serialize, Deserialize)]
+        struct WorkspaceData {
+            id: Uuid,
+            name: String,
+            description: String,
+            sessions: Vec<(Uuid, SessionRole)>,
+            created_at: u64,
+        }
+
+        let workspace_data = WorkspaceData {
+            id: workspace_id,
+            name: name.to_string(),
+            description: description.to_string(),
+            sessions: session_ids.iter().map(|id| (*id, SessionRole::Primary)).collect(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+
+        let data = bincode::serde::encode_to_vec(&workspace_data, bincode::config::standard())
+            .map_err(|e| anyhow::anyhow!("Failed to serialize workspace: {}", e))?;
+
+        let key = format!("workspace:{}", workspace_id);
+        self.db.put(key.as_bytes(), data)?;
+
+        info!("RealRocksDBStorage: Workspace {} saved successfully", workspace_id);
+        Ok(())
+    }
+
+    /// Delete workspace from RocksDB
+    pub async fn delete_workspace(&self, workspace_id: Uuid) -> Result<()> {
+        info!("RealRocksDBStorage: Deleting workspace {}", workspace_id);
+
+        let key = format!("workspace:{}", workspace_id);
+        self.db.delete(key.as_bytes())?;
+
+        // Also delete all workspace-session associations
+        let ws_session_prefix = format!("ws_session:{}:", workspace_id);
+        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
+        let mut keys_to_delete = Vec::new();
+
+        for item in iter {
+            let (key, _) = item?;
+            let key_str = String::from_utf8_lossy(&key);
+
+            if key_str.starts_with(&ws_session_prefix) {
+                keys_to_delete.push(key.to_vec());
+            }
+        }
+
+        let mut batch = WriteBatch::default();
+        for key in keys_to_delete {
+            batch.delete(&key);
+        }
+        self.db.write(batch)?;
+
+        info!("RealRocksDBStorage: Workspace {} deleted successfully", workspace_id);
+        Ok(())
+    }
+
+    /// Add session to workspace association
+    pub async fn add_session_to_workspace(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+        role: crate::workspace::SessionRole,
+    ) -> Result<()> {
+        info!(
+            "RealRocksDBStorage: Adding session {} to workspace {} with role {:?}",
+            session_id, workspace_id, role
+        );
+
+        #[derive(Serialize, Deserialize)]
+        struct WorkspaceSession {
+            workspace_id: Uuid,
+            session_id: Uuid,
+            role: crate::workspace::SessionRole,
+            added_at: u64,
+        }
+
+        let ws_session = WorkspaceSession {
+            workspace_id,
+            session_id,
+            role,
+            added_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+
+        let data = bincode::serde::encode_to_vec(&ws_session, bincode::config::standard())
+            .map_err(|e| anyhow::anyhow!("Failed to serialize workspace-session: {}", e))?;
+
+        let key = format!("ws_session:{}:{}", workspace_id, session_id);
+        self.db.put(key.as_bytes(), data)?;
+
+        info!(
+            "RealRocksDBStorage: Session {} added to workspace {} successfully",
+            session_id, workspace_id
+        );
+        Ok(())
+    }
+
+    /// Remove session from workspace association
+    pub async fn remove_session_from_workspace(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<()> {
+        info!(
+            "RealRocksDBStorage: Removing session {} from workspace {}",
+            session_id, workspace_id
+        );
+
+        let key = format!("ws_session:{}:{}", workspace_id, session_id);
+        self.db.delete(key.as_bytes())?;
+
+        info!(
+            "RealRocksDBStorage: Session {} removed from workspace {} successfully",
+            session_id, workspace_id
+        );
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

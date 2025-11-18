@@ -216,6 +216,28 @@ pub enum StorageMessage {
         checkpoint_id: Uuid,
         response_tx: Sender<Result<crate::storage::rocksdb_storage::SessionCheckpoint, String>>,
     },
+    SaveWorkspaceMetadata {
+        workspace_id: Uuid,
+        name: String,
+        description: String,
+        session_ids: Vec<Uuid>,
+        response_tx: Sender<Result<(), String>>,
+    },
+    DeleteWorkspace {
+        workspace_id: Uuid,
+        response_tx: Sender<Result<(), String>>,
+    },
+    AddSessionToWorkspace {
+        workspace_id: Uuid,
+        session_id: Uuid,
+        role: crate::workspace::SessionRole,
+        response_tx: Sender<Result<(), String>>,
+    },
+    RemoveSessionFromWorkspace {
+        workspace_id: Uuid,
+        session_id: Uuid,
+        response_tx: Sender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -1262,6 +1284,91 @@ impl StorageActorHandle {
             .map_err(|_| "Storage operation timed out".to_string())?
             .ok_or_else(|| "Storage actor response channel closed".to_string())?
     }
+
+    pub async fn save_workspace_metadata(
+        &self,
+        workspace_id: Uuid,
+        name: &str,
+        description: &str,
+        session_ids: &Vec<Uuid>,
+    ) -> Result<(), String> {
+        let (response_tx, mut response_rx) = channel::<Result<(), String>>(1);
+
+        self.sender
+            .send(StorageMessage::SaveWorkspaceMetadata {
+                workspace_id,
+                name: name.to_string(),
+                description: description.to_string(),
+                session_ids: session_ids.clone(),
+                response_tx,
+            })
+            .map_err(|_| "Storage actor unavailable".to_string())?;
+
+        tokio::time::timeout(self.operation_timeout, response_rx.recv())
+            .await
+            .map_err(|_| "Storage operation timed out".to_string())?
+            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+    }
+
+    pub async fn delete_workspace(&self, workspace_id: Uuid) -> Result<(), String> {
+        let (response_tx, mut response_rx) = channel::<Result<(), String>>(1);
+
+        self.sender
+            .send(StorageMessage::DeleteWorkspace {
+                workspace_id,
+                response_tx,
+            })
+            .map_err(|_| "Storage actor unavailable".to_string())?;
+
+        tokio::time::timeout(self.operation_timeout, response_rx.recv())
+            .await
+            .map_err(|_| "Storage operation timed out".to_string())?
+            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+    }
+
+    pub async fn add_session_to_workspace(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+        role: crate::workspace::SessionRole,
+    ) -> Result<(), String> {
+        let (response_tx, mut response_rx) = channel::<Result<(), String>>(1);
+
+        self.sender
+            .send(StorageMessage::AddSessionToWorkspace {
+                workspace_id,
+                session_id,
+                role,
+                response_tx,
+            })
+            .map_err(|_| "Storage actor unavailable".to_string())?;
+
+        tokio::time::timeout(self.operation_timeout, response_rx.recv())
+            .await
+            .map_err(|_| "Storage operation timed out".to_string())?
+            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+    }
+
+    pub async fn remove_session_from_workspace(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<(), String> {
+        let (response_tx, mut response_rx) = channel::<Result<(), String>>(1);
+
+        self.sender
+            .send(StorageMessage::RemoveSessionFromWorkspace {
+                workspace_id,
+                session_id,
+                response_tx,
+            })
+            .map_err(|_| "Storage actor unavailable".to_string())?;
+
+        tokio::time::timeout(self.operation_timeout, response_rx.recv())
+            .await
+            .map_err(|_| "Storage operation timed out".to_string())?
+            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+    }
 }
 
 impl StorageActor {
@@ -1398,6 +1505,56 @@ impl StorageActor {
                 let result = self
                     .storage
                     .load_checkpoint(checkpoint_id)
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = response_tx.send(result).await;
+            }
+            StorageMessage::SaveWorkspaceMetadata {
+                workspace_id,
+                name,
+                description,
+                session_ids,
+                response_tx,
+            } => {
+                let result = self
+                    .storage
+                    .save_workspace_metadata(workspace_id, &name, &description, &session_ids)
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = response_tx.send(result).await;
+            }
+            StorageMessage::DeleteWorkspace {
+                workspace_id,
+                response_tx,
+            } => {
+                let result = self
+                    .storage
+                    .delete_workspace(workspace_id)
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = response_tx.send(result).await;
+            }
+            StorageMessage::AddSessionToWorkspace {
+                workspace_id,
+                session_id,
+                role,
+                response_tx,
+            } => {
+                let result = self
+                    .storage
+                    .add_session_to_workspace(workspace_id, session_id, role)
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = response_tx.send(result).await;
+            }
+            StorageMessage::RemoveSessionFromWorkspace {
+                workspace_id,
+                session_id,
+                response_tx,
+            } => {
+                let result = self
+                    .storage
+                    .remove_session_from_workspace(workspace_id, session_id)
                     .await
                     .map_err(|e| e.to_string());
                 let _ = response_tx.send(result).await;
@@ -1979,6 +2136,44 @@ impl<'a> StorageCompatibilityWrapper<'a> {
 
     pub async fn write(&self) -> &StorageActorHandle {
         self.actor
+    }
+
+    // Workspace storage proxy methods
+    pub async fn save_workspace_metadata(
+        &self,
+        workspace_id: Uuid,
+        name: &str,
+        description: &str,
+        session_ids: &Vec<Uuid>,
+    ) -> Result<(), String> {
+        self.actor
+            .save_workspace_metadata(workspace_id, name, description, session_ids)
+            .await
+    }
+
+    pub async fn delete_workspace(&self, workspace_id: Uuid) -> Result<(), String> {
+        self.actor.delete_workspace(workspace_id).await
+    }
+
+    pub async fn add_session_to_workspace(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+        role: crate::workspace::SessionRole,
+    ) -> Result<(), String> {
+        self.actor
+            .add_session_to_workspace(workspace_id, session_id, role)
+            .await
+    }
+
+    pub async fn remove_session_from_workspace(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<(), String> {
+        self.actor
+            .remove_session_from_workspace(workspace_id, session_id)
+            .await
     }
 }
 
