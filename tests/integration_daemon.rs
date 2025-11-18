@@ -281,8 +281,7 @@ async fn test_tools_list_includes_create_session() {
     let tools = body["result"]["tools"].as_array().unwrap();
     assert!(!tools.is_empty());
 
-    let create_session_tool = tools.iter()
-        .find(|t| t["name"] == "create_session");
+    let create_session_tool = tools.iter().find(|t| t["name"] == "create_session");
 
     assert!(create_session_tool.is_some());
     let tool = create_session_tool.unwrap();
@@ -326,7 +325,10 @@ async fn test_concurrent_create_sessions() {
                 let body: serde_json::Value = response.json().await.unwrap();
                 assert!(body["result"].is_object());
 
-                body["result"]["content"][0]["text"].as_str().unwrap().to_string()
+                body["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
             })
         })
         .collect();
@@ -403,7 +405,11 @@ async fn test_update_conversation_context_tool() {
 
     let body: serde_json::Value = response.json().await.unwrap();
     let session_text = body["result"]["content"][0]["text"].as_str().unwrap();
-    let session_id = session_text.split("Created new session: ").nth(1).unwrap().trim();
+    let session_id = session_text
+        .split("Created new session: ")
+        .nth(1)
+        .unwrap()
+        .trim();
 
     // Now update context
     let update_request = json!({
@@ -460,7 +466,11 @@ async fn test_semantic_search_session_tool() {
 
     let body: serde_json::Value = response.json().await.unwrap();
     let session_text = body["result"]["content"][0]["text"].as_str().unwrap();
-    let session_id = session_text.split("Created new session: ").nth(1).unwrap().trim();
+    let session_id = session_text
+        .split("Created new session: ")
+        .nth(1)
+        .unwrap()
+        .trim();
 
     // Search in session
     let search_request = json!({
@@ -521,7 +531,6 @@ async fn test_list_sessions_debug() {
     use reqwest::Client;
     use serde_json::json;
     use std::time::Duration;
-    use tempfile::TempDir;
 
     let temp_dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -559,5 +568,8 @@ async fn test_list_sessions_debug() {
         .unwrap();
 
     let body: serde_json::Value = response.json().await.unwrap();
-    println!("Response body: {}", serde_json::to_string_pretty(&body).unwrap());
+    println!(
+        "Response body: {}",
+        serde_json::to_string_pretty(&body).unwrap()
+    );
 }
