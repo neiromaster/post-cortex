@@ -411,13 +411,11 @@ impl ActiveSession {
             referenced_entities.len()
         );
 
-        eprintln!("EPRINTLN TEST: About to log Explicit entities");
         info!(
             "Explicit entities: creates={}, references={}",
             extracted_entities.len(),
             referenced_entities.len()
         );
-        eprintln!("EPRINTLN TEST: After Explicit entities log");
 
         // If no entities were explicitly provided, extract from content
         if extracted_entities.is_empty() && referenced_entities.is_empty() {

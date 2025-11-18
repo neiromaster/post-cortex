@@ -803,16 +803,8 @@ pub async fn update_conversation_context(
 
     // Convert to ContextUpdate
     let update = interaction_to_context_update(interaction, code_reference)?;
-    eprintln!(
-        "MCP: ContextUpdate created with {} entities",
-        update.creates_entities.len()
-    );
 
     // Add to session
-    eprintln!(
-        "MCP: About to call add_incremental_update for session {}",
-        session_id
-    );
     let description = update.content.description.clone();
     let metadata = Some(
         serde_json::to_value(&update)
@@ -822,10 +814,6 @@ pub async fn update_conversation_context(
         .add_incremental_update(session_id, description, metadata)
         .await
         .map_err(string_to_anyhow)?;
-    eprintln!(
-        "MCP: add_incremental_update completed successfully for session {}",
-        session_id
-    );
 
     Ok(MCPToolResult::success(
         "Context updated successfully".to_string(),
