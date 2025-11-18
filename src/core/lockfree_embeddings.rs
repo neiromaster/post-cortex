@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn test_concurrency_controller() {
-        let controller = LockFreeConcurrencyController::new(2);
+        let controller = Arc::new(LockFreeConcurrencyController::new(2));
 
         // Should be able to acquire 2 permits
         let permit1 = controller.try_acquire();

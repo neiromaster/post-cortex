@@ -940,6 +940,7 @@ async fn handle_get_summary(
 }
 
 /// Error type for HTTP handlers
+#[allow(dead_code)]
 #[derive(Debug)]
 struct AppError(String);
 
