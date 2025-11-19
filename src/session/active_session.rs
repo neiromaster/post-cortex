@@ -287,6 +287,25 @@ impl ActiveSession {
         // Update structured context based on update type
         match &update.update_type {
             UpdateType::QuestionAnswered => {
+                // Add question to open questions (since Q&A implies there was a question)
+                self.current_state.open_questions.push(
+                    crate::core::structured_context::QuestionItem {
+                        question: update.content.title.clone(),
+                        context: update.content.description.clone(),
+                        status: crate::core::structured_context::QuestionStatus::Answered,
+                        timestamp: update.timestamp,
+                        last_updated: update.timestamp,
+                    },
+                );
+
+                // Extract key concepts from Q&A content
+                self.extract_and_add_concepts(
+                    &update.content.title,
+                    &update.content.description,
+                    &update.content.details,
+                    update.timestamp,
+                );
+
                 // Add to conversation flow
                 self.current_state.conversation_flow.push(
                     crate::core::structured_context::FlowItem {
@@ -298,6 +317,14 @@ impl ActiveSession {
                 );
             }
             UpdateType::ProblemSolved => {
+                // Extract key concepts from problem/solution content
+                self.extract_and_add_concepts(
+                    &update.content.title,
+                    &update.content.description,
+                    &update.content.details,
+                    update.timestamp,
+                );
+
                 // Add to conversation flow
                 self.current_state.conversation_flow.push(
                     crate::core::structured_context::FlowItem {
@@ -309,6 +336,14 @@ impl ActiveSession {
                 );
             }
             UpdateType::CodeChanged => {
+                // Extract key concepts from code change content
+                self.extract_and_add_concepts(
+                    &update.content.title,
+                    &update.content.description,
+                    &update.content.details,
+                    update.timestamp,
+                );
+
                 // Add to conversation flow
                 self.current_state.conversation_flow.push(
                     crate::core::structured_context::FlowItem {
@@ -388,6 +423,142 @@ impl ActiveSession {
         }
 
         Ok(())
+    }
+
+    /// Extract key concepts from content and add them to key_concepts
+    fn extract_and_add_concepts(
+        &mut self,
+        title: &str,
+        description: &str,
+        details: &[String],
+        timestamp: chrono::DateTime<Utc>,
+    ) {
+        use std::collections::HashSet;
+
+        let mut concept_entities = HashSet::new();
+        let full_text = format!("{} {} {}", title, description, details.join(" "));
+
+        // Extract entities as potential concepts
+        let extracted_entities = self.extract_entities_from_text(&full_text);
+
+        // Filter for concept-worthy entities (score threshold)
+        for entity in extracted_entities {
+            let score = self.calculate_entity_score(&entity, &full_text);
+            // Lower threshold to include more concepts (was 2.5, now 1.5)
+            if score >= 1.5 && entity.len() >= 3 && entity.len() <= 25 {
+                concept_entities.insert(entity);
+            }
+        }
+
+        // Also extract explicit concept indicators
+        self.extract_explicit_concepts(&full_text, &mut concept_entities);
+
+        // Convert to ConceptItem structures and add to key_concepts
+        for concept_name in concept_entities {
+            // Skip if this concept already exists (avoid duplicates)
+            if self
+                .current_state
+                .key_concepts
+                .iter()
+                .any(|c| c.name.to_lowercase() == concept_name.to_lowercase())
+            {
+                continue;
+            }
+
+            self.current_state
+                .key_concepts
+                .push(crate::core::structured_context::ConceptItem {
+                    name: concept_name.clone(),
+                    definition: format!("Key concept extracted from: {}", title),
+                    examples: vec![],
+                    related_concepts: vec![],
+                    timestamp,
+                });
+
+            // Limit the number of concepts to prevent overflow
+            if self.current_state.key_concepts.len() >= 50 {
+                self.current_state.key_concepts.remove(0); // Remove oldest
+            }
+        }
+    }
+
+    /// Extract explicit concept indicators from text
+    fn extract_explicit_concepts(
+        &self,
+        text: &str,
+        concepts: &mut std::collections::HashSet<String>,
+    ) {
+        let text_lower = text.to_lowercase();
+
+        // Look for concept indicators
+        let concept_indicators = [
+            "concept",
+            "principle",
+            "pattern",
+            "approach",
+            "methodology",
+            "framework",
+            "architecture",
+            "design",
+            "strategy",
+            "technique",
+            "algorithm",
+            "model",
+            "abstraction",
+            "paradigm",
+        ];
+
+        // Extract terms following concept indicators
+        for indicator in &concept_indicators {
+            let pattern = format!(
+                r"{}\s+(is|are|was|were|involves|uses|implements|provides)\s+([a-zA-Z][a-zA-Z\s]{{2,30}})",
+                indicator
+            );
+            if let Ok(regex) = regex::Regex::new(&pattern) {
+                for cap in regex.captures_iter(text) {
+                    if let Some(concept_match) = cap.get(2) {
+                        let concept = concept_match.as_str().trim();
+                        if concept.len() >= 3 && concept.len() <= 25 {
+                            concepts.insert(concept.to_lowercase());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract quoted definitions (often indicate concepts)
+        let quoted_patterns = [
+            r#"concept\s+of\s+[""']([^""']{2,25})[""']"#,
+            r#"definition\s+[""']([^""']{2,25})[""']"#,
+            r#"principle\s+[""']([^""']{2,25})[""']"#,
+        ];
+
+        for pattern in quoted_patterns {
+            if let Ok(regex) = regex::Regex::new(pattern) {
+                for cap in regex.captures_iter(&text_lower) {
+                    if let Some(concept_match) = cap.get(1) {
+                        let concept = concept_match.as_str().trim();
+                        if concept.len() >= 3 && concept.len() <= 25 {
+                            concepts.insert(concept.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract CamelCase terms (often classes, concepts, frameworks)
+        let camelcase_regex = regex::Regex::new(r"\b[A-Z][a-zA-Z]*[A-Z][a-zA-Z]*\b")
+            .expect("CamelCase regex should compile");
+        for cap in camelcase_regex.find_iter(text) {
+            let camelcase_term = cap.as_str();
+            if camelcase_term.len() >= 4 && camelcase_term.len() <= 20 {
+                // Filter out common words that happen to be CamelCase
+                let common_camelcase = ["This", "That", "These", "Those", "When", "Where", "What"];
+                if !common_camelcase.contains(&camelcase_term) {
+                    concepts.insert(camelcase_term.to_lowercase());
+                }
+            }
+        }
     }
 
     async fn update_entity_graph(&mut self, update: &ContextUpdate) -> anyhow::Result<()> {
@@ -719,11 +890,13 @@ impl ActiveSession {
 
             // Extract all words with frequency counting
             let words: Vec<&str> = text.split_whitespace().collect();
-            let mut term_freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut term_freq: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
 
             for word in &words {
                 // Clean punctuation from word boundaries
-                let cleaned = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+                let cleaned =
+                    word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
                 if !cleaned.is_empty() {
                     *term_freq.entry(cleaned.to_lowercase()).or_insert(0) += 1;
                 }
@@ -780,8 +953,12 @@ impl ActiveSession {
                 }
 
                 // Known technical suffixes (language-agnostic)
-                if term.ends_with("engine") || term.ends_with("config") || term.ends_with("manager")
-                    || term.ends_with("handler") || term.ends_with("vectorizer") || term.ends_with("controller")
+                if term.ends_with("engine")
+                    || term.ends_with("config")
+                    || term.ends_with("manager")
+                    || term.ends_with("handler")
+                    || term.ends_with("vectorizer")
+                    || term.ends_with("controller")
                 {
                     score += 2.5;
                 }
@@ -822,7 +999,10 @@ impl ActiveSession {
             }
 
             let final_result = entities.into_iter().take(20).collect::<Vec<_>>();
-            info!("Intelligent multilingual extracted entities: {:?}", final_result);
+            info!(
+                "Intelligent multilingual extracted entities: {:?}",
+                final_result
+            );
             return final_result;
         }
 
@@ -1241,41 +1421,167 @@ impl ActiveSession {
     fn is_bulgarian_stop_word(&self, word: &str) -> bool {
         let bulgarian_stop_words = [
             // Common Bulgarian stop words
-            "и", "в", "на", "за", "с", "от", "до", "по", "при", "без",
-            "е", "са", "си", "съм", "беше", "бяха", "ще", "би",
-            "това", "тази", "тези", "този", "онзи", "която", "който", "които",
-            "как", "какво", "къде", "кога", "защо", "кой",
-            "не", "да", "ли", "че", "ако", "когато", "докато",
-            "или", "но", "а", "още", "само", "вече", "тук", "там",
-            "всички", "всяка", "всеки", "няколко", "много", "малко",
-            "го", "му", "й", "ги", "им", "ме", "ти", "ви", "ни",
-            "един", "една", "едно", "два", "две", "три",
+            "и",
+            "в",
+            "на",
+            "за",
+            "с",
+            "от",
+            "до",
+            "по",
+            "при",
+            "без",
+            "е",
+            "са",
+            "си",
+            "съм",
+            "беше",
+            "бяха",
+            "ще",
+            "би",
+            "това",
+            "тази",
+            "тези",
+            "този",
+            "онзи",
+            "която",
+            "който",
+            "които",
+            "как",
+            "какво",
+            "къде",
+            "кога",
+            "защо",
+            "кой",
+            "не",
+            "да",
+            "ли",
+            "че",
+            "ако",
+            "когато",
+            "докато",
+            "или",
+            "но",
+            "а",
+            "още",
+            "само",
+            "вече",
+            "тук",
+            "там",
+            "всички",
+            "всяка",
+            "всеки",
+            "няколко",
+            "много",
+            "малко",
+            "го",
+            "му",
+            "й",
+            "ги",
+            "им",
+            "ме",
+            "ти",
+            "ви",
+            "ни",
+            "един",
+            "една",
+            "едно",
+            "два",
+            "две",
+            "три",
             // Common verbs
-            "прави", "прави", "работи", "работят", "има", "имат",
-            "мога", "може", "могат", "трябва", "искам", "иска",
-            "използва", "използваме", "използвам", "използват",
-            "осигурява", "осигуряват", "позволява", "позволяват",
-            "оркестрира", "оркестрират", "върна", "връща", "връщат",
-            "търсения", "търсене", "достъп", "данни", "параметри",
-            "сесии", "сесия", "система", "системи",
+            "прави",
+            "прави",
+            "работи",
+            "работят",
+            "има",
+            "имат",
+            "мога",
+            "може",
+            "могат",
+            "трябва",
+            "искам",
+            "иска",
+            "използва",
+            "използваме",
+            "използвам",
+            "използват",
+            "осигурява",
+            "осигуряват",
+            "позволява",
+            "позволяват",
+            "оркестрира",
+            "оркестрират",
+            "върна",
+            "връща",
+            "връщат",
+            "търсения",
+            "търсене",
+            "достъп",
+            "данни",
+            "параметри",
+            "сесии",
+            "сесия",
+            "система",
+            "системи",
             // Common prepositions and conjunctions
-            "през", "след", "преди", "около", "между", "над", "под",
-            "към", "чрез", "според", "заради", "поради",
+            "през",
+            "след",
+            "преди",
+            "около",
+            "между",
+            "над",
+            "под",
+            "към",
+            "чрез",
+            "според",
+            "заради",
+            "поради",
             // Common adjectives and descriptors
-            "различни", "различен", "различна", "различно",
-            "семантични", "семантичен", "семантична", "семантично", "семантичните",
-            "приблизително", "приблизителен", "приблизителна",
-            "по-добър", "по-добра", "по-добро", "по-добре",
-            "висока", "висок", "високо", "високи",
-            "вместо", "заради", "поради",
-            "индексът", "индекса", "индекси",
-            "използване", "използването",
+            "различни",
+            "различен",
+            "различна",
+            "различно",
+            "семантични",
+            "семантичен",
+            "семантична",
+            "семантично",
+            "семантичните",
+            "приблизително",
+            "приблизителен",
+            "приблизителна",
+            "по-добър",
+            "по-добра",
+            "по-добро",
+            "по-добре",
+            "висока",
+            "висок",
+            "високо",
+            "високи",
+            "вместо",
+            "заради",
+            "поради",
+            "индексът",
+            "индекса",
+            "индекси",
+            "използване",
+            "използването",
             // Common nouns that are too generic
-            "начин", "начина", "начини",
-            "вид", "вида", "видове",
-            "тип", "типа", "типове",
-            "част", "частта", "части",
-            "случай", "случая", "случаи",
+            "начин",
+            "начина",
+            "начини",
+            "вид",
+            "вида",
+            "видове",
+            "тип",
+            "типа",
+            "типове",
+            "част",
+            "частта",
+            "части",
+            "случай",
+            "случая",
+            "случаи",
         ];
 
         bulgarian_stop_words.contains(&word)

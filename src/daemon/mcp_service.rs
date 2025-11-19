@@ -342,7 +342,13 @@ impl PostCortexService {
         )
         .await
         {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
+            Ok(result) => {
+                let mut contents = vec![Content::text(result.message)];
+                if let Some(data) = result.data {
+                    contents.push(Content::text(format!("\n\nStructured Data:\n{}", serde_json::to_string_pretty(&data).unwrap_or_default())));
+                }
+                Ok(CallToolResult::success(contents))
+            }
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
     }

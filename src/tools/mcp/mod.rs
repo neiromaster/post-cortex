@@ -1744,7 +1744,7 @@ pub async fn get_structured_summary(
 
         // Conservative estimate: 1 token ≈ 3 characters for JSON (includes wrapper overhead)
         let estimated_tokens = full_json.len() / 3;
-        const MAX_TOKENS: usize = 25_000;
+        const MAX_TOKENS: usize = 50_000; // Increased from 25_000 to reduce auto-compaction
 
         if estimated_tokens > MAX_TOKENS {
             log::warn!(

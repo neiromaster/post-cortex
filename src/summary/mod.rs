@@ -55,11 +55,11 @@ impl SummaryOptions {
     /// Create compact mode options (returns minimal data)
     pub fn compact() -> Self {
         Self {
-            decisions_limit: Some(5),
-            entities_limit: Some(10),
+            decisions_limit: Some(10), // Increased from 5
+            entities_limit: Some(15),  // Increased from 10
             questions_limit: Some(5),
             concepts_limit: Some(5),
-            min_confidence: Some(0.6),
+            min_confidence: Some(0.4), // Lowered from 0.6 to include more decisions
             compact: true,
         }
     }
