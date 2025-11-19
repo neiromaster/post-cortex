@@ -1967,6 +1967,25 @@ impl LockFreeConversationMemorySystem {
         self.config.embeddings_model_type = model_type;
         Ok(())
     }
+
+    /// Clear query cache to prevent stale vector IDs after restart
+    ///
+    /// This should be called on daemon startup to ensure cached query results
+    /// don't reference vector IDs from before the restart, which would cause
+    /// incorrect similarity calculations.
+    pub async fn clear_query_cache(&self) -> Result<(), String> {
+        #[cfg(feature = "embeddings")]
+        {
+            if let Some(vectorizer) = self.content_vectorizer.get() {
+                vectorizer
+                    .clear_query_cache()
+                    .await
+                    .map_err(|e| format!("Failed to clear query cache: {}", e))?;
+                info!("Query cache cleared successfully");
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Wrapper to make ArcSwap compatible with RwLock API for MCP compatibility

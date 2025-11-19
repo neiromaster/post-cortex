@@ -51,6 +51,13 @@ pub async fn start_rmcp_daemon(config: DaemonConfig) -> Result<(), String> {
     crate::tools::mcp::inject_memory_system(memory_system.clone());
     info!("Memory system injected into MCP tools");
 
+    // Clear query cache to prevent stale vector IDs from previous runs
+    if let Err(e) = memory_system.clear_query_cache().await {
+        error!("Failed to clear query cache on startup: {}", e);
+    } else {
+        info!("Query cache cleared successfully on daemon startup");
+    }
+
     // Create SSE server configuration
     let sse_config = SseServerConfig {
         bind: addr,
