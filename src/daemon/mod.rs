@@ -24,9 +24,13 @@
 //! Claude Code instances to share a single RocksDB instance.
 
 pub mod config;
+pub mod mcp_service;
+pub mod rmcp_server;
 pub mod server;
 pub mod sse;
 
 pub use config::DaemonConfig;
+pub use mcp_service::PostCortexService;
+pub use rmcp_server::start_rmcp_daemon;
 pub use server::LockFreeDaemonServer;
 pub use sse::LockFreeSSEBroadcaster;

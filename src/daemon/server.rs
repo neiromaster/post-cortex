@@ -22,21 +22,25 @@
 //!
 //! Provides HTTP/JSON-RPC endpoint for MCP protocol with zero blocking operations.
 
-use crate::daemon::sse::LockFreeSSEBroadcaster;
 use crate::ConversationMemorySystem;
+use crate::daemon::sse::LockFreeSSEBroadcaster;
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, Sse},
+    },
     routing::{get, post},
-    Json, Router,
 };
 use dashmap::DashMap;
+use futures::stream::{self};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, error, info};
@@ -65,6 +69,9 @@ pub struct LockFreeDaemonServer {
     /// Lock-free SSE broadcaster
     sse_broadcaster: Arc<LockFreeSSEBroadcaster>,
 
+    /// Map session IDs to SSE client IDs for routing responses
+    session_to_client: Arc<DashMap<String, Uuid>>,
+
     /// Atomic metrics
     connection_counter: Arc<AtomicU64>,
     total_requests: Arc<AtomicU64>,
@@ -73,7 +80,10 @@ pub struct LockFreeDaemonServer {
 
 impl LockFreeDaemonServer {
     pub async fn new(config: DaemonConfig) -> Result<Self, String> {
-        info!("Initializing lock-free daemon server on {}:{}", config.host, config.port);
+        info!(
+            "Initializing lock-free daemon server on {}:{}",
+            config.host, config.port
+        );
 
         // Create memory system
         let system_config = crate::SystemConfig {
@@ -97,6 +107,7 @@ impl LockFreeDaemonServer {
             memory_system,
             active_connections: Arc::new(DashMap::new()),
             sse_broadcaster: Arc::new(LockFreeSSEBroadcaster::new()),
+            session_to_client: Arc::new(DashMap::new()),
             connection_counter: Arc::new(AtomicU64::new(0)),
             total_requests: Arc::new(AtomicU64::new(0)),
             config,
@@ -111,10 +122,11 @@ impl LockFreeDaemonServer {
 
         let server = Arc::new(self);
 
-        // Build router
+        // Build router - SSE transport with separate endpoints
         let app = Router::new()
             .route("/health", get(health_check))
-            .route("/mcp", post(handle_mcp_request))
+            .route("/sse", get(handle_sse_stream))
+            .route("/message", post(handle_mcp_request))
             .route("/stats", get(get_stats))
             .layer(CorsLayer::permissive())
             .with_state(server.clone());
@@ -197,16 +209,86 @@ async fn get_stats(State(server): State<Arc<LockFreeDaemonServer>>) -> impl Into
     Json(server.get_statistics())
 }
 
-/// MCP request handler
+/// SSE stream endpoint for Streamable HTTP transport
+async fn handle_sse_stream(State(server): State<Arc<LockFreeDaemonServer>>) -> impl IntoResponse {
+    use axum::http::header::{HeaderMap, HeaderName, HeaderValue};
+
+    let client_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4().to_string();
+    let rx = server.sse_broadcaster.register_client(client_id);
+
+    // Map session ID to client ID for routing POST responses
+    server
+        .session_to_client
+        .insert(session_id.clone(), client_id);
+
+    info!(
+        "SSE stream connected: {} (session: {})",
+        client_id, session_id
+    );
+
+    let stream = stream::unfold(
+        (rx, client_id, session_id.clone(), server.clone(), true),
+        |(mut rx, client_id, session_id, server, first)| async move {
+            // Send initial endpoint event
+            if first {
+                let endpoint_event = Event::default()
+                    .event("endpoint")
+                    .id("0")
+                    .json_data(&serde_json::json!({"uri": "/message"}))
+                    .ok()?;
+                return Some((
+                    Ok::<_, std::convert::Infallible>(endpoint_event),
+                    (rx, client_id, session_id, server, false),
+                ));
+            }
+
+            // Wait for events from broadcaster
+            match rx.recv().await {
+                Some(event) => {
+                    let sse_event = Event::default()
+                        .event(&event.event_type)
+                        .id(event.id)
+                        .json_data(&event.data)
+                        .ok()?;
+                    Some((
+                        Ok::<_, std::convert::Infallible>(sse_event),
+                        (rx, client_id, session_id, server, false),
+                    ))
+                }
+                None => {
+                    // Cleanup on disconnect
+                    server.sse_broadcaster.unregister_client(&client_id);
+                    server.session_to_client.remove(&session_id);
+                    info!(
+                        "SSE stream disconnected: {} (session: {})",
+                        client_id, session_id
+                    );
+                    None
+                }
+            }
+        },
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("mcp-session-id"),
+        HeaderValue::from_str(&session_id).unwrap(),
+    );
+
+    (headers, Sse::new(stream))
+}
+
+/// MCP request handler - Streamable HTTP transport (2025-03-26)
+/// Returns response directly as JSON (not via SSE)
 async fn handle_mcp_request(
     State(server): State<Arc<LockFreeDaemonServer>>,
     Json(request): Json<MCPRequest>,
 ) -> impl IntoResponse {
     debug!("Handling MCP request: {}", request.method);
-
     server.total_requests.fetch_add(1, Ordering::Relaxed);
 
-    // Route to appropriate handler based on method
+    // Route to appropriate handler
     let result = match request.method.as_str() {
         "initialize" => handle_initialize(),
         "tools/list" => handle_tools_list(&server),
@@ -214,6 +296,7 @@ async fn handle_mcp_request(
         _ => Err(format!("Unknown method: {}", request.method)),
     };
 
+    // Build and return JSON-RPC response
     Json(match result {
         Ok(result_data) => MCPResponse {
             jsonrpc: "2.0".to_string(),
@@ -235,7 +318,7 @@ async fn handle_mcp_request(
 
 fn handle_initialize() -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": "2025-03-26",
         "capabilities": {
             "tools": {}
         },
@@ -281,10 +364,13 @@ async fn handle_tool_call(
     server: &Arc<LockFreeDaemonServer>,
     request: &MCPRequest,
 ) -> Result<serde_json::Value, String> {
-    let params = request.params.as_ref()
+    let params = request
+        .params
+        .as_ref()
         .ok_or_else(|| "Missing params in tool call".to_string())?;
 
-    let tool_name = params["name"].as_str()
+    let tool_name = params["name"]
+        .as_str()
         .ok_or_else(|| "Missing tool name".to_string())?;
 
     let arguments = &params["arguments"];
@@ -327,7 +413,9 @@ async fn handle_tool_call(
         "list_workspaces" => handle_list_workspaces(server).await,
         "delete_workspace" => handle_delete_workspace(server, arguments).await,
         "add_session_to_workspace" => handle_add_session_to_workspace(server, arguments).await,
-        "remove_session_from_workspace" => handle_remove_session_from_workspace(server, arguments).await,
+        "remove_session_from_workspace" => {
+            handle_remove_session_from_workspace(server, arguments).await
+        }
 
         _ => Err(format!("Unknown tool: {}", tool_name)),
     }
@@ -364,8 +452,8 @@ async fn handle_load_session(
         .as_str()
         .ok_or_else(|| "Missing session_id".to_string())?;
 
-    let uuid = uuid::Uuid::parse_str(session_id)
-        .map_err(|e| format!("Invalid session_id: {}", e))?;
+    let uuid =
+        uuid::Uuid::parse_str(session_id).map_err(|e| format!("Invalid session_id: {}", e))?;
 
     let result = load_session(uuid)
         .await
@@ -383,8 +471,8 @@ async fn handle_update_context(
     _server: &Arc<LockFreeDaemonServer>,
     arguments: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    use crate::tools::mcp::update_conversation_context;
     use crate::core::context_update::CodeReference;
+    use crate::tools::mcp::update_conversation_context;
 
     let interaction_type = arguments["interaction_type"]
         .as_str()
@@ -407,15 +495,16 @@ async fn handle_update_context(
     }
 
     // Parse code_reference if provided
-    let code_reference: Option<CodeReference> = arguments.get("code_reference")
+    let code_reference: Option<CodeReference> = arguments
+        .get("code_reference")
         .and_then(|v| serde_json::from_value(v.clone()).ok());
 
     // Parse session_id
     let session_id_str = arguments["session_id"]
         .as_str()
         .ok_or_else(|| "Missing session_id".to_string())?;
-    let session_id = uuid::Uuid::parse_str(session_id_str)
-        .map_err(|e| format!("Invalid session_id: {}", e))?;
+    let session_id =
+        uuid::Uuid::parse_str(session_id_str).map_err(|e| format!("Invalid session_id: {}", e))?;
 
     let result = update_conversation_context(interaction_type, content, code_reference, session_id)
         .await
@@ -438,18 +527,28 @@ async fn handle_semantic_search(
     let session_id_str = arguments["session_id"]
         .as_str()
         .ok_or_else(|| "Missing session_id".to_string())?;
-    let session_id = uuid::Uuid::parse_str(session_id_str)
-        .map_err(|e| format!("Invalid session_id: {}", e))?;
+    let session_id =
+        uuid::Uuid::parse_str(session_id_str).map_err(|e| format!("Invalid session_id: {}", e))?;
 
     let query = arguments["query"]
         .as_str()
         .ok_or_else(|| "Missing query".to_string())?
         .to_string();
 
-    let limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let date_from = arguments.get("date_from").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let date_to = arguments.get("date_to").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let interaction_type = arguments.get("interaction_type")
+    let limit = arguments
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let date_from = arguments
+        .get("date_from")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let date_to = arguments
+        .get("date_to")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let interaction_type = arguments
+        .get("interaction_type")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
@@ -457,9 +556,16 @@ async fn handle_semantic_search(
                 .collect::<Vec<String>>()
         });
 
-    let result = semantic_search_session(session_id, query, limit, date_from, date_to, interaction_type)
-        .await
-        .map_err(|e| format!("Failed to search: {}", e))?;
+    let result = semantic_search_session(
+        session_id,
+        query,
+        limit,
+        date_from,
+        date_to,
+        interaction_type,
+    )
+    .await
+    .map_err(|e| format!("Failed to search: {}", e))?;
 
     Ok(serde_json::json!({
         "content": [{
@@ -516,8 +622,8 @@ async fn handle_query_context(
     let session_id_str = arguments["session_id"]
         .as_str()
         .ok_or_else(|| "Missing session_id".to_string())?;
-    let session_id = uuid::Uuid::parse_str(session_id_str)
-        .map_err(|e| format!("Invalid session_id: {}", e))?;
+    let session_id =
+        uuid::Uuid::parse_str(session_id_str).map_err(|e| format!("Invalid session_id: {}", e))?;
 
     let result = query_conversation_context(query_type, parameters, session_id)
         .await
@@ -535,14 +641,14 @@ async fn handle_bulk_update_context(
     _server: &Arc<LockFreeDaemonServer>,
     arguments: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    use crate::tools::mcp::{bulk_update_conversation_context, ContextUpdateItem};
+    use crate::tools::mcp::{ContextUpdateItem, bulk_update_conversation_context};
 
     // Parse session_id
     let session_id_str = arguments["session_id"]
         .as_str()
         .ok_or_else(|| "Missing session_id".to_string())?;
-    let session_id = uuid::Uuid::parse_str(session_id_str)
-        .map_err(|e| format!("Invalid session_id: {}", e))?;
+    let session_id =
+        uuid::Uuid::parse_str(session_id_str).map_err(|e| format!("Invalid session_id: {}", e))?;
 
     // Parse updates array into Vec<ContextUpdateItem>
     let updates_json = arguments["updates"]
@@ -579,10 +685,20 @@ async fn handle_semantic_search_global(
         .ok_or_else(|| "Missing query".to_string())?
         .to_string();
 
-    let limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let date_from = arguments.get("date_from").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let date_to = arguments.get("date_to").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let interaction_type = arguments.get("interaction_type")
+    let limit = arguments
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let date_from = arguments
+        .get("date_from")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let date_to = arguments
+        .get("date_to")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let interaction_type = arguments
+        .get("interaction_type")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
@@ -611,15 +727,18 @@ async fn handle_find_related_content(
     let session_id_str = arguments["session_id"]
         .as_str()
         .ok_or_else(|| "Missing session_id".to_string())?;
-    let session_id = uuid::Uuid::parse_str(session_id_str)
-        .map_err(|e| format!("Invalid session_id: {}", e))?;
+    let session_id =
+        uuid::Uuid::parse_str(session_id_str).map_err(|e| format!("Invalid session_id: {}", e))?;
 
     let topic = arguments["topic"]
         .as_str()
         .ok_or_else(|| "Missing topic".to_string())?
         .to_string();
 
-    let limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let limit = arguments
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
 
     let result = find_related_content(session_id, topic, limit)
         .await
@@ -665,11 +784,17 @@ async fn handle_update_session_metadata(
     let session_id_str = arguments["session_id"]
         .as_str()
         .ok_or_else(|| "Missing session_id".to_string())?;
-    let session_id = uuid::Uuid::parse_str(session_id_str)
-        .map_err(|e| format!("Invalid session_id: {}", e))?;
+    let session_id =
+        uuid::Uuid::parse_str(session_id_str).map_err(|e| format!("Invalid session_id: {}", e))?;
 
-    let name = arguments.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let description = arguments.get("description").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let name = arguments
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let description = arguments
+        .get("description")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let result = update_session_metadata(session_id, name, description)
         .await
@@ -692,8 +817,8 @@ async fn handle_create_checkpoint(
     let session_id_str = arguments["session_id"]
         .as_str()
         .ok_or_else(|| "Missing session_id".to_string())?;
-    let session_id = uuid::Uuid::parse_str(session_id_str)
-        .map_err(|e| format!("Invalid session_id: {}", e))?;
+    let session_id =
+        uuid::Uuid::parse_str(session_id_str).map_err(|e| format!("Invalid session_id: {}", e))?;
 
     let result = create_session_checkpoint(session_id)
         .await
@@ -741,7 +866,10 @@ async fn handle_get_key_insights(
         .ok_or_else(|| "Missing session_id".to_string())?
         .to_string();
 
-    let limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let limit = arguments
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
 
     let result = get_key_insights(session_id, limit)
         .await
@@ -766,8 +894,14 @@ async fn handle_get_entity_importance(
         .ok_or_else(|| "Missing session_id".to_string())?
         .to_string();
 
-    let limit = arguments.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let min_importance = arguments.get("min_importance").and_then(|v| v.as_f64()).map(|v| v as f32);
+    let limit = arguments
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let min_importance = arguments
+        .get("min_importance")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
 
     let result = get_entity_importance_analysis(session_id, limit, min_importance)
         .await
@@ -792,13 +926,23 @@ async fn handle_get_entity_network(
         .ok_or_else(|| "Missing session_id".to_string())?
         .to_string();
 
-    let center_entity = arguments.get("center_entity").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let max_entities = arguments.get("max_entities").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let max_relationships = arguments.get("max_relationships").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let center_entity = arguments
+        .get("center_entity")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let max_entities = arguments
+        .get("max_entities")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let max_relationships = arguments
+        .get("max_relationships")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
 
-    let result = get_entity_network_view(session_id, center_entity, max_entities, max_relationships)
-        .await
-        .map_err(|e| format!("Failed to get entity network: {}", e))?;
+    let result =
+        get_entity_network_view(session_id, center_entity, max_entities, max_relationships)
+            .await
+            .map_err(|e| format!("Failed to get entity network: {}", e))?;
 
     Ok(serde_json::json!({
         "content": [{
@@ -840,8 +984,8 @@ async fn handle_vectorize_session(
     let session_id_str = arguments["session_id"]
         .as_str()
         .ok_or_else(|| "Missing session_id".to_string())?;
-    let session_id = uuid::Uuid::parse_str(session_id_str)
-        .map_err(|e| format!("Invalid session_id: {}", e))?;
+    let session_id =
+        uuid::Uuid::parse_str(session_id_str).map_err(|e| format!("Invalid session_id: {}", e))?;
 
     let result = vectorize_session(session_id)
         .await
@@ -901,11 +1045,26 @@ async fn handle_get_summary(
         .to_string();
 
     let compact = arguments.get("compact").and_then(|v| v.as_bool());
-    let decisions_limit = arguments.get("decisions_limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let entities_limit = arguments.get("entities_limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let questions_limit = arguments.get("questions_limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let concepts_limit = arguments.get("concepts_limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let min_confidence = arguments.get("min_confidence").and_then(|v| v.as_f64()).map(|v| v as f32);
+    let decisions_limit = arguments
+        .get("decisions_limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let entities_limit = arguments
+        .get("entities_limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let questions_limit = arguments
+        .get("questions_limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let concepts_limit = arguments
+        .get("concepts_limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+    let min_confidence = arguments
+        .get("min_confidence")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
 
     let result = get_structured_summary(
         session_id,
@@ -914,7 +1073,7 @@ async fn handle_get_summary(
         questions_limit,
         concepts_limit,
         min_confidence,
-        compact
+        compact,
     )
     .await
     .map_err(|e| format!("Failed to get summary: {}", e))?;
@@ -1039,8 +1198,8 @@ async fn handle_add_session_to_workspace(
     let session_id_str = arguments["session_id"]
         .as_str()
         .ok_or_else(|| "Missing session_id".to_string())?;
-    let session_id = uuid::Uuid::parse_str(session_id_str)
-        .map_err(|e| format!("Invalid session_id: {}", e))?;
+    let session_id =
+        uuid::Uuid::parse_str(session_id_str).map_err(|e| format!("Invalid session_id: {}", e))?;
 
     let role = arguments["role"]
         .as_str()
@@ -1074,8 +1233,8 @@ async fn handle_remove_session_from_workspace(
     let session_id_str = arguments["session_id"]
         .as_str()
         .ok_or_else(|| "Missing session_id".to_string())?;
-    let session_id = uuid::Uuid::parse_str(session_id_str)
-        .map_err(|e| format!("Invalid session_id: {}", e))?;
+    let session_id =
+        uuid::Uuid::parse_str(session_id_str).map_err(|e| format!("Invalid session_id: {}", e))?;
 
     let result = remove_session_from_workspace(workspace_id, session_id)
         .await
@@ -1119,7 +1278,12 @@ mod tests {
         let config = DaemonConfig {
             host: "127.0.0.1".to_string(),
             port: 0, // Random port
-            data_directory: tempfile::tempdir().unwrap().path().to_str().unwrap().to_string(),
+            data_directory: tempfile::tempdir()
+                .unwrap()
+                .path()
+                .to_str()
+                .unwrap()
+                .to_string(),
         };
 
         let server = LockFreeDaemonServer::new(config).await;
@@ -1135,7 +1299,12 @@ mod tests {
         let config = DaemonConfig {
             host: "127.0.0.1".to_string(),
             port: 0,
-            data_directory: tempfile::tempdir().unwrap().path().to_str().unwrap().to_string(),
+            data_directory: tempfile::tempdir()
+                .unwrap()
+                .path()
+                .to_str()
+                .unwrap()
+                .to_string(),
         };
 
         let server = LockFreeDaemonServer::new(config).await.unwrap();

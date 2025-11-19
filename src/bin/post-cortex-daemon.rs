@@ -26,7 +26,7 @@
 //!   post-cortex-daemon status   - Check if daemon is running
 //!   post-cortex-daemon stop     - Stop running daemon
 
-use post_cortex::daemon::{DaemonConfig, LockFreeDaemonServer};
+use post_cortex::daemon::{DaemonConfig, start_rmcp_daemon};
 use std::env;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -105,7 +105,8 @@ fn print_usage() {
 }
 
 async fn start_daemon() -> Result<(), String> {
-    println!("Starting Post-Cortex daemon...");
+    println!("Starting Post-Cortex daemon with RMCP SSE transport...");
+    println!();
 
     // Load configuration (priority: env vars > config file > defaults)
     let config = DaemonConfig::load();
@@ -113,25 +114,8 @@ async fn start_daemon() -> Result<(), String> {
     // Validate configuration
     config.validate()?;
 
-    println!("Configuration:");
-    println!("  Host: {}", config.host);
-    println!("  Port: {}", config.port);
-    println!("  Data Directory: {}", config.data_directory);
-    println!();
-
-    // Create and start daemon server
-    let server = LockFreeDaemonServer::new(config).await?;
-
-    println!("Daemon server initialized successfully");
-    println!("Starting HTTP server...");
-    println!();
-    println!("Server is running. Press Ctrl+C to stop.");
-
-    // Start server (blocks until shutdown)
-    server.start().await?;
-
-    println!("Daemon stopped");
-    Ok(())
+    // Start RMCP-based SSE daemon (blocks until shutdown)
+    start_rmcp_daemon(config).await
 }
 
 async fn check_status() -> Result<(), String> {
