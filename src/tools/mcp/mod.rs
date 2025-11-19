@@ -32,7 +32,7 @@ use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 // Compatibility alias for existing code
@@ -192,7 +192,7 @@ pub async fn get_memory_system() -> Result<Arc<ConversationMemorySystem>> {
     #[cfg(feature = "embeddings")]
     {
         config.enable_embeddings = true;
-        config.embeddings_model_type = "StaticSimilarityMRL".to_string();
+        config.embeddings_model_type = "MiniLM".to_string();
         config.auto_vectorize_on_update = true;
         config.cross_session_search_enabled = true;
         info!("MCP-TOOLS: Embeddings enabled in config");
@@ -263,7 +263,11 @@ pub async fn update_conversation_context_with_system(
                 let question = content.get("question").cloned().unwrap_or_default();
                 let answer = content.get("answer").cloned().unwrap_or_default();
                 let extras = extract_extras(&["question", "answer"]);
-                Interaction::QA { question, answer, details: extras }
+                Interaction::QA {
+                    question,
+                    answer,
+                    details: extras,
+                }
             }
             "code_change" => {
                 let description = content.get("description").cloned().unwrap_or_default();
@@ -279,7 +283,11 @@ pub async fn update_conversation_context_with_system(
                 let problem = content.get("problem").cloned().unwrap_or_default();
                 let solution = content.get("solution").cloned().unwrap_or_default();
                 let extras = extract_extras(&["problem", "solution"]);
-                Interaction::ProblemSolved { problem, solution, details: extras }
+                Interaction::ProblemSolved {
+                    problem,
+                    solution,
+                    details: extras,
+                }
             }
             "decision_made" => {
                 let decision = content.get("decision").cloned().unwrap_or_default();
@@ -570,10 +578,26 @@ pub async fn load_session_checkpoint_with_system(
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Interaction {
-    QA { question: String, answer: String, details: Vec<String> },
-    CodeChange { file_path: String, diff: String, details: Vec<String> },
-    ProblemSolved { problem: String, solution: String, details: Vec<String> },
-    DecisionMade { decision: String, rationale: String, details: Vec<String> },
+    QA {
+        question: String,
+        answer: String,
+        details: Vec<String>,
+    },
+    CodeChange {
+        file_path: String,
+        diff: String,
+        details: Vec<String>,
+    },
+    ProblemSolved {
+        problem: String,
+        solution: String,
+        details: Vec<String>,
+    },
+    DecisionMade {
+        decision: String,
+        rationale: String,
+        details: Vec<String>,
+    },
 }
 
 // pub struct LLMClient {
@@ -665,7 +689,11 @@ pub async fn bulk_update_conversation_context(
                     .cloned()
                     .unwrap_or_default();
                 let extras = extract_extras(&["question", "answer"]);
-                Interaction::QA { question, answer, details: extras }
+                Interaction::QA {
+                    question,
+                    answer,
+                    details: extras,
+                }
             }
             "code_change" => {
                 let description = update_item
@@ -697,7 +725,11 @@ pub async fn bulk_update_conversation_context(
                     .cloned()
                     .unwrap_or_default();
                 let extras = extract_extras(&["problem", "solution"]);
-                Interaction::ProblemSolved { problem, solution, details: extras }
+                Interaction::ProblemSolved {
+                    problem,
+                    solution,
+                    details: extras,
+                }
             }
             "decision_made" => {
                 let decision = update_item
@@ -777,6 +809,23 @@ pub async fn bulk_update_conversation_context(
         )
     };
 
+    // Auto-vectorize after all bulk updates are complete
+    #[cfg(feature = "embeddings")]
+    {
+        if let Err(e) = system.auto_vectorize_if_enabled(session_id).await {
+            // Don't fail the bulk operation if auto-vectorization fails
+            warn!(
+                "Auto-vectorization warning after bulk updates for session {}: {}",
+                session_id, e
+            );
+        } else {
+            info!(
+                "Auto-vectorization completed after {} bulk updates for session {}",
+                success_count, session_id
+            );
+        }
+    }
+
     Ok(MCPToolResult::success(
         message,
         Some(serde_json::json!({
@@ -813,7 +862,11 @@ pub async fn update_conversation_context(
             let question = content.get("question").cloned().unwrap_or_default();
             let answer = content.get("answer").cloned().unwrap_or_default();
             let extras = extract_extras(&["question", "answer"]);
-            Interaction::QA { question, answer, details: extras }
+            Interaction::QA {
+                question,
+                answer,
+                details: extras,
+            }
         }
         "code_change" => {
             let description = content.get("description").cloned().unwrap_or_default();
@@ -829,7 +882,11 @@ pub async fn update_conversation_context(
             let problem = content.get("problem").cloned().unwrap_or_default();
             let solution = content.get("solution").cloned().unwrap_or_default();
             let extras = extract_extras(&["problem", "solution"]);
-            Interaction::ProblemSolved { problem, solution, details: extras }
+            Interaction::ProblemSolved {
+                problem,
+                solution,
+                details: extras,
+            }
         }
         "decision_made" => {
             let decision = content.get("decision").cloned().unwrap_or_default();
@@ -1368,7 +1425,11 @@ fn interaction_to_context_update(
     let timestamp = chrono::Utc::now();
 
     let (update_type, content) = match interaction {
-        Interaction::QA { question, answer, details } => (
+        Interaction::QA {
+            question,
+            answer,
+            details,
+        } => (
             UpdateType::QuestionAnswered,
             crate::core::context_update::UpdateContent {
                 title: question.clone(),
@@ -1378,7 +1439,11 @@ fn interaction_to_context_update(
                 implications: vec![],
             },
         ),
-        Interaction::CodeChange { file_path, diff, details } => (
+        Interaction::CodeChange {
+            file_path,
+            diff,
+            details,
+        } => (
             UpdateType::CodeChanged,
             crate::core::context_update::UpdateContent {
                 title: file_path.clone(),
@@ -1388,7 +1453,11 @@ fn interaction_to_context_update(
                 implications: vec!["Code functionality updated".to_string()],
             },
         ),
-        Interaction::ProblemSolved { problem, solution, details } => (
+        Interaction::ProblemSolved {
+            problem,
+            solution,
+            details,
+        } => (
             UpdateType::ProblemSolved,
             crate::core::context_update::UpdateContent {
                 title: problem.clone(),
@@ -2226,7 +2295,11 @@ pub async fn semantic_search_global(
             }
 
             // Build formatted message with full results
-            let mut message = format!("Found {} global semantic search results for query: '{}'\n\n", results.len(), query);
+            let mut message = format!(
+                "Found {} global semantic search results for query: '{}'\n\n",
+                results.len(),
+                query
+            );
 
             for (idx, r) in results.iter().enumerate() {
                 message.push_str(&format!(
@@ -2237,7 +2310,10 @@ pub async fn semantic_search_global(
                     r.combined_score,
                     r.similarity_quality()
                 ));
-                message.push_str(&format!("   Time: {}\n", r.timestamp.format("%Y-%m-%d %H:%M:%S")));
+                message.push_str(&format!(
+                    "   Time: {}\n",
+                    r.timestamp.format("%Y-%m-%d %H:%M:%S")
+                ));
                 message.push_str(&format!("   {}\n", r.score_explanation()));
 
                 // Truncate text_content if too long
@@ -2374,7 +2450,11 @@ pub async fn semantic_search_session(
             }
 
             // Build formatted message with full results
-            let mut message = format!("Found {} semantic search results for query: '{}'\n\n", results.len(), query);
+            let mut message = format!(
+                "Found {} semantic search results for query: '{}'\n\n",
+                results.len(),
+                query
+            );
 
             for (idx, r) in results.iter().enumerate() {
                 message.push_str(&format!(
@@ -2384,7 +2464,10 @@ pub async fn semantic_search_session(
                     r.combined_score,
                     r.similarity_quality()
                 ));
-                message.push_str(&format!("   Time: {}\n", r.timestamp.format("%Y-%m-%d %H:%M:%S")));
+                message.push_str(&format!(
+                    "   Time: {}\n",
+                    r.timestamp.format("%Y-%m-%d %H:%M:%S")
+                ));
                 message.push_str(&format!("   {}\n", r.score_explanation()));
 
                 // Truncate text_content if too long
@@ -2465,7 +2548,11 @@ pub async fn find_related_content(
     match system.find_related_content(session_id, &topic, limit).await {
         Ok(results) => {
             // Build formatted message with full results
-            let mut message = format!("Found {} related content items for topic: '{}'\n\n", results.len(), topic);
+            let mut message = format!(
+                "Found {} related content items for topic: '{}'\n\n",
+                results.len(),
+                topic
+            );
 
             for (idx, r) in results.iter().enumerate() {
                 message.push_str(&format!(
@@ -2474,7 +2561,10 @@ pub async fn find_related_content(
                     r.content_type,
                     r.combined_score
                 ));
-                message.push_str(&format!("   Time: {}\n", r.timestamp.format("%Y-%m-%d %H:%M:%S")));
+                message.push_str(&format!(
+                    "   Time: {}\n",
+                    r.timestamp.format("%Y-%m-%d %H:%M:%S")
+                ));
 
                 // Truncate text_content if too long
                 let content = if r.text_content.len() > 500 {
@@ -2706,7 +2796,6 @@ pub fn get_all_tool_schemas() -> Vec<serde_json::Value> {
                 "required": ["session_id"]
             }
         }),
-
         // Context Operations (3 tools)
         json!({
             "name": "update_conversation_context",
@@ -2747,7 +2836,6 @@ pub fn get_all_tool_schemas() -> Vec<serde_json::Value> {
                 "required": ["session_id", "updates"]
             }
         }),
-
         // Semantic Search (5 tools - all available regardless of embeddings feature)
         json!({
             "name": "semantic_search_session",
@@ -2811,7 +2899,6 @@ pub fn get_all_tool_schemas() -> Vec<serde_json::Value> {
                 "type": "object"
             }
         }),
-
         // Analysis & Insights (6 tools)
         json!({
             "name": "get_structured_summary",
@@ -2891,7 +2978,6 @@ pub fn get_all_tool_schemas() -> Vec<serde_json::Value> {
                 "required": ["session_id"]
             }
         }),
-
         // Utility (2 tools)
         json!({
             "name": "create_session_checkpoint",
@@ -2911,7 +2997,6 @@ pub fn get_all_tool_schemas() -> Vec<serde_json::Value> {
                 "type": "object"
             }
         }),
-
         // Workspace Management (5 tools)
         json!({
             "name": "create_workspace",
@@ -2988,24 +3073,30 @@ pub fn get_all_tool_schemas() -> Vec<serde_json::Value> {
 
 /// Create a new workspace for organizing related sessions
 #[instrument(skip_all, fields(workspace_name = %name))]
-pub async fn create_workspace(
-    name: String,
-    description: String,
-) -> Result<MCPToolResult> {
+pub async fn create_workspace(name: String, description: String) -> Result<MCPToolResult> {
     info!("MCP-TOOLS: create_workspace() called with name: '{}'", name);
     let system = get_memory_system().await?;
 
-    let workspace_id = system.workspace_manager.create_workspace(name.clone(), description.clone());
+    let workspace_id = system
+        .workspace_manager
+        .create_workspace(name.clone(), description.clone());
 
     // Persist workspace to RocksDB
-    if let Err(e) = system.storage().save_workspace_metadata(
-        workspace_id,
-        &name,
-        &description,
-        &Vec::new(), // session_ids - empty initially
-    ).await {
+    if let Err(e) = system
+        .storage()
+        .save_workspace_metadata(
+            workspace_id,
+            &name,
+            &description,
+            &Vec::new(), // session_ids - empty initially
+        )
+        .await
+    {
         error!("Failed to persist workspace: {}", e);
-        return Ok(MCPToolResult::error(format!("Failed to persist workspace: {}", e)));
+        return Ok(MCPToolResult::error(format!(
+            "Failed to persist workspace: {}",
+            e
+        )));
     }
 
     info!("Created workspace {} with ID {}", name, workspace_id);
@@ -3097,10 +3188,19 @@ pub async fn list_workspaces() -> Result<MCPToolResult> {
             .iter()
             .map(|ws| {
                 let sessions = ws.get_all_sessions();
-                format!("  • {} (ID: {}, {} sessions)", ws.name, ws.id, sessions.len())
+                format!(
+                    "  • {} (ID: {}, {} sessions)",
+                    ws.name,
+                    ws.id,
+                    sessions.len()
+                )
             })
             .collect();
-        format!("Found {} workspace(s):\n{}", total_count, workspace_summaries.join("\n"))
+        format!(
+            "Found {} workspace(s):\n{}",
+            total_count,
+            workspace_summaries.join("\n")
+        )
     };
 
     Ok(MCPToolResult::success(
@@ -3115,7 +3215,10 @@ pub async fn list_workspaces() -> Result<MCPToolResult> {
 /// Delete a workspace
 #[instrument(skip_all, fields(workspace_id = %workspace_id))]
 pub async fn delete_workspace(workspace_id: Uuid) -> Result<MCPToolResult> {
-    info!("MCP-TOOLS: delete_workspace() called for ID: {}", workspace_id);
+    info!(
+        "MCP-TOOLS: delete_workspace() called for ID: {}",
+        workspace_id
+    );
     let system = get_memory_system().await?;
 
     match system.workspace_manager.delete_workspace(&workspace_id) {
@@ -3183,20 +3286,20 @@ pub async fn add_session_to_workspace(
     }
 
     // Add session to workspace
-    if let Err(e) = system.workspace_manager.add_session_to_workspace(
-        &workspace_id,
-        session_id,
-        session_role,
-    ) {
+    if let Err(e) =
+        system
+            .workspace_manager
+            .add_session_to_workspace(&workspace_id, session_id, session_role)
+    {
         return Ok(MCPToolResult::error(e));
     }
 
     // Persist to RocksDB
-    if let Err(e) = system.storage().add_session_to_workspace(
-        workspace_id,
-        session_id,
-        session_role,
-    ).await {
+    if let Err(e) = system
+        .storage()
+        .add_session_to_workspace(workspace_id, session_id, session_role)
+        .await
+    {
         error!("Failed to persist workspace-session association: {}", e);
         return Ok(MCPToolResult::error(format!(
             "Failed to persist workspace-session association: {}",
@@ -3210,10 +3313,7 @@ pub async fn add_session_to_workspace(
     );
 
     Ok(MCPToolResult::success(
-        format!(
-            "Added session to workspace with role '{}'",
-            role
-        ),
+        format!("Added session to workspace with role '{}'", role),
         Some(serde_json::json!({
             "workspace_id": workspace_id.to_string(),
             "session_id": session_id.to_string(),
@@ -3234,13 +3334,17 @@ pub async fn remove_session_from_workspace(
     );
     let system = get_memory_system().await?;
 
-    match system.workspace_manager.remove_session_from_workspace(&workspace_id, &session_id) {
+    match system
+        .workspace_manager
+        .remove_session_from_workspace(&workspace_id, &session_id)
+    {
         Ok(Some(role)) => {
             // Remove from RocksDB
-            if let Err(e) = system.storage().remove_session_from_workspace(
-                workspace_id,
-                session_id,
-            ).await {
+            if let Err(e) = system
+                .storage()
+                .remove_session_from_workspace(workspace_id, session_id)
+                .await
+            {
                 error!("Failed to remove session from workspace in storage: {}", e);
                 return Ok(MCPToolResult::error(format!(
                     "Failed to remove session from workspace in storage: {}",

@@ -33,7 +33,7 @@ pub async fn start_rmcp_daemon(config: DaemonConfig) -> Result<(), String> {
     #[cfg(feature = "embeddings")]
     {
         system_config.enable_embeddings = true;
-        system_config.embeddings_model_type = "StaticSimilarityMRL".to_string();
+        system_config.embeddings_model_type = "MiniLM".to_string();
         system_config.auto_vectorize_on_update = true;
         system_config.cross_session_search_enabled = true;
         info!("Embeddings enabled in daemon config");

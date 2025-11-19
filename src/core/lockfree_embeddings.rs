@@ -255,7 +255,7 @@ pub enum EmbeddingModelType {
 
 impl Default for EmbeddingModelType {
     fn default() -> Self {
-        Self::StaticSimilarityMRL
+        Self::MiniLM
     }
 }
 
@@ -555,26 +555,20 @@ impl LockFreeLocalEmbeddingEngine {
             .forward(&input_tensor, &mask_tensor, Some(&token_type_ids))?;
 
         // Extract embeddings (lock-free)
-        let embeddings = outputs.mean(1)?; // Mean pooling over sequence dimension
-        let embeddings_vec = embeddings.to_vec1::<f32>()?;
+        let embeddings = outputs.mean(1)?; // Mean pooling over sequence dimension - returns [batch_size, 384]
+        let embeddings_vec = embeddings.to_vec2::<f32>()?; // Convert 2D tensor to 2D vec
 
         // Split into individual embeddings (lock-free)
-        let dimension = self.embedding_dimension();
         let mut results = Vec::with_capacity(texts.len());
 
-        for i in 0..texts.len() {
-            let start_idx = i * dimension;
-            let end_idx = start_idx + dimension;
-            let mut embedding = Vec::with_capacity(dimension);
-
+        for embedding_vec in embeddings_vec {
             // Try to get from memory pool first (lock-free)
             if let Some(mut pooled_vec) = self.memory_pool.try_get() {
                 pooled_vec.clear();
-                pooled_vec.extend_from_slice(&embeddings_vec[start_idx..end_idx]);
+                pooled_vec.extend_from_slice(&embedding_vec);
                 results.push(pooled_vec);
             } else {
-                embedding.extend_from_slice(&embeddings_vec[start_idx..end_idx]);
-                results.push(embedding);
+                results.push(embedding_vec);
             }
         }
 

@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel};
-use tokio::sync::{oneshot, OnceCell};
+use tokio::sync::{OnceCell, oneshot};
 
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
@@ -39,7 +39,7 @@ use uuid::Uuid;
 #[cfg(feature = "embeddings")]
 use crate::core::content_vectorizer::{ContentVectorizer, ContentVectorizerConfig};
 #[cfg(feature = "embeddings")]
-use crate::core::embeddings::{EmbeddingConfig, EmbeddingModelType as EmbeddingModelType};
+use crate::core::embeddings::{EmbeddingConfig, EmbeddingModelType};
 #[cfg(feature = "embeddings")]
 use crate::core::vector_db::VectorDbConfig;
 
@@ -87,7 +87,8 @@ pub struct LockFreeConversationMemorySystem {
     pub content_vectorizer: Arc<OnceCell<Arc<crate::core::content_vectorizer::ContentVectorizer>>>,
 
     #[cfg(feature = "embeddings")]
-    pub semantic_query_engine: Arc<OnceCell<Arc<crate::core::semantic_query_engine::SemanticQueryEngine>>>,
+    pub semantic_query_engine:
+        Arc<OnceCell<Arc<crate::core::semantic_query_engine::SemanticQueryEngine>>>,
 
     /// Embedding configuration for lazy initialization
     #[cfg(feature = "embeddings")]
@@ -298,9 +299,9 @@ impl Default for SystemConfig {
             max_referenced_entities: 15,
             enable_smart_entity_ranking: true, // Enable by default for better quality
             // Embeddings defaults
-            enable_embeddings: false, // Disabled by default for backward compatibility
-            embeddings_model_type: "StaticSimilarityMRL".to_string(),
-            vector_dimension: 1024, // StaticSimilarityMRL uses 1024-dimensional embeddings
+            enable_embeddings: true, // Enabled for semantic search functionality
+            embeddings_model_type: "MiniLM".to_string(),
+            vector_dimension: 384, // MiniLM uses 384-dimensional embeddings
             max_vectors_per_session: 1000,
             semantic_search_threshold: 0.7,
             auto_vectorize_on_update: true,
@@ -379,52 +380,53 @@ impl LockFreeConversationMemorySystem {
 
         // Prepare embeddings configuration for lazy initialization
         #[cfg(feature = "embeddings")]
-        let (content_vectorizer, semantic_query_engine, embedding_config_holder) = if config.enable_embeddings {
-            info!("Embeddings enabled - will lazy-initialize on first use");
+        let (content_vectorizer, semantic_query_engine, embedding_config_holder) =
+            if config.enable_embeddings {
+                info!("Embeddings enabled - will lazy-initialize on first use");
 
-            // Parse embedding model type
-            let model_type = match config.embeddings_model_type.as_str() {
-                "StaticSimilarityMRL" => EmbeddingModelType::StaticSimilarityMRL,
-                "MiniLM" => EmbeddingModelType::MiniLM,
-                "TinyBERT" => EmbeddingModelType::TinyBERT,
-                "BGESmall" => EmbeddingModelType::BGESmall,
-                _ => {
-                    warn!(
-                        "Unknown embedding model type: {}, defaulting to StaticSimilarityMRL",
-                        config.embeddings_model_type
-                    );
-                    EmbeddingModelType::StaticSimilarityMRL
-                }
-            };
+                // Parse embedding model type
+                let model_type = match config.embeddings_model_type.as_str() {
+                    "StaticSimilarityMRL" => EmbeddingModelType::StaticSimilarityMRL,
+                    "MiniLM" => EmbeddingModelType::MiniLM,
+                    "TinyBERT" => EmbeddingModelType::TinyBERT,
+                    "BGESmall" => EmbeddingModelType::BGESmall,
+                    _ => {
+                        warn!(
+                            "Unknown embedding model type: {}, defaulting to StaticSimilarityMRL",
+                            config.embeddings_model_type
+                        );
+                        EmbeddingModelType::StaticSimilarityMRL
+                    }
+                };
 
-            // Store configuration for lazy initialization
-            let embedding_config_holder = Arc::new(EmbeddingConfigHolder {
-                model_type,
-                vector_dimension: config.vector_dimension,
-                max_vectors_per_session: config.max_vectors_per_session,
-                data_directory: config.data_directory.clone(),
-                cross_session_search_enabled: config.cross_session_search_enabled,
-            });
-
-            (
-                Arc::new(OnceCell::new()),
-                Arc::new(OnceCell::new()),
-                embedding_config_holder,
-            )
-        } else {
-            info!("Embeddings disabled in configuration");
-            (
-                Arc::new(OnceCell::new()),
-                Arc::new(OnceCell::new()),
-                Arc::new(EmbeddingConfigHolder {
-                    model_type: EmbeddingModelType::StaticSimilarityMRL,
-                    vector_dimension: 1024,
-                    max_vectors_per_session: 10000,
+                // Store configuration for lazy initialization
+                let embedding_config_holder = Arc::new(EmbeddingConfigHolder {
+                    model_type,
+                    vector_dimension: config.vector_dimension,
+                    max_vectors_per_session: config.max_vectors_per_session,
                     data_directory: config.data_directory.clone(),
-                    cross_session_search_enabled: false,
-                }),
-            )
-        };
+                    cross_session_search_enabled: config.cross_session_search_enabled,
+                });
+
+                (
+                    Arc::new(OnceCell::new()),
+                    Arc::new(OnceCell::new()),
+                    embedding_config_holder,
+                )
+            } else {
+                info!("Embeddings disabled in configuration");
+                (
+                    Arc::new(OnceCell::new()),
+                    Arc::new(OnceCell::new()),
+                    Arc::new(EmbeddingConfigHolder {
+                        model_type: EmbeddingModelType::StaticSimilarityMRL,
+                        vector_dimension: 1024,
+                        max_vectors_per_session: 10000,
+                        data_directory: config.data_directory.clone(),
+                        cross_session_search_enabled: false,
+                    }),
+                )
+            };
 
         #[cfg(not(feature = "embeddings"))]
         let (_content_vectorizer, _semantic_query_engine) = {
@@ -1012,19 +1014,22 @@ impl LockFreeSessionManager {
         self.session_cache_misses.fetch_add(1, Ordering::Relaxed);
 
         // Try loading from storage via actor
-        let storage_result: Result<Option<ActiveSession>, String> =
-            match self.storage_actor.load_session(session_id).await {
-                Ok(Some(session)) => Ok(Some(session)),
-                Ok(None) => Ok(None), // Session not found is OK
-                Err(e) => {
-                    tracing::error!(
-                        "Storage error loading session {}: {}. Treating as not found and creating new session.",
-                        session_id,
-                        e
-                    );
-                    Ok(None)   // Treat storage errors as session not found
-                }
-            };
+        let storage_result: Result<Option<ActiveSession>, String> = match self
+            .storage_actor
+            .load_session(session_id)
+            .await
+        {
+            Ok(Some(session)) => Ok(Some(session)),
+            Ok(None) => Ok(None), // Session not found is OK
+            Err(e) => {
+                tracing::error!(
+                    "Storage error loading session {}: {}. Treating as not found and creating new session.",
+                    session_id,
+                    e
+                );
+                Ok(None) // Treat storage errors as session not found
+            }
+        };
 
         match storage_result {
             Ok(Some(session)) => {
@@ -1735,7 +1740,9 @@ impl LockFreeConversationMemorySystem {
                 let vectorizer_config = ContentVectorizerConfig {
                     embedding_config,
                     vector_db_config,
-                    enable_cross_session_search: self.embedding_config_holder.cross_session_search_enabled,
+                    enable_cross_session_search: self
+                        .embedding_config_holder
+                        .cross_session_search_enabled,
                     ..Default::default()
                 };
 
@@ -1776,7 +1783,7 @@ impl LockFreeConversationMemorySystem {
     /// Auto-vectorize only the latest update (incremental vectorization)
     /// This is much more efficient than re-vectorizing the entire session
     #[cfg(feature = "embeddings")]
-    async fn auto_vectorize_if_enabled(&self, session_id: Uuid) -> Result<(), String> {
+    pub async fn auto_vectorize_if_enabled(&self, session_id: Uuid) -> Result<(), String> {
         if self.config.enable_embeddings && self.config.auto_vectorize_on_update {
             // Lazy-initialize vectorizer if needed
             match self.ensure_vectorizer_initialized().await {
@@ -1796,9 +1803,14 @@ impl LockFreeConversationMemorySystem {
 
                                     // Clear query cache to invalidate stale search results
                                     if let Err(e) = vectorizer.clear_query_cache().await {
-                                        warn!("Failed to clear query cache after vectorization: {}", e);
+                                        warn!(
+                                            "Failed to clear query cache after vectorization: {}",
+                                            e
+                                        );
                                     } else {
-                                        debug!("Query cache cleared after incremental vectorization");
+                                        debug!(
+                                            "Query cache cleared after incremental vectorization"
+                                        );
                                     }
                                 }
                                 Err(e) => {
@@ -1811,7 +1823,10 @@ impl LockFreeConversationMemorySystem {
                             }
                         }
                         Err(e) => {
-                            warn!("Failed to load session {} for vectorization: {}", session_id, e);
+                            warn!(
+                                "Failed to load session {} for vectorization: {}",
+                                session_id, e
+                            );
                         }
                     }
                 }
