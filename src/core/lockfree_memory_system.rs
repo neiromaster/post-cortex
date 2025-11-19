@@ -1793,6 +1793,13 @@ impl LockFreeConversationMemorySystem {
                                         "Incrementally vectorized {} update(s) for session {}",
                                         count, session_id
                                     );
+
+                                    // Clear query cache to invalidate stale search results
+                                    if let Err(e) = vectorizer.clear_query_cache().await {
+                                        warn!("Failed to clear query cache after vectorization: {}", e);
+                                    } else {
+                                        debug!("Query cache cleared after incremental vectorization");
+                                    }
                                 }
                                 Err(e) => {
                                     // Don't fail the main operation if auto-vectorization fails
