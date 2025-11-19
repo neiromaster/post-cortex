@@ -2894,7 +2894,7 @@ pub async fn create_workspace(
     info!("Created workspace {} with ID {}", name, workspace_id);
 
     Ok(MCPToolResult::success(
-        format!("Created workspace '{}' successfully", name),
+        format!("Created workspace '{}' with ID: {}", name, workspace_id),
         Some(serde_json::json!({
             "workspace_id": workspace_id.to_string(),
             "name": name,
@@ -2973,8 +2973,21 @@ pub async fn list_workspaces() -> Result<MCPToolResult> {
         })
         .collect();
 
+    let message = if total_count == 0 {
+        "Found 0 workspaces".to_string()
+    } else {
+        let workspace_summaries: Vec<String> = workspaces
+            .iter()
+            .map(|ws| {
+                let sessions = ws.get_all_sessions();
+                format!("  • {} (ID: {}, {} sessions)", ws.name, ws.id, sessions.len())
+            })
+            .collect();
+        format!("Found {} workspace(s):\n{}", total_count, workspace_summaries.join("\n"))
+    };
+
     Ok(MCPToolResult::success(
-        format!("Found {} workspace(s)", total_count),
+        message,
         Some(serde_json::json!({
             "total_count": total_count,
             "workspaces": workspace_list
