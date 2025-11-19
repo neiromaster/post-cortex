@@ -249,31 +249,46 @@ pub async fn update_conversation_context_with_system(
 
     // Wrap entire operation in timeout to prevent infinite hangs
     let result = with_mcp_timeout(async {
+        // Extract extra fields from content HashMap for details/implications
+        let extract_extras = |exclude_keys: &[&str]| -> Vec<String> {
+            content
+                .iter()
+                .filter(|(k, _)| !exclude_keys.contains(&k.as_str()))
+                .map(|(k, v)| format!("{}: {}", k, v))
+                .collect()
+        };
+
         let interaction = match interaction_type.as_str() {
             "qa" => {
                 let question = content.get("question").cloned().unwrap_or_default();
                 let answer = content.get("answer").cloned().unwrap_or_default();
-                Interaction::QA { question, answer }
+                let extras = extract_extras(&["question", "answer"]);
+                Interaction::QA { question, answer, details: extras }
             }
             "code_change" => {
                 let description = content.get("description").cloned().unwrap_or_default();
                 let change_type = content.get("change_type").cloned().unwrap_or_default();
+                let extras = extract_extras(&["description", "change_type"]);
                 Interaction::CodeChange {
                     file_path: description,
                     diff: change_type,
+                    details: extras,
                 }
             }
             "problem_solved" => {
                 let problem = content.get("problem").cloned().unwrap_or_default();
                 let solution = content.get("solution").cloned().unwrap_or_default();
-                Interaction::ProblemSolved { problem, solution }
+                let extras = extract_extras(&["problem", "solution"]);
+                Interaction::ProblemSolved { problem, solution, details: extras }
             }
             "decision_made" => {
                 let decision = content.get("decision").cloned().unwrap_or_default();
                 let rationale = content.get("rationale").cloned().unwrap_or_default();
+                let extras = extract_extras(&["decision", "rationale"]);
                 Interaction::DecisionMade {
                     decision,
                     rationale,
+                    details: extras,
                 }
             }
             _ => {
@@ -555,10 +570,10 @@ pub async fn load_session_checkpoint_with_system(
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Interaction {
-    QA { question: String, answer: String },
-    CodeChange { file_path: String, diff: String },
-    ProblemSolved { problem: String, solution: String },
-    DecisionMade { decision: String, rationale: String },
+    QA { question: String, answer: String, details: Vec<String> },
+    CodeChange { file_path: String, diff: String, details: Vec<String> },
+    ProblemSolved { problem: String, solution: String, details: Vec<String> },
+    DecisionMade { decision: String, rationale: String, details: Vec<String> },
 }
 
 // pub struct LLMClient {
@@ -627,6 +642,16 @@ pub async fn bulk_update_conversation_context(
     let mut errors: Vec<String> = Vec::new();
 
     for (index, update_item) in updates.into_iter().enumerate() {
+        // Extract extra fields from content HashMap for details
+        let extract_extras = |exclude_keys: &[&str]| -> Vec<String> {
+            update_item
+                .content
+                .iter()
+                .filter(|(k, _)| !exclude_keys.contains(&k.as_str()))
+                .map(|(k, v)| format!("{}: {}", k, v))
+                .collect()
+        };
+
         let interaction = match update_item.interaction_type.as_str() {
             "qa" => {
                 let question = update_item
@@ -639,7 +664,8 @@ pub async fn bulk_update_conversation_context(
                     .get("answer")
                     .cloned()
                     .unwrap_or_default();
-                Interaction::QA { question, answer }
+                let extras = extract_extras(&["question", "answer"]);
+                Interaction::QA { question, answer, details: extras }
             }
             "code_change" => {
                 let description = update_item
@@ -652,9 +678,11 @@ pub async fn bulk_update_conversation_context(
                     .get("change_type")
                     .cloned()
                     .unwrap_or_default();
+                let extras = extract_extras(&["description", "change_type"]);
                 Interaction::CodeChange {
                     file_path: description,
                     diff: change_type,
+                    details: extras,
                 }
             }
             "problem_solved" => {
@@ -668,7 +696,8 @@ pub async fn bulk_update_conversation_context(
                     .get("solution")
                     .cloned()
                     .unwrap_or_default();
-                Interaction::ProblemSolved { problem, solution }
+                let extras = extract_extras(&["problem", "solution"]);
+                Interaction::ProblemSolved { problem, solution, details: extras }
             }
             "decision_made" => {
                 let decision = update_item
@@ -681,9 +710,11 @@ pub async fn bulk_update_conversation_context(
                     .get("rationale")
                     .cloned()
                     .unwrap_or_default();
+                let extras = extract_extras(&["decision", "rationale"]);
                 Interaction::DecisionMade {
                     decision,
                     rationale,
+                    details: extras,
                 }
             }
             _ => {
@@ -768,31 +799,46 @@ pub async fn update_conversation_context(
     info!("MCP-TOOLS: Got memory system for update_conversation_context");
     info!("MCP-TOOLS: Got memory system, creating session");
 
+    // Extract extra fields from content HashMap for details/implications
+    let extract_extras = |exclude_keys: &[&str]| -> Vec<String> {
+        content
+            .iter()
+            .filter(|(k, _)| !exclude_keys.contains(&k.as_str()))
+            .map(|(k, v)| format!("{}: {}", k, v))
+            .collect()
+    };
+
     let interaction = match interaction_type.as_str() {
         "qa" => {
             let question = content.get("question").cloned().unwrap_or_default();
             let answer = content.get("answer").cloned().unwrap_or_default();
-            Interaction::QA { question, answer }
+            let extras = extract_extras(&["question", "answer"]);
+            Interaction::QA { question, answer, details: extras }
         }
         "code_change" => {
             let description = content.get("description").cloned().unwrap_or_default();
             let change_type = content.get("change_type").cloned().unwrap_or_default();
+            let extras = extract_extras(&["description", "change_type"]);
             Interaction::CodeChange {
                 file_path: description,
                 diff: change_type,
+                details: extras,
             }
         }
         "problem_solved" => {
             let problem = content.get("problem").cloned().unwrap_or_default();
             let solution = content.get("solution").cloned().unwrap_or_default();
-            Interaction::ProblemSolved { problem, solution }
+            let extras = extract_extras(&["problem", "solution"]);
+            Interaction::ProblemSolved { problem, solution, details: extras }
         }
         "decision_made" => {
             let decision = content.get("decision").cloned().unwrap_or_default();
             let rationale = content.get("rationale").cloned().unwrap_or_default();
+            let extras = extract_extras(&["decision", "rationale"]);
             Interaction::DecisionMade {
                 decision,
                 rationale,
+                details: extras,
             }
         }
         _ => {
@@ -1322,32 +1368,32 @@ fn interaction_to_context_update(
     let timestamp = chrono::Utc::now();
 
     let (update_type, content) = match interaction {
-        Interaction::QA { question, answer } => (
+        Interaction::QA { question, answer, details } => (
             UpdateType::QuestionAnswered,
             crate::core::context_update::UpdateContent {
                 title: question.clone(),
                 description: answer.clone(),
-                details: vec![],
+                details,
                 examples: vec![],
                 implications: vec![],
             },
         ),
-        Interaction::CodeChange { file_path, diff } => (
+        Interaction::CodeChange { file_path, diff, details } => (
             UpdateType::CodeChanged,
             crate::core::context_update::UpdateContent {
                 title: file_path.clone(),
                 description: diff.clone(),
-                details: vec![],
+                details,
                 examples: vec![],
                 implications: vec!["Code functionality updated".to_string()],
             },
         ),
-        Interaction::ProblemSolved { problem, solution } => (
+        Interaction::ProblemSolved { problem, solution, details } => (
             UpdateType::ProblemSolved,
             crate::core::context_update::UpdateContent {
                 title: problem.clone(),
                 description: solution.clone(),
-                details: vec![],
+                details,
                 examples: vec![],
                 implications: vec!["Problem resolved".to_string()],
             },
@@ -1355,12 +1401,13 @@ fn interaction_to_context_update(
         Interaction::DecisionMade {
             decision,
             rationale,
+            details,
         } => (
             UpdateType::DecisionMade,
             crate::core::context_update::UpdateContent {
                 title: decision.clone(),
                 description: rationale.clone(),
-                details: vec![],
+                details,
                 examples: vec![],
                 implications: vec!["Decision recorded".to_string()],
             },

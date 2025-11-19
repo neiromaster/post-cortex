@@ -1789,7 +1789,7 @@ impl LockFreeConversationMemorySystem {
                             // Vectorize only the latest update (incremental)
                             match vectorizer.vectorize_latest_update(&session).await {
                                 Ok(count) => {
-                                    debug!(
+                                    info!(
                                         "Incrementally vectorized {} update(s) for session {}",
                                         count, session_id
                                     );

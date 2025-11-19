@@ -28,13 +28,20 @@
 
 use post_cortex::daemon::{DaemonConfig, start_rmcp_daemon};
 use std::env;
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
-    // Initialize tracing
+    // Create logs directory
+    std::fs::create_dir_all("./logs").ok();
+
+    // Initialize tracing with file appender
+    let file_appender = RollingFileAppender::new(Rotation::DAILY, "./logs", "mcp-server.log");
+
     tracing_subscriber::registry()
-        .with(fmt::layer())
+        .with(fmt::layer().with_writer(file_appender))
+        .with(fmt::layer()) // Also log to stdout
         .with(EnvFilter::from_default_env())
         .init();
 
