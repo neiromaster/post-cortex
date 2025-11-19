@@ -294,12 +294,14 @@ pub async fn update_conversation_context_with_system(
         );
 
         debug!("Adding context update to session: {}", session_id);
+        // Combine title and description for full context
+        let text = format!("{}\n{}", update.content.title, update.content.description);
         let metadata = Some(
             serde_json::to_value(&update)
                 .map_err(|e| anyhow::anyhow!("Failed to serialize update metadata: {}", e))?,
         );
         system
-            .add_incremental_update(session_id, update.content.description.clone(), metadata)
+            .add_incremental_update(session_id, text, metadata)
             .await
             .map_err(string_to_anyhow)?;
         info!("system.add_context_update completed successfully!");
@@ -804,14 +806,14 @@ pub async fn update_conversation_context(
     // Convert to ContextUpdate
     let update = interaction_to_context_update(interaction, code_reference)?;
 
-    // Add to session
-    let description = update.content.description.clone();
+    // Add to session - combine title and description for full context
+    let text = format!("{}\n{}", update.content.title, update.content.description);
     let metadata = Some(
         serde_json::to_value(&update)
             .map_err(|e| anyhow::anyhow!("Failed to serialize update metadata: {}", e))?,
     );
     system
-        .add_incremental_update(session_id, description, metadata)
+        .add_incremental_update(session_id, text, metadata)
         .await
         .map_err(string_to_anyhow)?;
 
@@ -2176,6 +2178,31 @@ pub async fn semantic_search_global(
                 info!("No interaction_type filter provided");
             }
 
+            // Build formatted message with full results
+            let mut message = format!("Found {} global semantic search results for query: '{}'\n\n", results.len(), query);
+
+            for (idx, r) in results.iter().enumerate() {
+                message.push_str(&format!(
+                    "{}. [Session: {}] [{:?}] Score: {:.3} ({})\n",
+                    idx + 1,
+                    &r.session_id.to_string()[..8],
+                    r.content_type,
+                    r.combined_score,
+                    r.similarity_quality()
+                ));
+                message.push_str(&format!("   Time: {}\n", r.timestamp.format("%Y-%m-%d %H:%M:%S")));
+                message.push_str(&format!("   {}\n", r.score_explanation()));
+
+                // Truncate text_content if too long
+                let content = if r.text_content.len() > 500 {
+                    format!("{}...", &r.text_content[..500])
+                } else {
+                    r.text_content.clone()
+                };
+                message.push_str(&format!("   Content: {}\n\n", content));
+            }
+
+            // Also build JSON for data field
             let search_results: Vec<serde_json::Value> = results
                 .into_iter()
                 .map(|r| {
@@ -2195,7 +2222,7 @@ pub async fn semantic_search_global(
                 .collect();
 
             Ok(MCPToolResult::success(
-                format!("Found {} semantic search results", search_results.len()),
+                message,
                 Some(serde_json::json!({
                     "query": query,
                     "results": search_results,
@@ -2299,6 +2326,30 @@ pub async fn semantic_search_session(
                 info!("No interaction_type filter provided");
             }
 
+            // Build formatted message with full results
+            let mut message = format!("Found {} semantic search results for query: '{}'\n\n", results.len(), query);
+
+            for (idx, r) in results.iter().enumerate() {
+                message.push_str(&format!(
+                    "{}. [{:?}] Score: {:.3} ({})\n",
+                    idx + 1,
+                    r.content_type,
+                    r.combined_score,
+                    r.similarity_quality()
+                ));
+                message.push_str(&format!("   Time: {}\n", r.timestamp.format("%Y-%m-%d %H:%M:%S")));
+                message.push_str(&format!("   {}\n", r.score_explanation()));
+
+                // Truncate text_content if too long
+                let content = if r.text_content.len() > 500 {
+                    format!("{}...", &r.text_content[..500])
+                } else {
+                    r.text_content.clone()
+                };
+                message.push_str(&format!("   Content: {}\n\n", content));
+            }
+
+            // Also build JSON for data field
             let search_results: Vec<serde_json::Value> = results
                 .into_iter()
                 .map(|r| {
@@ -2318,10 +2369,7 @@ pub async fn semantic_search_session(
                 .collect();
 
             Ok(MCPToolResult::success(
-                format!(
-                    "Found {} semantic search results in session",
-                    search_results.len()
-                ),
+                message,
                 Some(serde_json::json!({
                     "session_id": session_id.to_string(),
                     "query": query,
@@ -2369,6 +2417,28 @@ pub async fn find_related_content(
 
     match system.find_related_content(session_id, &topic, limit).await {
         Ok(results) => {
+            // Build formatted message with full results
+            let mut message = format!("Found {} related content items for topic: '{}'\n\n", results.len(), topic);
+
+            for (idx, r) in results.iter().enumerate() {
+                message.push_str(&format!(
+                    "{}. [{:?}] Score: {:.3}\n",
+                    idx + 1,
+                    r.content_type,
+                    r.combined_score
+                ));
+                message.push_str(&format!("   Time: {}\n", r.timestamp.format("%Y-%m-%d %H:%M:%S")));
+
+                // Truncate text_content if too long
+                let content = if r.text_content.len() > 500 {
+                    format!("{}...", &r.text_content[..500])
+                } else {
+                    r.text_content.clone()
+                };
+                message.push_str(&format!("   Content: {}\n\n", content));
+            }
+
+            // Also build JSON for data field
             let related_content: Vec<serde_json::Value> = results
                 .into_iter()
                 .map(|r| {
@@ -2386,7 +2456,7 @@ pub async fn find_related_content(
                 .collect();
 
             Ok(MCPToolResult::success(
-                format!("Found {} related content items", related_content.len()),
+                message,
                 Some(serde_json::json!({
                     "session_id": session_id.to_string(),
                     "topic": topic,
