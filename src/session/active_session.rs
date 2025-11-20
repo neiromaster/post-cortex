@@ -26,11 +26,55 @@ use chrono::DateTime;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
+
+#[cfg(feature = "embeddings")]
+use crate::core::ner_engine::LockFreeNEREngine;
+
+// Global shared NER engine (lazy loaded on first use)
+#[cfg(feature = "embeddings")]
+static GLOBAL_NER_ENGINE: OnceLock<Arc<LockFreeNEREngine>> = OnceLock::new();
+
+/// Pre-load the global NER engine (call during daemon startup for best performance)
+///
+/// This function loads the DistilBERT-NER model into memory. Subsequent entity
+/// extractions will use the loaded model automatically.
+///
+/// Returns true if NER engine was loaded successfully, false otherwise.
+#[cfg(feature = "embeddings")]
+pub async fn preload_ner_engine() -> bool {
+    get_ner_engine().await.is_some()
+}
+
+/// Get or initialize the global NER engine (lazy loading)
+#[cfg(feature = "embeddings")]
+async fn get_ner_engine() -> Option<Arc<LockFreeNEREngine>> {
+    // Fast path - engine already loaded
+    if let Some(engine) = GLOBAL_NER_ENGINE.get() {
+        return Some(engine.clone());
+    }
+
+    // Slow path - load engine (first call only)
+    info!("Loading global NER engine for first time...");
+    let mut engine = LockFreeNEREngine::new();
+    match engine.load_model().await {
+        Ok(_) => {
+            info!("Global NER engine loaded successfully");
+            let arc_engine = Arc::new(engine);
+            // Try to set (may fail if another thread set it first, but that's ok)
+            let _ = GLOBAL_NER_ENGINE.set(arc_engine.clone());
+            Some(arc_engine)
+        }
+        Err(e) => {
+            warn!("Failed to load NER engine: {}. Entity extraction will use fallback method.", e);
+            None
+        }
+    }
+}
 
 /// ActiveSession with lock-free granular components
 /// Uses Arc-wrapped lock-free structures for concurrent access and cheap cloning
@@ -995,13 +1039,41 @@ impl ActiveSession {
 
     // ========== End Entity Intelligence Helpers ==========
 
-    fn extract_entities_from_text(&self, text: &str) -> Vec<String> {
+    // Public for integration tests
+    pub fn extract_entities_from_text(&self, text: &str) -> Vec<String> {
         use std::collections::HashSet;
-        let mut entities = HashSet::new();
-        let text_lower = text.to_lowercase();
 
         info!("extract_entities_from_text: Processing text: '{}'", text);
-        info!("Text lowercase: '{}'", text_lower);
+
+        // Try NER-based extraction first (if embeddings feature is enabled and NER is already loaded)
+        #[cfg(feature = "embeddings")]
+        {
+            // Fast path: Use NER if already loaded (no async needed)
+            if let Some(engine) = GLOBAL_NER_ENGINE.get() {
+                match engine.extract_entities(text) {
+                    Ok(recognized_entities) => {
+                        info!("NER extracted {} entities", recognized_entities.len());
+                        // Convert RecognizedEntity to Vec<String>
+                        let entity_names: Vec<String> = recognized_entities
+                            .into_iter()
+                            .map(|e| e.text)
+                            .collect();
+                        return entity_names;
+                    }
+                    Err(e) => {
+                        info!("NER extraction failed: {}. Falling back to pattern matching", e);
+                    }
+                }
+            } else {
+                debug!("NER engine not loaded yet, using pattern matching");
+                // Note: First call will use pattern matching. NER will be loaded in background
+                // for subsequent calls. To pre-load, call get_ner_engine() during daemon startup.
+            }
+        }
+
+        // Fallback: Use pattern-based extraction
+        let mut entities = HashSet::new();
+        let text_lower = text.to_lowercase();
 
         // Check for non-ASCII text (e.g., Cyrillic, Chinese, etc.)
         let is_ascii = text.is_ascii();
