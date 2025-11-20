@@ -20,6 +20,7 @@
 pub mod content_vectorizer;
 pub mod context_update;
 pub mod embeddings;
+pub mod error;
 pub mod embeddings_compat;
 pub mod lockfree_cache;
 pub mod lockfree_embeddings;

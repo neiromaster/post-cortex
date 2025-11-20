@@ -27,6 +27,7 @@ pub mod summary;
 pub mod tools;
 pub mod workspace;
 
+pub use core::error::{Result, SystemError};
 pub use core::lockfree_memory_system::LockFreeConversationMemorySystem;
 pub use core::lockfree_memory_system::SystemConfig;
 pub use summary::{StructuredSummaryView, SummaryGenerator};
