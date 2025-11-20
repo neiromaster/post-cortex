@@ -669,3 +669,224 @@ mod concurrent_tests {
         assert_eq!(stats.total_vectors, expected);
     }
 }
+
+/// Phase 6: Semantic Search Optimization Tests
+#[cfg(test)]
+mod search_mode_tests {
+    use super::*;
+    use post_cortex::core::vector_db::SearchMode;
+
+    #[test]
+    fn test_search_mode_exact_vs_approximate() {
+        let dim = 384;
+        let config = VectorDbConfig {
+            dimension: dim,
+            enable_quantization: false,
+            enable_hnsw_index: true,
+            max_connections: 16,
+            ef_construction: 200,
+            ..Default::default()
+        };
+        let db = FastVectorDB::new(config).unwrap();
+
+        // Add vectors
+        for i in 0..50 {
+            let mut vector = vec![0.0f32; dim];
+            vector[0] = (i as f32) / 50.0;
+            vector[1] = 1.0 - (i as f32) / 50.0;
+            let metadata = VectorMetadata::new(
+                format!("vec-{}", i),
+                format!("text {}", i),
+                "test-source".to_string(),
+                "qa".to_string(),
+            );
+            db.add_vector(vector, metadata).unwrap();
+        }
+
+        // Query vector
+        let query = vec![0.5f32, 0.5f32]
+            .into_iter()
+            .chain(std::iter::repeat(0.0f32).take(dim - 2))
+            .collect::<Vec<f32>>();
+
+        // Exact search (linear scan)
+        let exact_results = db.search_with_mode(&query, 10, SearchMode::Exact, None).unwrap();
+
+        // Approximate search (HNSW)
+        let approx_results = db
+            .search_with_mode(&query, 10, SearchMode::Approximate, None)
+            .unwrap();
+
+        // Balanced search
+        let balanced_results = db
+            .search_with_mode(&query, 10, SearchMode::Balanced, None)
+            .unwrap();
+
+        // All should return some results
+        assert!(exact_results.len() > 0);
+        assert!(approx_results.len() > 0);
+        assert!(balanced_results.len() > 0);
+
+        // Exact search should have highest similarity for top result
+        assert!(exact_results[0].similarity >= approx_results[0].similarity - 0.1);
+
+        println!("Exact top similarity: {}", exact_results[0].similarity);
+        println!("Approx top similarity: {}", approx_results[0].similarity);
+        println!("Balanced top similarity: {}", balanced_results[0].similarity);
+    }
+
+    #[test]
+    fn test_search_quality_presets() {
+        let dim = 384;
+        let config = VectorDbConfig {
+            dimension: dim,
+            enable_quantization: false,
+            enable_hnsw_index: true,
+            max_connections: 16,
+            ef_construction: 200,
+            ..Default::default()
+        };
+        let db = FastVectorDB::new(config).unwrap();
+
+        // Add vectors
+        for i in 0..100 {
+            let vector = vec![(i as f32) / 100.0; dim];
+            let metadata = VectorMetadata::new(
+                format!("vec-{}", i),
+                format!("text {}", i),
+                "test-source".to_string(),
+                "qa".to_string(),
+            );
+            db.add_vector(vector, metadata).unwrap();
+        }
+
+        let query = vec![0.5f32; dim];
+
+        // Test with different ef_search values
+        let fast_results = db
+            .search_with_mode(&query, 10, SearchMode::Approximate, Some(32))
+            .unwrap();
+
+        let balanced_results = db
+            .search_with_mode(&query, 10, SearchMode::Approximate, Some(64))
+            .unwrap();
+
+        let accurate_results = db
+            .search_with_mode(&query, 10, SearchMode::Approximate, Some(128))
+            .unwrap();
+
+        // All should return results
+        assert_eq!(fast_results.len(), 10);
+        assert_eq!(balanced_results.len(), 10);
+        assert_eq!(accurate_results.len(), 10);
+
+        // Higher ef_search should generally give equal or better results
+        assert!(accurate_results[0].similarity >= balanced_results[0].similarity - 0.05);
+        assert!(balanced_results[0].similarity >= fast_results[0].similarity - 0.05);
+
+        println!("Fast (ef=32): {}", fast_results[0].similarity);
+        println!("Balanced (ef=64): {}", balanced_results[0].similarity);
+        println!("Accurate (ef=128): {}", accurate_results[0].similarity);
+    }
+
+    #[test]
+    fn test_exact_search_deterministic() {
+        let dim = 384;
+        let config = VectorDbConfig {
+            dimension: dim,
+            enable_quantization: false,
+            enable_hnsw_index: true,
+            ..Default::default()
+        };
+        let db = FastVectorDB::new(config).unwrap();
+
+        // Add vectors
+        for i in 0..20 {
+            let vector = vec![(i as f32) / 20.0; dim];
+            let metadata = VectorMetadata::new(
+                format!("vec-{}", i),
+                format!("text {}", i),
+                "test-source".to_string(),
+                "qa".to_string(),
+            );
+            db.add_vector(vector, metadata).unwrap();
+        }
+
+        let query = vec![0.5f32; dim];
+
+        // Run exact search multiple times - should always give same results
+        let results1 = db.search_with_mode(&query, 5, SearchMode::Exact, None).unwrap();
+        let results2 = db.search_with_mode(&query, 5, SearchMode::Exact, None).unwrap();
+        let results3 = db.search_with_mode(&query, 5, SearchMode::Exact, None).unwrap();
+
+        assert_eq!(results1.len(), results2.len());
+        assert_eq!(results2.len(), results3.len());
+
+        for i in 0..results1.len() {
+            assert_eq!(results1[i].vector_id, results2[i].vector_id);
+            assert_eq!(results2[i].vector_id, results3[i].vector_id);
+            assert!((results1[i].similarity - results2[i].similarity).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_search_mode_performance_comparison() {
+        let dim = 384;
+        let config = VectorDbConfig {
+            dimension: dim,
+            enable_quantization: false,
+            enable_hnsw_index: true,
+            max_connections: 16,
+            ef_construction: 200,
+            ..Default::default()
+        };
+        let db = FastVectorDB::new(config).unwrap();
+
+        // Add many vectors to see performance difference
+        for i in 0..500 {
+            let vector = vec![(i as f32) / 500.0; dim];
+            let metadata = VectorMetadata::new(
+                format!("vec-{}", i),
+                format!("text {}", i),
+                "test-source".to_string(),
+                "qa".to_string(),
+            );
+            db.add_vector(vector, metadata).unwrap();
+        }
+
+        let query = vec![0.5f32; dim];
+
+        // Benchmark different modes
+        let start = std::time::Instant::now();
+        let exact_results = db.search_with_mode(&query, 10, SearchMode::Exact, None).unwrap();
+        let exact_time = start.elapsed();
+
+        let start = std::time::Instant::now();
+        let approx_results = db
+            .search_with_mode(&query, 10, SearchMode::Approximate, None)
+            .unwrap();
+        let approx_time = start.elapsed();
+
+        let start = std::time::Instant::now();
+        let balanced_results = db
+            .search_with_mode(&query, 10, SearchMode::Balanced, None)
+            .unwrap();
+        let balanced_time = start.elapsed();
+
+        println!("Exact search: {:?}", exact_time);
+        println!("Approximate search: {:?}", approx_time);
+        println!("Balanced search: {:?}", balanced_time);
+
+        // Verify all return results
+        assert_eq!(exact_results.len(), 10);
+        assert_eq!(approx_results.len(), 10);
+        assert_eq!(balanced_results.len(), 10);
+
+        // HNSW should be faster than linear search for large datasets
+        // (may not always be true for small datasets due to overhead)
+        println!(
+            "Speedup (approx vs exact): {:.2}x",
+            exact_time.as_secs_f64() / approx_time.as_secs_f64()
+        );
+    }
+}

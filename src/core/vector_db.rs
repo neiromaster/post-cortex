@@ -35,4 +35,6 @@ pub use crate::core::lockfree_vector_db::{
     VectorMetadata,
     SearchMatch,
     VectorDbStatsSnapshot as VectorDbStats,
+    SearchMode,
+    SearchQualityPreset,
 };

@@ -34,6 +34,48 @@ use tracing::{debug, info, warn};
 // Type aliases to reduce complexity
 type QuantizationParams = Arc<arc_swap::ArcSwap<Option<(Vec<f32>, Vec<f32>)>>>;
 
+/// Search mode for vector similarity search
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    /// Exact search using full linear scan - highest accuracy, slowest
+    Exact,
+    /// Approximate search using HNSW - fastest, good accuracy
+    Approximate,
+    /// Balanced search with optimized HNSW parameters - good speed/accuracy tradeoff
+    Balanced,
+}
+
+impl Default for SearchMode {
+    fn default() -> Self {
+        SearchMode::Balanced
+    }
+}
+
+/// Search quality preset for automatic parameter tuning
+#[derive(Debug, Clone, Copy)]
+pub enum SearchQualityPreset {
+    /// Fast search with lower accuracy (ef_search = 32)
+    Fast,
+    /// Balanced search (ef_search = 64)
+    Balanced,
+    /// Accurate search with higher recall (ef_search = 128)
+    Accurate,
+    /// Maximum accuracy search (ef_search = 256)
+    Maximum,
+}
+
+impl SearchQualityPreset {
+    /// Get ef_search value for this preset
+    pub fn ef_search(&self) -> usize {
+        match self {
+            SearchQualityPreset::Fast => 32,
+            SearchQualityPreset::Balanced => 64,
+            SearchQualityPreset::Accurate => 128,
+            SearchQualityPreset::Maximum => 256,
+        }
+    }
+}
+
 /// Configuration for the lock-free vector database
 #[derive(Debug, Clone)]
 pub struct LockFreeVectorDbConfig {
@@ -690,6 +732,23 @@ impl LockFreeVectorDB {
 
     /// Search for similar vectors (lock-free)
     pub fn search(&self, query_vector: &[f32], k: usize) -> Result<Vec<SearchMatch>> {
+        self.search_with_mode(query_vector, k, SearchMode::default(), None)
+    }
+
+    /// Search for similar vectors with configurable mode and parameters (lock-free)
+    ///
+    /// # Arguments
+    /// * `query_vector` - Query vector to search for
+    /// * `k` - Number of results to return
+    /// * `mode` - Search mode (Exact, Approximate, Balanced)
+    /// * `ef_search_override` - Optional override for ef_search parameter (if None, uses mode default)
+    pub fn search_with_mode(
+        &self,
+        query_vector: &[f32],
+        k: usize,
+        mode: SearchMode,
+        ef_search_override: Option<usize>,
+    ) -> Result<Vec<SearchMatch>> {
         if query_vector.len() != self.config.dimension {
             return Err(anyhow::anyhow!(
                 "Query vector dimension {} does not match expected {}",
@@ -700,11 +759,30 @@ impl LockFreeVectorDB {
 
         let start_time = std::time::Instant::now();
 
-        // Use HNSW search if index is available and built, otherwise fall back to linear search
-        let results = if self.config.enable_hnsw_index && !self.hnsw_index.is_empty() {
-            self.hnsw_search(query_vector, k)?
-        } else {
-            self.linear_search(query_vector, k)?
+        // Select search strategy based on mode
+        let results = match mode {
+            SearchMode::Exact => {
+                // Always use linear search for exact mode
+                debug!("Using exact search (linear scan)");
+                self.linear_search(query_vector, k)?
+            }
+            SearchMode::Approximate | SearchMode::Balanced => {
+                // Use HNSW if available, otherwise fall back to linear
+                if self.config.enable_hnsw_index && !self.hnsw_index.is_empty() {
+                    let ef_search = ef_search_override.unwrap_or_else(|| {
+                        match mode {
+                            SearchMode::Approximate => SearchQualityPreset::Fast.ef_search(),
+                            SearchMode::Balanced => SearchQualityPreset::Balanced.ef_search(),
+                            _ => self.config.ef_search,
+                        }
+                    });
+                    debug!("Using HNSW search with ef_search={}", ef_search);
+                    self.hnsw_search_with_ef(query_vector, k, ef_search)?
+                } else {
+                    debug!("HNSW index not available, falling back to linear search");
+                    self.linear_search(query_vector, k)?
+                }
+            }
         };
 
         // Lock-free metadata access with DashMap
@@ -727,9 +805,8 @@ impl LockFreeVectorDB {
         self.stats.record_search(duration_us);
 
         debug!(
-            "Search completed in {}μs, found {} matches",
-            duration_us,
-            matches.len()
+            "Search completed in {}μs with mode {:?}, found {} matches",
+            duration_us, mode, matches.len()
         );
         Ok(matches)
     }
@@ -759,8 +836,18 @@ impl LockFreeVectorDB {
         Ok(similarities)
     }
 
-    /// HNSW search (lock-free implementation)
-    fn hnsw_search(&self, query_vector: &[f32], k: usize) -> Result<Vec<SearchResult>> {
+    /// HNSW search with configurable ef_search parameter (lock-free implementation)
+    ///
+    /// # Arguments
+    /// * `query_vector` - Query vector to search for
+    /// * `k` - Number of results to return
+    /// * `ef_search` - Size of the dynamic candidate list (higher = more accurate but slower)
+    fn hnsw_search_with_ef(
+        &self,
+        query_vector: &[f32],
+        k: usize,
+        ef_search: usize,
+    ) -> Result<Vec<SearchResult>> {
         // Get entry point
         let entry_point = self
             .hnsw_index
@@ -780,7 +867,7 @@ impl LockFreeVectorDB {
 
         // Expand search through connections
         let mut results = Vec::new();
-        let max_candidates = self.config.ef_search.max(k * 2);
+        let max_candidates = ef_search.max(k * 2);
 
         while !candidates.is_empty() && results.len() < max_candidates {
             // Get best candidate
@@ -800,12 +887,12 @@ impl LockFreeVectorDB {
                         visited.insert(connected_id);
                         let similarity = self.get_vector_similarity(query_vector, connected_id)?;
 
-                        if similarity >= self.config.distance_threshold {
-                            candidates.push(SearchResult {
-                                id: connected_id,
-                                similarity,
-                            });
-                        }
+                        // PHASE 6: Removed distance_threshold filtering from search loop
+                        // This improves recall by not filtering candidates early
+                        candidates.push(SearchResult {
+                            id: connected_id,
+                            similarity,
+                        });
                     }
                 }
             }
