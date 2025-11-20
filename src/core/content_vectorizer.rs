@@ -216,7 +216,7 @@ impl ContentVectorizer {
     ///
     /// Returns an error if vectorization fails or if there are issues with the vector database
     pub async fn vectorize_session(&self, session: &ActiveSession) -> Result<usize> {
-        info!("Vectorizing session: {}", session.id);
+        info!("Vectorizing session: {}", session.id());
         let mut vectorized_count = 0;
 
         // Vectorize context updates
@@ -229,7 +229,7 @@ impl ContentVectorizer {
 
         info!(
             "Vectorized {} items for session {}",
-            vectorized_count, session.id
+            vectorized_count, session.id()
         );
         Ok(vectorized_count)
     }
@@ -237,7 +237,7 @@ impl ContentVectorizer {
     /// Vectorize only the most recent update (incremental vectorization)
     /// This is much more efficient than re-vectorizing the entire session
     pub async fn vectorize_latest_update(&self, session: &ActiveSession) -> Result<usize> {
-        debug!("Vectorizing latest update for session: {}", session.id);
+        debug!("Vectorizing latest update for session: {}", session.id());
 
         // Get the most recent update from hot context (VecDeque uses back() not last())
         let latest_update = session.hot_context.back();
@@ -246,12 +246,12 @@ impl ContentVectorizer {
         let update = match latest_update {
             Some(u) => u,
             None => {
-                debug!("No updates to vectorize for session {}", session.id);
+                debug!("No updates to vectorize for session {}", session.id());
                 return Ok(0);
             }
         };
 
-        let raw_text = Self::extract_text_from_update(update);
+        let raw_text = Self::extract_text_from_update(&update);
 
         if !self.should_vectorize_text(&raw_text) {
             debug!("Skipping vectorization - text too short or empty");
@@ -267,7 +267,7 @@ impl ContentVectorizer {
             raw_text.len()
         );
 
-        let content_type = Self::determine_content_type(update);
+        let content_type = Self::determine_content_type(&update);
 
         // Generate embedding for single update
         let embeddings = self.embedding_engine.encode_batch(vec![prepared_text.clone()]).await?;
@@ -276,7 +276,7 @@ impl ContentVectorizer {
             let metadata = VectorMetadata::new(
                 update.id.to_string(),
                 prepared_text,
-                session.id.to_string(),
+                session.id().to_string(),
                 format!("{content_type:?}"),
             );
 
@@ -313,7 +313,7 @@ impl ContentVectorizer {
         };
 
         if texts_to_embed.is_empty() {
-            debug!("No texts to vectorize for session {}", session.id);
+            debug!("No texts to vectorize for session {}", session.id());
             return Ok(0);
         }
 
@@ -377,7 +377,7 @@ impl ContentVectorizer {
                         let metadata = VectorMetadata::new(
                             format!("entity:{entity_name}"),
                             entity_text.clone(),
-                            session.id.to_string(),
+                            session.id().to_string(),
                             "EntityDescription".to_string(),
                         );
                         Some((entity_text, metadata))
@@ -424,7 +424,7 @@ impl ContentVectorizer {
                     metadata_list.push(VectorMetadata::new(
                         format!("entity:{entity_name}"),
                         entity_text,
-                        session.id.to_string(),
+                        session.id().to_string(),
                         "EntityDescription".to_string(),
                     ));
                 }
@@ -434,7 +434,7 @@ impl ContentVectorizer {
         };
 
         if texts_to_embed.is_empty() {
-            debug!("No entity texts to vectorize for session {}", session.id);
+            debug!("No entity texts to vectorize for session {}", session.id());
             return Ok(0);
         }
 
@@ -656,7 +656,7 @@ impl ContentVectorizer {
         // Filter out current session and return top results
         let filtered: Vec<_> = results
             .into_iter()
-            .filter(|r| r.session_id != session.id)
+            .filter(|r| r.session_id != session.id())
             .take(limit)
             .collect();
 
@@ -708,7 +708,7 @@ impl ContentVectorizer {
         let mut metadata_list = Vec::new();
 
         // Process hot context
-        for update in &session.hot_context {
+        for update in session.hot_context.iter().iter() {
             let raw_text = Self::extract_text_from_update(update);
             if self.should_vectorize_text(&raw_text) {
                 let content_type = Self::determine_content_type(update);
@@ -717,7 +717,7 @@ impl ContentVectorizer {
                 metadata_list.push(VectorMetadata::new(
                     update.id.to_string(),
                     prepared_text,
-                    session.id.to_string(),
+                    session.id().to_string(),
                     format!("{content_type:?}"),
                 ));
             }
@@ -733,7 +733,7 @@ impl ContentVectorizer {
                 metadata_list.push(VectorMetadata::new(
                     update.update.id.to_string(),
                     prepared_text,
-                    session.id.to_string(),
+                    session.id().to_string(),
                     format!("{content_type:?}"),
                 ));
             }
@@ -750,6 +750,7 @@ impl ContentVectorizer {
         // Process hot context in parallel
         let hot_results: Vec<(String, VectorMetadata)> = session
             .hot_context
+            .iter()
             .par_iter()
             .filter_map(|update| {
                 let raw_text = Self::extract_text_from_update(update);
@@ -759,7 +760,7 @@ impl ContentVectorizer {
                     let metadata = VectorMetadata::new(
                         update.id.to_string(),
                         prepared_text.clone(),
-                        session.id.to_string(),
+                        session.id().to_string(),
                         format!("{content_type:?}"),
                     );
                     Some((prepared_text, metadata))
@@ -781,7 +782,7 @@ impl ContentVectorizer {
                     let metadata = VectorMetadata::new(
                         update.update.id.to_string(),
                         prepared_text.clone(),
-                        session.id.to_string(),
+                        session.id().to_string(),
                         format!("{content_type:?}"),
                     );
                     Some((prepared_text, metadata))

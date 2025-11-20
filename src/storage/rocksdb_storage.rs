@@ -83,7 +83,7 @@ impl RealRocksDBStorage {
 
     /// Save session to RocksDB
     pub async fn save_session(&self, session: &ActiveSession) -> Result<()> {
-        info!("RealRocksDBStorage: Saving session with ID: {}", session.id);
+        info!("RealRocksDBStorage: Saving session with ID: {}", session.id());
 
         let db = self.db.clone();
         let session = session.clone();
@@ -99,7 +99,7 @@ impl RealRocksDBStorage {
             );
 
             // Use binary key for better performance
-            let key = format!("session:{}", session.id);
+            let key = format!("session:{}", session.id());
 
             // Write to RocksDB
             db.put(key.as_bytes(), &session_data)?;
@@ -584,27 +584,27 @@ mod tests {
 
         // Load session
         let loaded_session = storage
-            .load_session(session.id)
+            .load_session(session.id())
             .await
             .expect("Failed to load session");
-        assert_eq!(session.id, loaded_session.id);
+        assert_eq!(session.id(), loaded_session.id());
 
         // Check if session exists
         assert!(
             storage
-                .session_exists(session.id)
+                .session_exists(session.id())
                 .await
                 .expect("Failed to check session existence")
         );
 
         // Delete session
         storage
-            .delete_session(session.id)
+            .delete_session(session.id())
             .await
             .expect("Failed to delete session");
         assert!(
             !storage
-                .session_exists(session.id)
+                .session_exists(session.id())
                 .await
                 .expect("Failed to check session existence after deletion")
         );

@@ -1179,9 +1179,9 @@ pub async fn list_sessions_with_storage(
                     Ok(session) => {
                         sessions_info.push(serde_json::json!({
                             "id": session_id.to_string(),
-                            "name": session.name,
-                            "description": session.description,
-                            "created_at": session.created_at.to_rfc3339(),
+                            "name": session.name(),
+                            "description": session.description(),
+                            "created_at": session.created_at().to_rfc3339(),
                             "last_updated": session.last_updated.to_rfc3339(),
                             "update_count": session.incremental_updates.len(),
                             "entity_count": session.entity_graph.entities.len()
@@ -1229,9 +1229,9 @@ pub async fn list_sessions() -> Result<MCPToolResult> {
                     let session = session_arc.load();
                     sessions_info.push(serde_json::json!({
                         "id": session_id.to_string(),
-                        "name": session.name,
-                        "description": session.description,
-                        "created_at": session.created_at.to_rfc3339(),
+                        "name": session.name(),
+                        "description": session.description(),
+                        "created_at": session.created_at().to_rfc3339(),
                         "last_updated": session.last_updated.to_rfc3339(),
                         "update_count": session.incremental_updates.len(),
                         "entity_count": session.entity_graph.entities.len()
@@ -1282,8 +1282,8 @@ pub async fn load_session_with_system(
                 "Session loaded successfully".to_string(),
                 Some(serde_json::json!({
                     "session": {
-                        "id": session.id.to_string(),
-                        "created_at": session.created_at.to_rfc3339(),
+                        "id": session.id().to_string(),
+                        "created_at": session.created_at().to_rfc3339(),
                         "last_updated": session.last_updated.to_rfc3339(),
                         "update_count": session.incremental_updates.len(),
                         "entity_count": session.entity_graph.entities.len(),
@@ -1340,8 +1340,8 @@ pub async fn search_sessions(query: String) -> Result<MCPToolResult> {
                 let session = session_arc.load();
                 sessions.push(serde_json::json!({
                     "id": session_id.to_string(),
-                    "name": session.name,
-                    "description": session.description
+                    "name": session.name(),
+                    "description": session.description()
                 }));
             }
         }
@@ -1503,6 +1503,7 @@ async fn query_context(session: &ActiveSession, query: ContextQuery) -> Result<C
             let recent_updates: Vec<ContextUpdate> = session
                 .hot_context
                 .iter()
+                .iter()
                 .chain(session.warm_context.iter().map(|c| &c.update))
                 .filter(|u| u.timestamp >= since)
                 .cloned()
@@ -1607,6 +1608,7 @@ async fn query_context(session: &ActiveSession, query: ContextQuery) -> Result<C
             let update_results: Vec<ContextUpdate> = session
                 .hot_context
                 .iter()
+                .iter()
                 .chain(session.warm_context.iter().map(|c| &c.update))
                 .filter(|u| {
                     u.content
@@ -1626,8 +1628,8 @@ async fn query_context(session: &ActiveSession, query: ContextQuery) -> Result<C
             let decisions: Vec<ContextUpdate> = session
                 .hot_context
                 .iter()
+                .into_iter()
                 .filter(|u| matches!(u.update_type, UpdateType::DecisionMade))
-                .cloned()
                 .collect();
             Ok(ContextResponse::Decisions(decisions))
         }
@@ -1638,8 +1640,8 @@ async fn query_context(session: &ActiveSession, query: ContextQuery) -> Result<C
             let changes: Vec<ContextUpdate> = session
                 .hot_context
                 .iter()
+                .into_iter()
                 .filter(|u| matches!(u.update_type, UpdateType::CodeChanged))
-                .cloned()
                 .collect();
             Ok(ContextResponse::ChangeHistory(changes))
         }
@@ -1652,7 +1654,7 @@ async fn query_context(session: &ActiveSession, query: ContextQuery) -> Result<C
 async fn create_comprehensive_checkpoint(session: &ActiveSession) -> Result<SessionCheckpoint> {
     Ok(SessionCheckpoint {
         id: Uuid::new_v4(),
-        session_id: session.id,
+        session_id: session.id(),
         created_at: chrono::Utc::now(),
         structured_context: session.current_state.clone(),
         recent_updates: session.incremental_updates.clone(),

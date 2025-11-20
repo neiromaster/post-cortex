@@ -1,7 +1,7 @@
 // Test helpers for in-memory HTTP testing without TCP ports
 
-use axum::body::{to_bytes, Body};
 use axum::Router;
+use axum::body::{Body, to_bytes};
 use hyper::{Request, Response, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
@@ -64,28 +64,13 @@ impl TestApp {
 
     /// Helper: Extract JSON body from response
     pub async fn json_body(response: Response<Body>) -> Value {
-        let bytes = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
-    }
-
-    /// Helper: Assert response status
-    pub fn assert_status(response: &Response<Body>, expected: StatusCode) {
-        assert_eq!(
-            response.status(),
-            expected,
-            "Expected status {}, got {}",
-            expected,
-            response.status()
-        );
     }
 
     /// Helper: Extract body as string
     pub async fn body_string(response: Response<Body>) -> String {
-        let bytes = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
     }
 }
@@ -93,7 +78,7 @@ impl TestApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{routing::get, Json};
+    use axum::{Json, routing::get};
 
     #[tokio::test]
     async fn test_app_get_request() {

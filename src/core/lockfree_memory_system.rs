@@ -583,13 +583,8 @@ impl LockFreeConversationMemorySystem {
         let current_session = session_arc.load();
         let mut new_session = (**current_session).clone();
 
-        if let Some(new_name) = name {
-            new_session.name = Some(new_name);
-        }
-        if let Some(new_desc) = description {
-            new_session.description = Some(new_desc);
-        }
-        new_session.last_updated = chrono::Utc::now();
+        // Use the update_metadata method to modify metadata
+        new_session.update_metadata(name, description);
 
         session_arc.store(Arc::new(new_session));
         Ok(())
@@ -609,13 +604,13 @@ impl LockFreeConversationMemorySystem {
                 let session = session_arc.load();
 
                 let name_match = session
-                    .name
+                    .name()
                     .as_ref()
                     .map(|n| n.to_lowercase().contains(&query.to_lowercase()))
                     .unwrap_or(false);
 
                 let desc_match = session
-                    .description
+                    .description()
                     .as_ref()
                     .map(|d| d.to_lowercase().contains(&query.to_lowercase()))
                     .unwrap_or(false);
@@ -1705,7 +1700,7 @@ impl LockFreeConversationMemorySystem {
         let mut summary = Vec::new();
 
         // Recent updates from hot context
-        for update in session.hot_context.iter().rev().take(10) {
+        for update in session.hot_context.iter().iter().rev().take(10) {
             summary.push(format!("- {}", update.content.description));
         }
 

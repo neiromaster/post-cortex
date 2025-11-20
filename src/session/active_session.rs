@@ -20,26 +20,28 @@
 use crate::core::context_update::{ContextUpdate, EntityType, RelationType, UpdateType};
 use crate::core::structured_context::StructuredContext;
 use crate::graph::entity_graph::SimpleEntityGraph;
+use crate::session::session_components::{HotContext, SessionMetadata};
 
 use chrono::DateTime;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// ActiveSession with lock-free granular components
+/// Uses Arc-wrapped lock-free structures for concurrent access and cheap cloning
+#[derive(Clone, Debug)]
 pub struct ActiveSession {
-    pub id: Uuid,
-    pub name: Option<String>,
-    pub description: Option<String>,
-    pub created_at: DateTime<Utc>,
+    // Metadata (immutable or rare updates)
+    pub metadata: Arc<SessionMetadata>,
     pub last_updated: DateTime<Utc>,
 
-    // Tiered context storage
-    pub hot_context: VecDeque<ContextUpdate>, // Last 20-50 updates (memory)
+    // Lock-free tiered context storage
+    pub hot_context: Arc<HotContext>, // Lock-free hot updates (DashMap-based)
     pub warm_context: Vec<CompressedUpdate>,  // Compressed updates (storage)
     pub cold_context: Vec<StructuredSummary>, // Periodic summaries (storage)
 
@@ -51,24 +53,46 @@ pub struct ActiveSession {
     pub code_references: HashMap<String, Vec<CodeReference>>, // By file path
     pub change_history: Vec<ChangeRecord>,                    // Change history
 
-    pub user_preferences: UserPreferences,
-
-    // Simple graph for entity relationships
+    // Entity graph (TODO: Make lock-free in Phase 3.2)
     pub entity_graph: SimpleEntityGraph,
 
     // Entity extraction configuration
-    #[serde(default = "default_max_entities")]
     pub max_extracted_entities: usize,
-    #[serde(default = "default_max_entities")]
     pub max_referenced_entities: usize,
-    #[serde(default = "default_true")]
     pub enable_smart_entity_ranking: bool,
 
     // Entity extraction metrics
-    #[serde(default)]
     pub total_entity_truncations: usize,
-    #[serde(default)]
     pub total_entities_truncated: usize,
+}
+
+// Serialization helper - contains data in serializable form
+#[derive(Serialize, Deserialize)]
+struct ActiveSessionData {
+    id: Uuid,
+    name: Option<String>,
+    description: Option<String>,
+    created_at: DateTime<Utc>,
+    last_updated: DateTime<Utc>,
+    user_preferences: UserPreferences,
+    hot_context: VecDeque<ContextUpdate>,
+    warm_context: Vec<CompressedUpdate>,
+    cold_context: Vec<StructuredSummary>,
+    current_state: StructuredContext,
+    incremental_updates: Vec<ContextUpdate>,
+    code_references: HashMap<String, Vec<CodeReference>>,
+    change_history: Vec<ChangeRecord>,
+    entity_graph: SimpleEntityGraph,
+    #[serde(default = "default_max_entities")]
+    max_extracted_entities: usize,
+    #[serde(default = "default_max_entities")]
+    max_referenced_entities: usize,
+    #[serde(default = "default_true")]
+    enable_smart_entity_ranking: bool,
+    #[serde(default)]
+    total_entity_truncations: usize,
+    #[serde(default)]
+    total_entities_truncated: usize,
 }
 
 fn default_max_entities() -> usize {
@@ -128,6 +152,76 @@ pub struct UserPreferences {
     pub important_keywords: Vec<String>,
 }
 
+// Custom Serialize implementation - extract data from Arc-wrapped components
+impl Serialize for ActiveSession {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let data = ActiveSessionData {
+            id: self.metadata.id,
+            name: self.metadata.name.clone(),
+            description: self.metadata.description.clone(),
+            created_at: self.metadata.created_at,
+            last_updated: self.last_updated,
+            user_preferences: self.metadata.user_preferences.clone(),
+            hot_context: VecDeque::from(self.hot_context.snapshot()),
+            warm_context: self.warm_context.clone(),
+            cold_context: self.cold_context.clone(),
+            current_state: self.current_state.clone(),
+            incremental_updates: self.incremental_updates.clone(),
+            code_references: self.code_references.clone(),
+            change_history: self.change_history.clone(),
+            entity_graph: self.entity_graph.clone(),
+            max_extracted_entities: self.max_extracted_entities,
+            max_referenced_entities: self.max_referenced_entities,
+            enable_smart_entity_ranking: self.enable_smart_entity_ranking,
+            total_entity_truncations: self.total_entity_truncations,
+            total_entities_truncated: self.total_entities_truncated,
+        };
+        data.serialize(serializer)
+    }
+}
+
+// Custom Deserialize implementation - reconstruct Arc-wrapped components
+impl<'de> Deserialize<'de> for ActiveSession {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let data = ActiveSessionData::deserialize(deserializer)?;
+
+        let max_hot_size = data.user_preferences.max_hot_context_size;
+
+        let metadata = Arc::new(SessionMetadata::new(
+            data.id,
+            data.name,
+            data.description,
+            data.user_preferences,
+        ));
+
+        let hot_context = Arc::new(HotContext::from_deque(data.hot_context, max_hot_size));
+
+        Ok(ActiveSession {
+            metadata,
+            last_updated: data.last_updated,
+            hot_context,
+            warm_context: data.warm_context,
+            cold_context: data.cold_context,
+            current_state: data.current_state,
+            incremental_updates: data.incremental_updates,
+            code_references: data.code_references,
+            change_history: data.change_history,
+            entity_graph: data.entity_graph,
+            max_extracted_entities: data.max_extracted_entities,
+            max_referenced_entities: data.max_referenced_entities,
+            enable_smart_entity_ranking: data.enable_smart_entity_ranking,
+            total_entity_truncations: data.total_entity_truncations,
+            total_entities_truncated: data.total_entities_truncated,
+        })
+    }
+}
+
 impl Default for ActiveSession {
     fn default() -> Self {
         Self::new(Uuid::new_v4(), None, None)
@@ -136,26 +230,31 @@ impl Default for ActiveSession {
 
 impl ActiveSession {
     pub fn new(id: Uuid, name: Option<String>, description: Option<String>) -> Self {
-        Self {
+        let user_preferences = UserPreferences {
+            auto_save_enabled: true,
+            context_retention_days: 30,
+            max_hot_context_size: 50,
+            auto_summary_threshold: 100,
+            important_keywords: vec![],
+        };
+
+        let metadata = Arc::new(SessionMetadata::new(
             id,
             name,
             description,
-            created_at: Utc::now(),
+            user_preferences.clone(),
+        ));
+
+        Self {
+            metadata,
             last_updated: Utc::now(),
-            hot_context: VecDeque::new(),
+            hot_context: Arc::new(HotContext::new(50)),
             warm_context: Vec::new(),
             cold_context: Vec::new(),
             current_state: StructuredContext::new(),
             incremental_updates: Vec::new(),
             code_references: HashMap::new(),
             change_history: Vec::new(),
-            user_preferences: UserPreferences {
-                auto_save_enabled: true,
-                context_retention_days: 30,
-                max_hot_context_size: 50,
-                auto_summary_threshold: 100,
-                important_keywords: vec![],
-            },
             entity_graph: SimpleEntityGraph::new(),
             max_extracted_entities: 15,
             max_referenced_entities: 15,
@@ -165,7 +264,28 @@ impl ActiveSession {
         }
     }
 
-    #[instrument(skip(self, update), fields(session_id = %self.id))]
+    // Convenience getters for metadata fields
+    pub fn id(&self) -> Uuid {
+        self.metadata.id
+    }
+
+    pub fn name(&self) -> Option<String> {
+        self.metadata.name.clone()
+    }
+
+    pub fn description(&self) -> Option<String> {
+        self.metadata.description.clone()
+    }
+
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.metadata.created_at
+    }
+
+    pub fn user_preferences(&self) -> &UserPreferences {
+        &self.metadata.user_preferences
+    }
+
+    #[instrument(skip(self, update), fields(session_id = %self.id()))]
     pub async fn add_incremental_update(&mut self, update: ContextUpdate) -> anyhow::Result<()> {
         info!(
             "ActiveSession: Starting add_incremental_update for update ID: {}",
@@ -190,9 +310,9 @@ impl ActiveSession {
             limited_update.content.title.push_str("...");
         }
 
-        // Add to hot context
+        // Add to hot context (lock-free)
         debug!("ActiveSession: Adding to hot context");
-        self.hot_context.push_back(limited_update.clone());
+        self.hot_context.push(limited_update.clone());
         debug!(
             "ActiveSession: Hot context updated, size: {}",
             self.hot_context.len()
@@ -1808,45 +1928,20 @@ impl ActiveSession {
     }
 
     fn maintain_context(&mut self) -> anyhow::Result<()> {
-        // Add a safeguard to prevent infinite loops
-        let original_hot_len = self.hot_context.len();
-
-        // Move from hot to warm if needed
-        if self.hot_context.len() > self.user_preferences.max_hot_context_size {
-            self.promote_to_warm()?;
-        }
+        // Note: HotContext now manages its own capacity automatically
+        // No need to manually move to warm - capacity is enforced on push
 
         // Create summary if needed
         if self.should_create_summary() {
             self.create_periodic_summary()?;
         }
 
-        // Compress old data (placeholder for now)
-        // self.compress_old_data().await?;
-
-        // Verify we didn't get stuck in a loop
-        if self.hot_context.len() > original_hot_len + 1 {
-            return Err(anyhow::anyhow!(
-                "Context maintenance created more items than expected"
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn promote_to_warm(&mut self) -> anyhow::Result<()> {
-        if let Some(oldest_update) = self.hot_context.pop_front() {
-            self.warm_context.push(CompressedUpdate {
-                update: oldest_update,
-                compression_ratio: 1.0, // Placeholder - would calculate actual compression
-                compressed_at: Utc::now(),
-            });
-        }
         Ok(())
     }
 
     fn should_create_summary(&self) -> bool {
-        self.incremental_updates.len() % self.user_preferences.auto_summary_threshold == 0
+        self.incremental_updates.len() % self.metadata.user_preferences.auto_summary_threshold
+            == 0
             && !self.incremental_updates.is_empty()
     }
 
@@ -1866,29 +1961,53 @@ impl ActiveSession {
 
     /// Update the session name
     pub fn set_name(&mut self, name: Option<String>) {
-        self.name = name;
+        let new_metadata = Arc::new(SessionMetadata::new(
+            self.metadata.id,
+            name,
+            self.metadata.description.clone(),
+            self.metadata.user_preferences.clone(),
+        ));
+        self.metadata = new_metadata;
         self.last_updated = Utc::now();
     }
 
     /// Update the session description
     pub fn set_description(&mut self, description: Option<String>) {
-        self.description = description;
+        let new_metadata = Arc::new(SessionMetadata::new(
+            self.metadata.id,
+            self.metadata.name.clone(),
+            description,
+            self.metadata.user_preferences.clone(),
+        ));
+        self.metadata = new_metadata;
         self.last_updated = Utc::now();
     }
 
     /// Update both name and description (preserves existing values if None provided)
     pub fn update_metadata(&mut self, name: Option<String>, description: Option<String>) {
-        if name.is_some() {
-            self.name = name;
-        }
-        if description.is_some() {
-            self.description = description;
-        }
+        let final_name = if name.is_some() {
+            name
+        } else {
+            self.metadata.name.clone()
+        };
+        let final_description = if description.is_some() {
+            description
+        } else {
+            self.metadata.description.clone()
+        };
+
+        let new_metadata = Arc::new(SessionMetadata::new(
+            self.metadata.id,
+            final_name,
+            final_description,
+            self.metadata.user_preferences.clone(),
+        ));
+        self.metadata = new_metadata;
         self.last_updated = Utc::now();
     }
 
     /// Get the current name and description
     pub fn get_metadata(&self) -> (Option<String>, Option<String>) {
-        (self.name.clone(), self.description.clone())
+        (self.metadata.name.clone(), self.metadata.description.clone())
     }
 }

@@ -109,7 +109,9 @@ impl SummaryGenerator {
         } else {
             options.entities_limit.unwrap_or(20)
         };
-        let important_entities_data = session.entity_graph.get_most_important_entities(entity_limit);
+        let important_entities_data = session
+            .entity_graph
+            .get_most_important_entities(entity_limit);
         let important_entities: Vec<String> = important_entities_data
             .iter()
             .map(|e| e.name.clone())
@@ -138,7 +140,8 @@ impl SummaryGenerator {
 
         // Sort by confidence (highest first) then by timestamp
         key_decisions.sort_by(|a, b| {
-            b.confidence.partial_cmp(&a.confidence)
+            b.confidence
+                .partial_cmp(&a.confidence)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| b.timestamp.cmp(&a.timestamp))
         });
@@ -178,7 +181,7 @@ impl SummaryGenerator {
         }
 
         StructuredSummaryView {
-            session_id: session.id,
+            session_id: session.id(),
             generated_at: Utc::now(),
 
             // Filtered and limited data
@@ -202,7 +205,7 @@ impl SummaryGenerator {
     fn calculate_session_stats(&self, session: &ActiveSession) -> SessionStats {
         use crate::summary::presentation::SessionStatsBuilder;
 
-        SessionStatsBuilder::new(session.id, session.created_at, session.last_updated)
+        SessionStatsBuilder::new(session.id(), session.created_at(), session.last_updated)
             .with_context_sizes(
                 session.hot_context.len(),
                 session.warm_context.len(),
@@ -304,7 +307,7 @@ mod tests {
         let generator = SummaryGenerator::new();
         let summary = generator.generate_structured_summary(&session);
 
-        assert_eq!(summary.session_id, session.id);
+        assert_eq!(summary.session_id, session.id());
         assert!(summary.generated_at <= Utc::now());
         assert_eq!(summary.session_stats.hot_context_size, 0); // Empty session
     }

@@ -416,6 +416,14 @@ impl ProductQuantizationCodebook {
 
         total_dist.sqrt()
     }
+
+    /// Get compression ratio information
+    pub fn compression_info(&self) -> (usize, usize, f32) {
+        let original_size = self.dimension * std::mem::size_of::<f32>();
+        let compressed_size = self.subvectors * ((self.bits + 7) / 8); // Round up to bytes
+        let ratio = original_size as f32 / compressed_size as f32;
+        (original_size, compressed_size, ratio)
+    }
 }
 
 /// Calculate Euclidean distance between two vectors
