@@ -1,12 +1,33 @@
-// Integration tests for daemon HTTP server with real clients
+// Integration tests for daemon HTTP server with in-memory testing
+mod helpers;
+
+use helpers::TestApp;
+use hyper::StatusCode;
 use post_cortex::daemon::{DaemonConfig, LockFreeDaemonServer};
-use reqwest::Client;
 use serde_json::json;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
-async fn start_test_daemon() -> (u16, TempDir) {
+/// Setup test app without TCP server
+async fn setup_test_app() -> (TestApp, TempDir) {
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let config = DaemonConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0, // Unused in testing
+        data_directory: temp_dir.path().to_str().unwrap().to_string(),
+    };
+
+    let server = LockFreeDaemonServer::new(config).await.unwrap();
+    let router = server.build_router();
+    let app = TestApp::new(router);
+
+    (app, temp_dir)
+}
+
+/// Setup test daemon with real TCP for specific tests (e.g., RocksDB lock test)
+async fn start_real_daemon() -> (u16, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
 
     // Find free port
@@ -35,36 +56,26 @@ async fn start_test_daemon() -> (u16, TempDir) {
 
 #[tokio::test]
 async fn test_daemon_health_check() {
-    let (port, _temp_dir) = start_test_daemon().await;
-    let client = Client::new();
+    let (app, _temp_dir) = setup_test_app().await;
 
-    let response = client
-        .get(format!("http://127.0.0.1:{}/health", port))
-        .send()
-        .await
-        .unwrap();
+    let response = app.get("/health").await;
 
-    assert!(response.status().is_success());
+    assert_eq!(response.status(), StatusCode::OK);
 
-    let body: serde_json::Value = response.json().await.unwrap();
+    let body = TestApp::json_body(response).await;
     assert_eq!(body["status"], "ok");
     assert_eq!(body["service"], "post-cortex-daemon");
 }
 
 #[tokio::test]
 async fn test_daemon_stats_endpoint() {
-    let (port, _temp_dir) = start_test_daemon().await;
-    let client = Client::new();
+    let (app, _temp_dir) = setup_test_app().await;
 
-    let response = client
-        .get(format!("http://127.0.0.1:{}/stats", port))
-        .send()
-        .await
-        .unwrap();
+    let response = app.get("/stats").await;
 
-    assert!(response.status().is_success());
+    assert_eq!(response.status(), StatusCode::OK);
 
-    let body: serde_json::Value = response.json().await.unwrap();
+    let body = TestApp::json_body(response).await;
     assert!(body["active_connections"].is_number());
     assert!(body["total_requests"].is_number());
     assert!(body["workspace_count"].is_number());
@@ -72,8 +83,7 @@ async fn test_daemon_stats_endpoint() {
 
 #[tokio::test]
 async fn test_daemon_mcp_initialize() {
-    let (port, _temp_dir) = start_test_daemon().await;
-    let client = Client::new();
+    let (app, _temp_dir) = setup_test_app().await;
 
     let request = json!({
         "jsonrpc": "2.0",
@@ -82,16 +92,11 @@ async fn test_daemon_mcp_initialize() {
         "params": {}
     });
 
-    let response = client
-        .post(format!("http://127.0.0.1:{}/mcp", port))
-        .json(&request)
-        .send()
-        .await
-        .unwrap();
+    let response = app.post_json("/message", request).await;
 
-    assert!(response.status().is_success());
+    assert_eq!(response.status(), StatusCode::OK);
 
-    let body: serde_json::Value = response.json().await.unwrap();
+    let body = TestApp::json_body(response).await;
     assert_eq!(body["jsonrpc"], "2.0");
     assert_eq!(body["id"], 1);
     assert!(body["result"].is_object());
@@ -100,22 +105,16 @@ async fn test_daemon_mcp_initialize() {
 
 #[tokio::test]
 async fn test_multiple_concurrent_clients() {
-    let (port, _temp_dir) = start_test_daemon().await;
+    let (app, _temp_dir) = setup_test_app().await;
 
-    // Spawn 10 concurrent HTTP clients
+    // Spawn 10 concurrent requests
     let tasks: Vec<_> = (0..10)
         .map(|i| {
-            let port = port;
+            let app_clone = TestApp::new(app.router.clone());
             tokio::spawn(async move {
-                let client = Client::new();
-
                 // Make health check request
-                let health_response = client
-                    .get(format!("http://127.0.0.1:{}/health", port))
-                    .send()
-                    .await
-                    .unwrap();
-                assert!(health_response.status().is_success());
+                let health_response = app_clone.get("/health").await;
+                assert_eq!(health_response.status(), StatusCode::OK);
 
                 // Make MCP initialize request
                 let mcp_request = json!({
@@ -125,15 +124,10 @@ async fn test_multiple_concurrent_clients() {
                     "params": {}
                 });
 
-                let mcp_response = client
-                    .post(format!("http://127.0.0.1:{}/mcp", port))
-                    .json(&mcp_request)
-                    .send()
-                    .await
-                    .unwrap();
+                let mcp_response = app_clone.post_json("/message", mcp_request).await;
 
-                assert!(mcp_response.status().is_success());
-                let body: serde_json::Value = mcp_response.json().await.unwrap();
+                assert_eq!(mcp_response.status(), StatusCode::OK);
+                let body = TestApp::json_body(mcp_response).await;
                 assert_eq!(body["id"], i);
             })
         })
@@ -148,28 +142,20 @@ async fn test_multiple_concurrent_clients() {
     }
 
     // Verify stats increased
-    let client = Client::new();
-    let response = client
-        .get(format!("http://127.0.0.1:{}/stats", port))
-        .send()
-        .await
-        .unwrap();
-
-    let body: serde_json::Value = response.json().await.unwrap();
+    let response = app.get("/stats").await;
+    let body = TestApp::json_body(response).await;
     assert!(body["total_requests"].as_u64().unwrap() >= 10);
 }
 
 #[tokio::test]
 async fn test_stress_concurrent_requests() {
-    let (port, _temp_dir) = start_test_daemon().await;
+    let (app, _temp_dir) = setup_test_app().await;
 
     // Spawn 50 concurrent clients making multiple requests each
     let tasks: Vec<_> = (0..50)
         .map(|i| {
-            let port = port;
+            let app_clone = TestApp::new(app.router.clone());
             tokio::spawn(async move {
-                let client = Client::new();
-
                 // Each client makes 5 requests
                 for j in 0..5 {
                     let request = json!({
@@ -179,14 +165,8 @@ async fn test_stress_concurrent_requests() {
                         "params": {}
                     });
 
-                    let response = client
-                        .post(format!("http://127.0.0.1:{}/mcp", port))
-                        .json(&request)
-                        .send()
-                        .await
-                        .unwrap();
-
-                    assert!(response.status().is_success());
+                    let response = app_clone.post_json("/message", request).await;
+                    assert_eq!(response.status(), StatusCode::OK);
                 }
             })
         })
@@ -201,21 +181,14 @@ async fn test_stress_concurrent_requests() {
     }
 
     // Verify total requests
-    let client = Client::new();
-    let response = client
-        .get(format!("http://127.0.0.1:{}/stats", port))
-        .send()
-        .await
-        .unwrap();
-
-    let body: serde_json::Value = response.json().await.unwrap();
+    let response = app.get("/stats").await;
+    let body = TestApp::json_body(response).await;
     assert!(body["total_requests"].as_u64().unwrap() >= 250);
 }
 
 #[tokio::test]
 async fn test_create_session_tool() {
-    let (port, _temp_dir) = start_test_daemon().await;
-    let client = Client::new();
+    let (app, _temp_dir) = setup_test_app().await;
 
     // Call create_session tool
     let request = json!({
@@ -231,16 +204,11 @@ async fn test_create_session_tool() {
         }
     });
 
-    let response = client
-        .post(format!("http://127.0.0.1:{}/mcp", port))
-        .json(&request)
-        .send()
-        .await
-        .unwrap();
+    let response = app.post_json("/message", request).await;
 
-    assert!(response.status().is_success());
+    assert_eq!(response.status(), StatusCode::OK);
 
-    let body: serde_json::Value = response.json().await.unwrap();
+    let body = TestApp::json_body(response).await;
 
     // Verify response structure
     assert_eq!(body["jsonrpc"], "2.0");
@@ -256,8 +224,7 @@ async fn test_create_session_tool() {
 
 #[tokio::test]
 async fn test_tools_list_includes_create_session() {
-    let (port, _temp_dir) = start_test_daemon().await;
-    let client = Client::new();
+    let (app, _temp_dir) = setup_test_app().await;
 
     let request = json!({
         "jsonrpc": "2.0",
@@ -266,16 +233,11 @@ async fn test_tools_list_includes_create_session() {
         "params": {}
     });
 
-    let response = client
-        .post(format!("http://127.0.0.1:{}/mcp", port))
-        .json(&request)
-        .send()
-        .await
-        .unwrap();
+    let response = app.post_json("/message", request).await;
 
-    assert!(response.status().is_success());
+    assert_eq!(response.status(), StatusCode::OK);
 
-    let body: serde_json::Value = response.json().await.unwrap();
+    let body = TestApp::json_body(response).await;
     assert!(body["result"]["tools"].is_array());
 
     let tools = body["result"]["tools"].as_array().unwrap();
@@ -291,15 +253,13 @@ async fn test_tools_list_includes_create_session() {
 
 #[tokio::test]
 async fn test_concurrent_create_sessions() {
-    let (port, _temp_dir) = start_test_daemon().await;
+    let (app, _temp_dir) = setup_test_app().await;
 
     // Create 10 sessions concurrently
     let tasks: Vec<_> = (0..10)
         .map(|i| {
-            let port = port;
+            let app_clone = TestApp::new(app.router.clone());
             tokio::spawn(async move {
-                let client = Client::new();
-
                 let request = json!({
                     "jsonrpc": "2.0",
                     "id": i,
@@ -313,16 +273,11 @@ async fn test_concurrent_create_sessions() {
                     }
                 });
 
-                let response = client
-                    .post(format!("http://127.0.0.1:{}/mcp", port))
-                    .json(&request)
-                    .send()
-                    .await
-                    .unwrap();
+                let response = app_clone.post_json("/message", request).await;
 
-                assert!(response.status().is_success());
+                assert_eq!(response.status(), StatusCode::OK);
 
-                let body: serde_json::Value = response.json().await.unwrap();
+                let body = TestApp::json_body(response).await;
                 assert!(body["result"].is_object());
 
                 body["result"]["content"][0]["text"]
@@ -346,10 +301,11 @@ async fn test_concurrent_create_sessions() {
 
 #[tokio::test]
 async fn test_daemon_shares_rocksdb() {
-    let (port, temp_dir) = start_test_daemon().await;
-    let client = Client::new();
+    // This test MUST use real TCP to verify RocksDB locking
+    let (port, temp_dir) = start_real_daemon().await;
 
     // Verify server is running
+    let client = reqwest::Client::new();
     let response = client
         .get(format!("http://127.0.0.1:{}/health", port))
         .send()
@@ -377,10 +333,10 @@ async fn test_daemon_shares_rocksdb() {
         );
     }
 }
+
 #[tokio::test]
 async fn test_update_conversation_context_tool() {
-    let (port, _temp_dir) = start_test_daemon().await;
-    let client = Client::new();
+    let (app, _temp_dir) = setup_test_app().await;
 
     // First create a session
     let create_request = json!({
@@ -396,14 +352,9 @@ async fn test_update_conversation_context_tool() {
         }
     });
 
-    let response = client
-        .post(format!("http://127.0.0.1:{}/mcp", port))
-        .json(&create_request)
-        .send()
-        .await
-        .unwrap();
+    let response = app.post_json("/message", create_request).await;
 
-    let body: serde_json::Value = response.json().await.unwrap();
+    let body = TestApp::json_body(response).await;
     let session_text = body["result"]["content"][0]["text"].as_str().unwrap();
     let session_id = session_text
         .split("Created new session: ")
@@ -429,22 +380,16 @@ async fn test_update_conversation_context_tool() {
         }
     });
 
-    let response = client
-        .post(format!("http://127.0.0.1:{}/mcp", port))
-        .json(&update_request)
-        .send()
-        .await
-        .unwrap();
+    let response = app.post_json("/message", update_request).await;
 
-    assert!(response.status().is_success());
-    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = TestApp::json_body(response).await;
     assert!(body["result"].is_object());
 }
 
 #[tokio::test]
 async fn test_semantic_search_session_tool() {
-    let (port, _temp_dir) = start_test_daemon().await;
-    let client = Client::new();
+    let (app, _temp_dir) = setup_test_app().await;
 
     // Create session and add context
     let create_request = json!({
@@ -457,14 +402,9 @@ async fn test_semantic_search_session_tool() {
         }
     });
 
-    let response = client
-        .post(format!("http://127.0.0.1:{}/mcp", port))
-        .json(&create_request)
-        .send()
-        .await
-        .unwrap();
+    let response = app.post_json("/message", create_request).await;
 
-    let body: serde_json::Value = response.json().await.unwrap();
+    let body = TestApp::json_body(response).await;
     let session_text = body["result"]["content"][0]["text"].as_str().unwrap();
     let session_id = session_text
         .split("Created new session: ")
@@ -487,22 +427,16 @@ async fn test_semantic_search_session_tool() {
         }
     });
 
-    let response = client
-        .post(format!("http://127.0.0.1:{}/mcp", port))
-        .json(&search_request)
-        .send()
-        .await
-        .unwrap();
+    let response = app.post_json("/message", search_request).await;
 
-    assert!(response.status().is_success());
-    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = TestApp::json_body(response).await;
     assert!(body["result"].is_object());
 }
 
 #[tokio::test]
 async fn test_list_sessions_tool() {
-    let (port, _temp_dir) = start_test_daemon().await;
-    let client = Client::new();
+    let (app, _temp_dir) = setup_test_app().await;
 
     let request = json!({
         "jsonrpc": "2.0",
@@ -514,42 +448,17 @@ async fn test_list_sessions_tool() {
         }
     });
 
-    let response = client
-        .post(format!("http://127.0.0.1:{}/mcp", port))
-        .json(&request)
-        .send()
-        .await
-        .unwrap();
+    let response = app.post_json("/message", request).await;
 
-    assert!(response.status().is_success());
-    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = TestApp::json_body(response).await;
     assert!(body["result"].is_object());
 }
+
 #[tokio::test]
 async fn test_list_sessions_debug() {
-    use post_cortex::daemon::{DaemonConfig, LockFreeDaemonServer};
-    use reqwest::Client;
-    use serde_json::json;
-    use std::time::Duration;
+    let (app, _temp_dir) = setup_test_app().await;
 
-    let temp_dir = tempfile::tempdir().unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-
-    let config = DaemonConfig {
-        host: "127.0.0.1".to_string(),
-        port,
-        data_directory: temp_dir.path().to_str().unwrap().to_string(),
-    };
-
-    let server = LockFreeDaemonServer::new(config).await.unwrap();
-    tokio::spawn(async move {
-        server.start().await.unwrap();
-    });
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let client = Client::new();
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -560,14 +469,9 @@ async fn test_list_sessions_debug() {
         }
     });
 
-    let response = client
-        .post(format!("http://127.0.0.1:{}/mcp", port))
-        .json(&request)
-        .send()
-        .await
-        .unwrap();
+    let response = app.post_json("/message", request).await;
 
-    let body: serde_json::Value = response.json().await.unwrap();
+    let body = TestApp::json_body(response).await;
     println!(
         "Response body: {}",
         serde_json::to_string_pretty(&body).unwrap()

@@ -114,22 +114,30 @@ impl LockFreeDaemonServer {
         })
     }
 
+    /// Build Axum router for testing without starting TCP server
+    ///
+    /// This method exposes the router for in-memory HTTP testing,
+    /// eliminating the need for real TCP ports in tests.
+    pub fn build_router(self) -> Router {
+        let server = Arc::new(self);
+
+        Router::new()
+            .route("/health", get(health_check))
+            .route("/sse", get(handle_sse_stream))
+            .route("/message", post(handle_mcp_request))
+            .route("/stats", get(get_stats))
+            .layer(CorsLayer::permissive())
+            .with_state(server)
+    }
+
     /// Start HTTP server
     pub async fn start(self) -> Result<(), String> {
         let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port)
             .parse()
             .map_err(|e| format!("Invalid address: {}", e))?;
 
-        let server = Arc::new(self);
-
-        // Build router - SSE transport with separate endpoints
-        let app = Router::new()
-            .route("/health", get(health_check))
-            .route("/sse", get(handle_sse_stream))
-            .route("/message", post(handle_mcp_request))
-            .route("/stats", get(get_stats))
-            .layer(CorsLayer::permissive())
-            .with_state(server.clone());
+        // Build router
+        let app = self.build_router();
 
         info!("Starting HTTP server on {}", addr);
 

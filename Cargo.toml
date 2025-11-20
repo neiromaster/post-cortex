@@ -66,6 +66,7 @@ tokio-test = "0.4"
 tempfile = "3.0"
 criterion = "0.5"
 portpicker = "0.1"
+proptest = "1.5"
 
 [[bin]]
 name = "post-cortex"
