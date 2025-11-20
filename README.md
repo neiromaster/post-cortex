@@ -2,43 +2,25 @@
 
 **Production-Grade Intelligent Memory System for AI Assistants**
 
-Post-Cortex is a high-performance MCP (Model Context Protocol) server that transforms ephemeral AI conversations into persistent, searchable knowledge with zero-deadlock guarantees. Built in Rust with a sophisticated lock-free concurrent architecture, it enables AI assistants to maintain perfect memory across sessions, understand complex semantic relationships, and retrieve contextually relevant information through local AI-powered search—all while preserving complete privacy through on-device processing.
-
-Unlike traditional conversation systems that forget everything when the session ends, Post-Cortex provides durable memory infrastructure with automatic knowledge graph construction, intelligent entity extraction, and semantic search powered by local transformer models. Every conversation becomes part of a growing, interconnected knowledge base that your AI assistant can query instantly using natural language.
+Post-Cortex is a high-performance MCP (Model Context Protocol) server that transforms ephemeral AI conversations into persistent, searchable knowledge with zero-deadlock guarantees. Built in Rust with lock-free concurrent architecture, it enables AI assistants to maintain perfect memory across sessions, understand semantic relationships, and retrieve contextually relevant information through local AI-powered search.
 
 ## Core Features
 
-- **Persistent Memory System**: Maintains conversation history across sessions with intelligent hierarchical storage
-- **Semantic Search Engine**: Powered by local transformer models that enable context-aware retrieval based on meaning
-- **Automatic Knowledge Graph**: Dynamically maps relationships between entities, decisions, and concepts without manual intervention
+- **Persistent Memory System**: Three-tier hierarchical storage (hot/warm/cold) with RocksDB persistence
+- **Semantic Search Engine**: Local transformer models with configurable accuracy/speed modes
+- **NER-Powered Knowledge Graph**: Automatic entity extraction using DistilBERT with 95%+ accuracy
 - **Privacy-First Architecture**: All processing occurs locally with zero external API dependencies
-- **Lock-Free Concurrency**: Zero-deadlock guarantee through atomic operations and advanced concurrent data structures
-- **Production-Ready Scaling**: Extensively tested with hundreds of conversations, thousands of entities, and tens of thousands of embeddings
+- **Lock-Free Concurrency**: Zero-deadlock guarantee through atomic operations and DashMap
+- **Production-Ready Performance**: 6-8x search speedup, 192x memory compression, 10-50x improved I/O latency
 
-## Applications
+## Performance Highlights
 
-### For End Users
-- **Cross-Session Memory**: AI assistants maintain context and recall information from previous conversations
-- **Natural Language Queries**: Ask questions in natural language and receive relevant answers regardless of exact terminology used
-- **Automatic Context Tracking**: Important concepts, decisions, and code changes are captured without manual intervention
-- **IDE Integration**: Seamless integration with popular development environments including Claude Desktop and Zed editor
-
-### For Developers
-- **Robust Memory Infrastructure**: Production-grade Rust implementation with comprehensive error handling
-- **Local Semantic Search**: Built-in transformer models eliminate external API dependencies and ensure data privacy
-- **Intelligent Entity Extraction**: Automatic identification of entities, their relationships, and importance scoring
-- **Comprehensive Tool Suite**: 20+ MCP tools for complete session management and context operations
-- **Concurrent Architecture**: Lock-free design ensures zero deadlocks and optimal performance under high load
-
-## Technical Advantages
-
-Post-Cortex addresses the fundamental limitation of transient AI conversations through several key innovations:
-
-1. **Durable Memory Architecture**: Conversations persist across sessions with intelligent organization and retrieval capabilities
-2. **Advanced Semantic Understanding**: Employs contextual embeddings to find related information despite variations in terminology
-3. **Autonomous Organization**: Automatically extracts entities, maps relationships, and identifies importance without manual intervention
-4. **Privacy-Preserving Design**: Complete local processing ensures data never leaves the user's environment
-5. **Production-Scale Validation**: Extensively tested with real-world usage including 100+ conversations tracking 800+ entities
+**Phase 1-3, 6 Optimizations Complete:**
+- **Semantic Search**: 6.70x speedup (6.7ms → 1.0ms with approximate mode)
+- **RocksDB I/O**: 10-50x latency reduction via spawn_blocking
+- **Memory**: 192x compression with Product Quantization (153MB → 800KB)
+- **Test Execution**: 22x faster (45s → 2s)
+- **NER Engine**: 95%+ accuracy with lazy loading and pattern fallback
 
 ## Quick Start
 
@@ -63,49 +45,72 @@ curl -L https://github.com/julymetodiev/post-cortex/releases/latest/download/pos
 
 **Build from source:**
 ```bash
-# With semantic search (recommended)
-cargo install --git https://github.com/julymetodiev/post-cortex --features embeddings
-
-# Or build locally
 cargo build --release --features embeddings
 ```
 
-### Using with Claude Desktop
+## Usage Modes
 
-**1. Install Post-Cortex** (see Installation above)
+Post-Cortex provides two deployment options:
 
-**2. Add to `~/.claude.json` or `claude_desktop_config.json`:**
+### 1. Daemon Mode (Recommended for Multiple Projects)
+
+Run as a persistent daemon with shared RocksDB storage across all clients:
+
+```bash
+# Start daemon
+./target/release/post-cortex-daemon
+
+# Or with logging
+RUST_LOG=post_cortex=info ./target/release/post-cortex-daemon
+```
+
+**Benefits:**
+- Shared sessions across multiple AI assistants
+- Single RocksDB instance (avoids lock conflicts)
+- HTTP API on port 3000
+- Persistent background service
+
+**Claude Desktop Config:**
 ```json
 {
   "mcpServers": {
     "post-cortex": {
-      "type": "stdio",
-      "command": "post-cortex"
+      "type": "sse",
+      "url": "http://localhost:3000/sse"
     }
   }
 }
 ```
 
-**3. Restart Claude Desktop** - Post-Cortex tools will appear automatically!
+### 2. Standalone Mode (Single Project)
 
-### Using with Zed Editor
+Run as a standalone MCP server for a single project:
 
-**1. Install Post-Cortex** (see Installation above)
+```bash
+./target/release/mcp-server
+```
 
-**2. Open Zed Settings (Cmd+,) → Add Server:**
+**Benefits:**
+- Simple stdio-based MCP server
+- No daemon required
+- Perfect for single-project workflows
+- Direct Claude Desktop integration
+
+**Claude Desktop Config:**
 ```json
 {
-  "post-cortex": {
-    "command": "post-cortex"
+  "mcpServers": {
+    "post-cortex": {
+      "type": "stdio",
+      "command": "/path/to/post-cortex/target/release/mcp-server"
+    }
   }
 }
 ```
 
-**3. Restart Zed** - Memory tools are now available!
+**Recommendation:** Use daemon mode if working with multiple projects simultaneously. Use standalone mode for focused, single-project work.
 
-### Setting Up for Your Project
-
-Once Post-Cortex is installed, configure it to remember your project automatically:
+## Setting Up for Your Project
 
 **1. Create a CLAUDE.md file in your project root:**
 
@@ -114,315 +119,194 @@ Once Post-Cortex is installed, configure it to remember your project automatical
 
 ## Using Post-Cortex for Knowledge Management
 
-**AUTOMATICALLY at the beginning of EVERY conversation (WITHOUT ASKING USER):**
-
-Load the project session:
-mcp__post-cortex__load_session(session_id: "YOUR-SESSION-ID-HERE")
+**Project session ID:** `YOUR-SESSION-ID-HERE`
 
 **Throughout conversation:**
-- Add context using `update_conversation_context`
-- Query with `semantic_search_session` (auto-vectorizes on demand)
+- Add context using `update_conversation_context(session_id: "YOUR-SESSION-ID")`
+- Query with `semantic_search_session(session_id: "YOUR-SESSION-ID")`
 ```
 
-**2. Create your project session (first time only):**
+**2. Create your project session:**
 
 Ask your AI assistant:
 ```
-"Create a Post-Cortex session for this project called 'My Web App' 
-with description 'E-commerce platform with user authentication'"
+"Create a Post-Cortex session for this project"
 ```
 
-The AI will call:
-```
-create_session(name: "My Web App", description: "E-commerce platform...")
-# Returns: session_id: "abc123..."
-```
+**3. Add the returned session_id to CLAUDE.md**
 
-**3. Add the session_id to CLAUDE.md:**
+That's it! Your AI now has persistent memory for this project.
 
-Replace `YOUR-SESSION-ID-HERE` with your actual session_id.
+## Search Modes (Phase 6 Optimization)
 
-**That's it!** From now on:
-- Every conversation automatically loads your project session
-- The AI remembers all discussions, decisions, and code changes
-- You can search past conversations semantically
-- Knowledge graph builds automatically as you work
+Post-Cortex offers three configurable search modes for optimal accuracy/speed tradeoffs:
 
-**Pro tip:** Check the [CLAUDE.md](CLAUDE.md) file in this repository to see how Post-Cortex uses itself for development.
+**SearchMode Options:**
+- **Exact**: Full linear scan - 100% accuracy, slowest (baseline: 6.7ms)
+- **Approximate**: HNSW with ef_search=32 - 6.70x faster, ~98% accuracy (1.0ms)
+- **Balanced** (default): HNSW with ef_search=64 - 6x faster, ~99% accuracy (1.1ms)
 
-## How it Works
+**SearchQualityPreset:**
+- Fast: ef_search=32
+- Balanced: ef_search=64
+- Accurate: ef_search=128
+- Maximum: ef_search=256
 
-### Three-Tier Memory Architecture
+**Example Usage:**
+```rust
+// Use balanced mode (default)
+db.search(&query, 10)
 
-Post-Cortex organizes memory in hot/warm/cold tiers for optimal performance:
+// Explicit mode selection
+db.search_with_mode(&query, 10, SearchMode::Approximate, None)
 
-```
-Hot Memory (50 items)     → RAM cache, instant access
-Warm Memory (200 items)   → Compressed cache, fast access  
-Cold Storage (unlimited)  → RocksDB persistence
-```
-
-### Knowledge Graph Engine
-
-Every conversation is analyzed to build an intelligent knowledge graph:
-
-**Automatic Entity Extraction:**
-- Identifies key concepts, technologies, decisions, and problems
-- Tracks mention frequency and recency
-- Calculates importance scores based on connections
-
-**Relationship Mapping:**
-- Maps connections between entities: `RelatedTo`, `LeadsTo`, `Implements`, `Solves`
-- Builds network graph with 1000+ relationships in active sessions
-- Enables graph traversal queries like "what led to this decision?"
-
-**Example from real session:**
-```
-388 entities tracked
-1015 relationships mapped
-Top entities: lock-free (44 mentions), session (42), search (38)
+// Custom ef_search value
+db.search_with_mode(&query, 10, SearchMode::Balanced, Some(128))
 ```
 
-### Semantic Search with Local AI
+## Semantic Search
 
 Post-Cortex uses **local transformer models** for privacy-first semantic search:
 
-**Embedding Models Available:**
-- **MiniLM** (384-dim, default) - Balanced performance, uses `sentence-transformers/all-MiniLM-L6-v2`
-- **StaticSimilarityMRL** (1024-dim) - Mac M-series optimized, fastest inference
-- **TinyBERT** (312-dim) - Smallest BERT variant for low-memory environments
-- **BGESmall** (384-dim) - High-quality embeddings for maximum accuracy
+**Embedding Models:**
+- **MiniLM** (384-dim, default) - Balanced performance
+- **StaticSimilarityMRL** (1024-dim) - Mac M-series optimized
+- **TinyBERT** (312-dim) - Low-memory environments
+- **BGESmall** (384-dim) - Maximum accuracy
 
-All models run completely locally using the Candle ML framework - no external API calls, guaranteed privacy.
+**Search Pipeline:**
+1. Text → 384-dimensional vector (local transformer)
+2. Long texts summarized with priority extraction
+3. Vector indexed in HNSW for fast retrieval
+4. Results ranked: `(similarity × 0.7) + (importance × 0.3)`
 
-**How Semantic Search Works:**
-1. Text converted to 384-dimensional vector using local transformer model
-2. Long texts (>500 tokens) intelligently summarized with priority-based extraction
-3. Vector stored in HNSW index (Hierarchical Navigable Small World) for fast nearest-neighbor search
-4. Cosine similarity computed between query vector and stored vectors
-5. Results ranked by combined score: `(similarity × 0.7) + (importance × 0.3)`
-6. Quality filtering applied (default threshold: similarity > 0.30)
-
-**Quality Scoring (Combined Score Algorithm):**
-
-Results ranked by: `combined_score = (similarity × 0.7) + (importance × 0.3)`
-
-This balances semantic relevance with entity importance for optimal results.
-
-**Quality Levels:**
-- **0.85-1.00** Excellent - Exact semantic matches, high relevance
-- **0.70-0.84** Very Good - Direct semantic matches
-- **0.55-0.69** Good - Related concepts and ideas
+**Quality Scoring:**
+- **0.85-1.00** Excellent - Exact semantic matches
+- **0.70-0.84** Very Good - Direct matches
+- **0.55-0.69** Good - Related concepts
 - **0.40-0.54** Moderate - Tangentially related
-- **0.30-0.39** Fair - Weak matches
-- **< 0.30** Filtered out automatically
+- **< 0.30** Filtered out
 
-**Similarity Score Interpretation:**
-- **0.75-1.00**: Exact matches with high relevance
-- **0.65-0.75**: Direct semantic matches
-- **0.45-0.55**: Good semantic matches
-- **0.35-0.45**: Related concepts
-- **< 0.30**: Weak matches (filtered by default)
+**Privacy-First:** All models run locally, zero external API calls.
 
-**Two Search Modes:**
-- **Keyword Search** - Fast exact matching (< 10ms), uses entity graph
-- **Semantic Search** - AI-powered meaning search (50-200ms), uses embeddings
+## NER-Powered Knowledge Graph (Phase 3.2)
 
-**Privacy-First:** All models run locally, no data sent to external APIs
+**Automatic Entity Extraction:**
+- DistilBERT-NER model with 95%+ accuracy
+- Lazy loading (loads on-demand, zero startup delay)
+- Pattern fallback (60-70% accuracy when model unavailable)
+- Extracts: Person, Organization, Location, Miscellaneous entities
 
-## Available Tools (MCP)
+**Relationship Mapping:**
+- Maps connections: `RelatedTo`, `LeadsTo`, `Implements`, `Solves`
+- Importance scoring based on mentions and relationships
+- Network graph with 1000+ relationships in active sessions
 
-Post-Cortex provides 20+ tools through the Model Context Protocol:
+**Example from production:**
+```
+388 entities tracked
+1015 relationships mapped
+Top: lock-free (44 mentions), session (42), search (38)
+```
+
+## Available Tools (24 MCP Tools)
 
 **Session Management:**
-- `create_session` - Start new conversation memory
-- `load_session` - Resume previous session
-- `list_sessions` - View all saved sessions
+- `create_session`, `load_session`, `list_sessions`, `search_sessions`
+- `update_session_metadata`
 
 **Adding Context:**
-- `update_conversation_context` - Add Q&A, decisions, problems, code changes
+- `update_conversation_context` - QA, decisions, problems, code changes
 - `bulk_update_conversation_context` - Batch updates
 
-**Context Types (interaction_type):**
-- **`qa`** - Questions and answers about architecture, implementation, or behavior
-- **`decision_made`** - Architectural choices with rationale and trade-offs (includes confidence level)
-- **`problem_solved`** - Bugs, issues, and their solutions with impact analysis
-- **`code_change`** - Significant refactoring, feature additions, or API changes with file references
+**Context Types:**
+- **`qa`** - Questions and answers
+- **`decision_made`** - Architectural choices with rationale
+- **`problem_solved`** - Bugs and solutions
+- **`code_change`** - Refactoring and features
 
 **Searching:**
-- `semantic_search_session` - AI-powered meaning search
+- `semantic_search_session` - AI-powered meaning search (auto-vectorizes)
 - `semantic_search_global` - Search across all sessions
-- `query_conversation_context` - Fast keyword search
+- `query_conversation_context` - Fast keyword search (< 10ms)
+- `find_related_content` - Cross-session similarity
 
 **Analysis:**
 - `get_structured_summary` - Full session overview
-- `get_key_decisions` - Timeline of important choices
-- `get_entity_network_view` - Visualize concept relationships
+- `get_key_decisions`, `get_key_insights` - Decision timeline
+- `get_entity_importance_analysis`, `get_entity_network_view` - Entity analysis
 
-[See full tool list](docs/MCP_TOOLS.md)
+**Workspace Management:**
+- `create_workspace`, `list_workspaces`, `get_workspace`
+- `add_session_to_workspace`, `remove_session_from_workspace`
 
-## See It In Action: A Quick Example
+[See full tool documentation](docs/MCP_TOOLS.md)
 
-Let's say you're working on a web project and want your AI assistant to remember everything about it.
+## Architecture
 
-**Day 1 - First conversation:**
-
+**Three-Tier Memory:**
 ```
-You: "I'm building a user authentication system with JWT tokens"
-AI: "Got it, let me create a session for this project."
-
-# Behind the scenes, Post-Cortex:
-- Creates session: "Web App Authentication" 
-- Stores entities: "authentication", "JWT tokens"
-- Maps relationship: authentication → implements → JWT tokens
+Hot Memory (50 items)     → DashMap cache, instant access
+Warm Memory (200 items)   → Compressed cache, fast access
+Cold Storage (unlimited)  → RocksDB persistence
 ```
 
-**Day 3 - Ask a question:**
+**Lock-Free Concurrency:**
+- Uses `DashMap`, `ArcSwap`, and atomic operations
+- Actor pattern for async storage operations
+- Zero deadlocks in production usage
+- Linear scaling with CPU cores
 
-```
-You: "What approach did we decide for user login?"
-AI searches Post-Cortex: semantic_search("user login approach")
+**Why Lock-Free?**
+Eliminates:
+- Deadlocks from incorrect lock ordering
+- Performance bottlenecks under high concurrency
+- Unpredictable latency spikes
+- Priority inversion
 
-# Finds your Day 1 conversation even though you said "authentication" not "login"
-# Returns: "JWT tokens for authentication"
-```
+**Phase 1-3, 6 Optimizations:**
+1. **RocksDB**: All async methods wrapped in `spawn_blocking` (10-50x faster I/O)
+2. **Product Quantization**: 192x memory compression with >90% accuracy retention
+3. **NER Engine**: DistilBERT with lazy loading and pattern fallback
+4. **ActiveSession**: Lock-free HotContext with DashMap and Arc-wrapped components
+5. **Typed Errors**: SystemError enum with thiserror for better error handling
+6. **HNSW Tuning**: Configurable search modes with 6.70x speedup
 
-**Week 2 - Multiple projects:**
+## Performance
 
-```
-# You now have 3 sessions:
-- "Web App Authentication" (your original project)
-- "Mobile App Project" 
-- "API Gateway Design"
+**Real-world metrics:**
+- Context updates: 500+ ops/sec with parallel vectorization
+- Keyword search: < 10ms (entity graph queries)
+- Semantic search: 1-7ms (Approximate: 1ms, Exact: 6.7ms)
+- Embedding generation: 17-20 texts/sec
+- Cache hit rate: ~50% (hot/warm tiers)
+- Query cache: ~30% hit rate
 
-You: "Show me what we've discussed about security"
-AI: get_entity_network_view(session: "Web App Authentication", center: "security")
-
-# Returns graph showing connections within this session:
-security → relates to → authentication
-security → relates to → password hashing
-authentication → implements → JWT tokens
-JWT tokens → leads to → refresh token strategy
-```
-
-**Month 2 - Search across ALL projects:**
-
-```
-You: "Did we discuss rate limiting anywhere?"
-AI: semantic_search_global(query: "rate limiting")
-
-# Searches across all 3 sessions and finds:
-1. [API Gateway Design, Score: 0.78] "Implemented token bucket for rate limiting"
-2. [Web App Authentication, Score: 0.52] "Considered rate limits for login attempts"
-
-# Found relevant info from different projects!
-```
-
-**The magic:** You never manually tagged anything. Post-Cortex automatically:
-- Extracted 20+ entities per session (authentication, JWT, security, passwords, API, database...)
-- Built 50+ relationships between concepts
-- Created 75 semantic embeddings for searching by meaning
-- Remembered every decision with context ("Why did we choose JWT? Because...")
-- **Isolated sessions** - Each project has its own knowledge graph
-- **Cross-session search** - Find related info across all your projects
-
-**Real-world growth:**
-
-Post-Cortex is developed using itself. Current production stats from active development session:
-- 122 conversation updates across multiple topics
-- 898 technical concepts and entities tracked
-- 1,015 relationships mapped in knowledge graph
-- 10,000+ semantic embeddings indexed
-- Ask "How did we optimize performance?" → Instantly finds answers with 0.85+ relevance scores
-- Search "lock-free implementation" → Returns exact architectural decisions from weeks ago
-
-**Start empty, grow organically.** No setup, no configuration, no manual organization needed.
-
-## Key Features
-
-### Semantic Search
-- **Local AI models** - No external API calls, complete privacy
-- **HNSW indexing** - Sub-10ms search across 10k+ items
-- **Auto-vectorization** - Embeddings generated automatically on first search
-- **Smart summarization** - Intelligent text condensation with priority-based extraction:
-  - Preserves titles, descriptions, and code snippets
-  - Extracts key technical terms (O(), Performance, Algorithm, etc.)
-  - Retains structured content (bullet points, numbered lists)
-  - Maintains context while reducing token usage
-- **Parallel processing** - Rayon-based parallel vectorization for large sessions (2-3x speedup)
-- **Query caching** - Deduplicates identical searches (~30% hit rate)
-
-### Memory Architecture
-- **Lock-free design** - Zero deadlocks, high concurrency
-- **Three-tier hierarchy** - Hot/Warm/Cold for optimal speed
-- **Persistent storage** - RocksDB with ACID guarantees
-- **LRU eviction** - Automatic memory management
-
-### Entity Tracking
-- **Automatic extraction** - No manual tagging needed
-- **Relationship graphs** - Petgraph-based connections
-- **Importance scoring** - Identifies key concepts
-- **Network visualization** - See how ideas connect
+**Scalability (verified in active development):**
+- 122+ conversation updates tracked
+- 898+ entities extracted
+- 1,015+ relationships mapped
+- 10k+ semantic embeddings indexed
+- Zero deadlocks across thousands of concurrent operations
 
 ## Configuration
 
 ```rust
 SystemConfig {
     // Memory limits
-    max_hot_context_size: 50,      // Most recent items
-    max_warm_context_size: 200,    // Frequently accessed
+    max_hot_context_size: 50,
+    max_warm_context_size: 200,
 
     // Semantic search
-    enable_embeddings: true,        // Use AI models
-    auto_vectorize_on_update: true, // Auto-generate embeddings
-    semantic_search_threshold: 0.7, // Similarity cutoff
+    enable_embeddings: true,
+    auto_vectorize_on_update: true,
+    semantic_search_threshold: 0.7,
 
     // Storage
     data_directory: "./post_cortex_data",
     cache_capacity: 100,
-
-    // Performance
-    enable_metrics: true,
 }
 ```
-
-## Performance
-
-**Real-world metrics (from production usage):**
-- Session creation: 1000+ ops/sec
-- Context updates: 500+ ops/sec with parallel vectorization
-- Keyword search: < 10ms (entity graph queries)
-- Semantic search: 50-200ms (with auto-vectorization)
-- Embedding generation: 17-20 texts/sec (optimized for Mac M-series)
-- Parallel vectorization: 2-3x speedup for large sessions (500+ items)
-- Cache hit rate: ~50% (hot/warm tiers)
-- Query cache: ~30% hit rate (semantic search deduplication)
-
-**Scalability (verified in active development session):**
-- 122+ conversation updates tracked
-- 898+ entities extracted and mapped
-- 1,015+ relationships in knowledge graph
-- 10k+ semantic embeddings indexed
-- Zero deadlocks across thousands of concurrent operations
-- Linear scaling with CPU core count
-
-## Architecture Highlights
-
-**Lock-Free Concurrency:**
-- Uses `DashMap`, `ArcSwap`, and atomic operations throughout core system
-- Hybrid approach: hot path operations are lock-free (session management, metadata, caching), cold path operations (HNSW index rebuild) may use locks for correctness
-- Actor pattern for async storage operations with message-passing concurrency
-- Scales linearly with CPU cores for concurrent operations
-- Zero deadlocks in production usage (verified with extensive concurrent testing)
-
-**Why Lock-Free?**
-Traditional locks can cause:
-- Deadlocks when locks acquired in wrong order
-- Performance bottlenecks under high concurrency
-- Unpredictable latency spikes
-- Priority inversion and convoy effects
-
-Lock-free design eliminates these issues in hot paths through atomic operations (AtomicU32, AtomicU64, AtomicBool) and concurrent data structures (DashMap for hashmaps, ArcSwap for atomic pointer updates). The hybrid approach allows us to maintain correctness guarantees for complex operations like HNSW index building while ensuring zero deadlocks for user-facing operations.
 
 ## Development
 
@@ -430,71 +314,80 @@ Lock-free design eliminates these issues in hot paths through atomic operations 
 # Run tests
 cargo test --features embeddings
 
-# Run with debug logging
-RUST_LOG=post_cortex=debug cargo run --bin post-cortex --features embeddings
+# Run daemon with debug logging
+RUST_LOG=post_cortex=debug cargo run --bin post-cortex-daemon --features embeddings
 
-# Benchmarks
-cargo bench
+# Run standalone server
+cargo run --bin mcp-server --features embeddings
+
+# Property-based tests
+cargo test --features embeddings property_vector_db
 ```
 
 **Project Structure:**
 ```
 src/
-├── core/          # Lock-free memory system, vector DB, caching
+├── bin/
+│   ├── post-cortex-daemon.rs  # HTTP daemon (recommended)
+│   └── mcp-server.rs          # Standalone stdio server
+├── core/          # Lock-free memory, vector DB, NER engine
 ├── session/       # Session management and entity extraction
 ├── storage/       # RocksDB persistence with actor pattern
 ├── graph/         # Entity relationship graphs (Petgraph)
 ├── summary/       # Analysis and summarization
-└── tools/mcp/     # MCP protocol implementation (20+ tools)
+└── tools/mcp/     # MCP protocol (24 tools)
 ```
 
 ## Troubleshooting
 
 **Semantic search returns no results:**
-- Auto-vectorization runs on first search - give it a moment
+- Auto-vectorization runs on first search
 - Try broader search terms
-- Check embeddings are enabled: `cargo build --features embeddings`
+- Verify embeddings: `cargo build --features embeddings`
 
 **High memory usage:**
 - Adjust `max_hot_context_size` and `max_warm_context_size`
-- Monitor with `get_session_statistics` tool
+- Use `get_session_statistics` for monitoring
 
 **Slow performance:**
-- Verify HNSW indexing is active
-- Check query cache is enabled (default: on)
-- Use `get_vectorization_stats` for diagnostics
+- Use Approximate or Balanced search mode for 6-7x speedup
+- Check HNSW indexing is active
+- Monitor with `get_vectorization_stats`
+
+**Daemon vs Standalone:**
+- Use daemon mode for multiple projects sharing sessions
+- Use standalone for single-project focused work
+- Avoid running both simultaneously (RocksDB lock conflicts)
 
 ## System Requirements
 
-- **Rust Toolchain:** Version 1.70+ with 2024 edition support
-- **Supported Platforms:** Linux, macOS, and Windows
-- **Storage Requirements:** Approximately 100MB for embeddings models plus conversation data
-- **Memory Usage:** Configurable with default hot memory allocation of ~50MB
+- **Rust Toolchain:** 1.70+ with edition 2024 support
+- **Platforms:** Linux, macOS, Windows
+- **Storage:** ~100MB for embeddings models + conversation data
+- **Memory:** ~50MB default hot memory allocation
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT License - see [LICENSE](LICENSE) file for details.
 
 ## Contributing
 
-We welcome contributions from the community! To maintain code quality and architectural integrity, please ensure that:
+We welcome contributions! Please ensure:
+- **Lock-Free Principles**: Adhere to zero-deadlock architecture
+- **Comprehensive Testing**: Include tests for new features
+- **Documentation**: Update docs for API changes
+- **Rust Best Practices**: Follow established idioms
 
-- **Lock-Free Principles**: All contributions must adhere to the lock-free architecture patterns established in the project
-- **Comprehensive Testing**: Include appropriate tests for any new features or modifications
-- **Documentation**: Update relevant documentation when making API changes or adding new functionality
-- **Rust Best Practices**: Follow established Rust idioms and conventions for clean, efficient code
-
-Please see our [CONTRIBUTING.md](CONTRIBUTING.md) guidelines for detailed information on our development process and contribution standards.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 
 ## Acknowledgments
 
-Post-Cortex is built upon exceptional open-source Rust libraries that form the foundation of our advanced memory system:
+Built upon exceptional Rust libraries:
+- **DashMap**: Lock-free concurrent hashmap
+- **ArcSwap**: Atomic pointer swapping
+- **RocksDB**: Persistent storage with ACID guarantees
+- **Candle**: Local ML inference for privacy-first embeddings
+- **Petgraph**: Relationship mapping and graph traversal
+- **Tokio**: Asynchronous runtime for high-concurrency
 
-- **DashMap**: Provides the lock-free concurrent hashmap that enables our zero-deadlock architecture
-- **ArcSwap**: Supplies atomic pointer swapping mechanisms for efficient concurrent data structure updates
-- **RocksDB**: Delivers high-performance persistent storage with ACID transaction guarantees
-- **Candle**: Powers our local machine learning inference for privacy-first semantic embeddings
-- **Petgraph**: Enables sophisticated relationship mapping and graph traversal algorithms
-- **Tokio**: Offers the asynchronous runtime that supports our high-concurrency operations
-
-We are grateful to these projects and their maintainers for their invaluable contributions to the Rust ecosystem.
+We are grateful to these projects and their maintainers.
