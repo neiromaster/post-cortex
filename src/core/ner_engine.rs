@@ -252,13 +252,6 @@ impl LockFreeNEREngine {
 
         let hidden_flat = hidden_states.reshape((batch_size * seq_len, hidden_dim))?;
 
-        // DEBUG: Check classifier weights
-        let weights_vec = classifier_weights.to_vec2::<f32>()?;
-        if !weights_vec.is_empty() && !weights_vec[0].is_empty() {
-            println!("Classifier weights (first row, first 5 values): {:?}", &weights_vec[0][..5]);
-            println!("Weights contain NaN: {}", weights_vec.iter().any(|row| row.iter().any(|x| x.is_nan())));
-        }
-
         // Matmul: [batch*seq_len, hidden_dim] @ [hidden_dim, num_labels]
         let logits_flat = hidden_flat.matmul(&classifier_weights.t()?)?;
         let logits_flat = logits_flat.broadcast_add(classifier_bias)?;
@@ -299,14 +292,6 @@ impl LockFreeNEREngine {
     ) -> Result<Vec<RecognizedEntity>> {
         let mut entities = Vec::new();
         let mut current_entity: Option<(String, EntityType, f32, usize, usize)> = None;
-
-        // Count predictions for debugging
-        let mut label_counts = std::collections::HashMap::new();
-        for &pred_id in predictions.iter() {
-            let label = &self.labels[pred_id as usize];
-            *label_counts.entry(label.clone()).or_insert(0) += 1;
-        }
-        debug!("Prediction distribution: {:?}", label_counts);
 
         for (idx, &pred_id) in predictions.iter().enumerate() {
             // Skip special tokens ([CLS], [SEP], [PAD])
@@ -525,7 +510,7 @@ mod tests {
         println!("\n--- Testing cache ---");
         let text = "Test caching with Rust and Mozilla.";
         let _ = engine.extract_entities(text).unwrap();
-        assert_eq!(engine.cache_size(), 5, "Cache should have 5 entries (4 test cases + 1 cache test)");
+        assert_eq!(engine.cache_size(), 6, "Cache should have 6 entries (5 test cases + 1 cache test)");
 
         println!("\nCache hit test...");
         let entities_cached = engine.extract_entities(text).unwrap();

@@ -28,6 +28,7 @@ pub mod lockfree_memory_system;
 pub mod lockfree_performance;
 pub mod lockfree_query_cache;
 pub mod lockfree_vector_db;
+pub mod ner_engine;
 pub mod query_cache;
 pub mod query_cache_compat;
 pub mod semantic_query_engine;

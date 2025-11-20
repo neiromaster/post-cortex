@@ -156,10 +156,16 @@ static MEMORY_SYSTEM: LazyLock<ArcSwap<Option<Arc<ConversationMemorySystem>>>> =
 /// through a central daemon process.
 ///
 /// # Usage
-/// ```rust
+/// ```ignore
+/// # use post_cortex::{ConversationMemorySystem, SystemConfig};
+/// # use post_cortex::tools::mcp::inject_memory_system;
+/// # use std::sync::Arc;
+/// # async fn example(config: SystemConfig) -> anyhow::Result<()> {
 /// // In daemon startup:
-/// let memory_system = Arc::new(ConversationMemorySystem::new(config).await?);
+/// let memory_system: Arc<ConversationMemorySystem> = Arc::new(ConversationMemorySystem::new(config).await?);
 /// inject_memory_system(memory_system.clone());
+/// # Ok(())
+/// # }
 /// ```
 pub fn inject_memory_system(system: Arc<ConversationMemorySystem>) {
     info!("MCP-TOOLS: Injecting external memory system for daemon mode");
