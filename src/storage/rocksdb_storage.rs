@@ -85,22 +85,31 @@ impl RealRocksDBStorage {
     pub async fn save_session(&self, session: &ActiveSession) -> Result<()> {
         info!("RealRocksDBStorage: Saving session with ID: {}", session.id);
 
-        // Serialize session data
-        let session_data = bincode::serde::encode_to_vec(session, bincode::config::standard())
-            .map_err(|e| anyhow::anyhow!("Failed to serialize session: {}", e))?;
+        let db = self.db.clone();
+        let session = session.clone();
 
-        info!(
-            "RealRocksDBStorage: Session data serialized, size: {} bytes",
-            session_data.len()
-        );
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            // Serialize session data
+            let session_data = bincode::serde::encode_to_vec(&session, bincode::config::standard())
+                .map_err(|e| anyhow::anyhow!("Failed to serialize session: {}", e))?;
 
-        // Use binary key for better performance
-        let key = format!("session:{}", session.id);
+            info!(
+                "RealRocksDBStorage: Session data serialized, size: {} bytes",
+                session_data.len()
+            );
 
-        // Write to RocksDB
-        self.db.put(key.as_bytes(), &session_data)?;
+            // Use binary key for better performance
+            let key = format!("session:{}", session.id);
 
-        info!("RealRocksDBStorage: Session saved to RocksDB");
+            // Write to RocksDB
+            db.put(key.as_bytes(), &session_data)?;
+
+            info!("RealRocksDBStorage: Session saved to RocksDB");
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+
         Ok(())
     }
 
@@ -111,63 +120,82 @@ impl RealRocksDBStorage {
             session_id
         );
 
+        let db = self.db.clone();
         let key = format!("session:{}", session_id);
 
-        match self.db.get(key.as_bytes())? {
-            Some(data) => {
-                info!(
-                    "RealRocksDBStorage: Session data found, size: {} bytes",
-                    data.len()
-                );
+        tokio::task::spawn_blocking(move || -> Result<ActiveSession> {
+            match db.get(key.as_bytes())? {
+                Some(data) => {
+                    info!(
+                        "RealRocksDBStorage: Session data found, size: {} bytes",
+                        data.len()
+                    );
 
-                let (session, _): (ActiveSession, usize) =
-                    bincode::serde::decode_from_slice(&data, bincode::config::standard())
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize session: {}", e))?;
+                    let (session, _): (ActiveSession, usize) =
+                        bincode::serde::decode_from_slice(&data, bincode::config::standard())
+                            .map_err(|e| anyhow::anyhow!("Failed to deserialize session: {}", e))?;
 
-                info!("RealRocksDBStorage: Session deserialized successfully");
-                Ok(session)
+                    info!("RealRocksDBStorage: Session deserialized successfully");
+                    Ok(session)
+                }
+                None => {
+                    info!("RealRocksDBStorage: Session not found");
+                    Err(anyhow::anyhow!("Session not found"))
+                }
             }
-            None => {
-                info!("RealRocksDBStorage: Session not found");
-                Err(anyhow::anyhow!("Session not found"))
-            }
-        }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
     }
 
     /// Save checkpoint to RocksDB
     pub async fn save_checkpoint(&self, checkpoint: &SessionCheckpoint) -> Result<()> {
-        let checkpoint_data =
-            bincode::serde::encode_to_vec(checkpoint, bincode::config::standard())
-                .map_err(|e| anyhow::anyhow!("Failed to serialize checkpoint: {}", e))?;
+        let db = self.db.clone();
+        let checkpoint = checkpoint.clone();
 
-        let key = format!("checkpoint:{}", checkpoint.id);
-        self.db.put(key.as_bytes(), &checkpoint_data)?;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let checkpoint_data =
+                bincode::serde::encode_to_vec(&checkpoint, bincode::config::standard())
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize checkpoint: {}", e))?;
 
-        info!(
-            "RealRocksDBStorage: Checkpoint saved with ID: {}",
-            checkpoint.id
-        );
+            let key = format!("checkpoint:{}", checkpoint.id);
+            db.put(key.as_bytes(), &checkpoint_data)?;
+
+            info!(
+                "RealRocksDBStorage: Checkpoint saved with ID: {}",
+                checkpoint.id
+            );
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+
         Ok(())
     }
 
     /// Load checkpoint from RocksDB
     pub async fn load_checkpoint(&self, checkpoint_id: Uuid) -> Result<SessionCheckpoint> {
+        let db = self.db.clone();
         let key = format!("checkpoint:{}", checkpoint_id);
 
-        match self.db.get(key.as_bytes())? {
-            Some(data) => {
-                let (checkpoint, _): (SessionCheckpoint, usize) =
-                    bincode::serde::decode_from_slice(&data, bincode::config::standard())
-                        .map_err(|e| anyhow::anyhow!("Failed to deserialize checkpoint: {}", e))?;
+        tokio::task::spawn_blocking(move || -> Result<SessionCheckpoint> {
+            match db.get(key.as_bytes())? {
+                Some(data) => {
+                    let (checkpoint, _): (SessionCheckpoint, usize) =
+                        bincode::serde::decode_from_slice(&data, bincode::config::standard())
+                            .map_err(|e| anyhow::anyhow!("Failed to deserialize checkpoint: {}", e))?;
 
-                info!(
-                    "RealRocksDBStorage: Checkpoint loaded with ID: {}",
-                    checkpoint_id
-                );
-                Ok(checkpoint)
+                    info!(
+                        "RealRocksDBStorage: Checkpoint loaded with ID: {}",
+                        checkpoint_id
+                    );
+                    Ok(checkpoint)
+                }
+                None => Err(anyhow::anyhow!("Checkpoint not found")),
             }
-            None => Err(anyhow::anyhow!("Checkpoint not found")),
-        }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
     }
 
     /// Batch save multiple updates efficiently
@@ -176,117 +204,161 @@ impl RealRocksDBStorage {
         session_id: Uuid,
         updates: Vec<ContextUpdate>,
     ) -> Result<()> {
-        let mut batch = WriteBatch::default();
+        let db = self.db.clone();
+        let updates_len = updates.len();
 
-        for update in &updates {
-            let key = format!("session:{}:update:{}", session_id, update.id);
-            let update_data = bincode::serde::encode_to_vec(update, bincode::config::standard())
-                .map_err(|e| anyhow::anyhow!("Failed to serialize update: {}", e))?;
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut batch = WriteBatch::default();
 
-            batch.put(key.as_bytes(), &update_data);
-        }
+            for update in &updates {
+                let key = format!("session:{}:update:{}", session_id, update.id);
+                let update_data = bincode::serde::encode_to_vec(update, bincode::config::standard())
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize update: {}", e))?;
 
-        self.db.write(batch)?;
+                batch.put(key.as_bytes(), &update_data);
+            }
 
-        info!(
-            "RealRocksDBStorage: Batch saved {} updates for session {}",
-            updates.len(),
-            session_id
-        );
+            db.write(batch)?;
+
+            info!(
+                "RealRocksDBStorage: Batch saved {} updates for session {}",
+                updates_len,
+                session_id
+            );
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
 
         Ok(())
     }
 
     /// List all session IDs
     pub async fn list_sessions(&self) -> Result<Vec<Uuid>> {
-        let mut sessions = Vec::new();
+        let db = self.db.clone();
 
-        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
-        for item in iter {
-            let (key, _) = item?;
-            let key_str = String::from_utf8_lossy(&key);
+        tokio::task::spawn_blocking(move || -> Result<Vec<Uuid>> {
+            let mut sessions = Vec::new();
 
-            if key_str.starts_with("session:")
-                && !key_str.contains(":update:")
-                && let Some(uuid_str) = key_str.strip_prefix("session:")
-                && let Ok(uuid) = Uuid::parse_str(uuid_str)
-            {
-                sessions.push(uuid);
+            let iter = db.iterator(rocksdb::IteratorMode::Start);
+            for item in iter {
+                let (key, _) = item?;
+                let key_str = String::from_utf8_lossy(&key);
+
+                if key_str.starts_with("session:")
+                    && !key_str.contains(":update:")
+                    && let Some(uuid_str) = key_str.strip_prefix("session:")
+                    && let Ok(uuid) = Uuid::parse_str(uuid_str)
+                {
+                    sessions.push(uuid);
+                }
             }
-        }
 
-        info!("RealRocksDBStorage: Found {} sessions", sessions.len());
-        Ok(sessions)
+            info!("RealRocksDBStorage: Found {} sessions", sessions.len());
+            Ok(sessions)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
     }
 
     /// Get database statistics
     pub async fn get_stats(&self) -> Result<String> {
-        let stats = self
-            .db
-            .property_value(rocksdb::properties::STATS)?
-            .unwrap_or_else(|| "No stats available".to_string());
+        let db = self.db.clone();
 
-        Ok(stats)
+        tokio::task::spawn_blocking(move || -> Result<String> {
+            let stats = db
+                .property_value(rocksdb::properties::STATS)?
+                .unwrap_or_else(|| "No stats available".to_string());
+
+            Ok(stats)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
     }
 
     /// Compact database
     /// Force database compaction
     pub async fn compact(&self) -> Result<()> {
-        self.db.compact_range(None::<&[u8]>, None::<&[u8]>);
-        info!("RealRocksDBStorage: Database compacted");
-        Ok(())
+        let db = self.db.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            db.compact_range(None::<&[u8]>, None::<&[u8]>);
+            info!("RealRocksDBStorage: Database compacted");
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
     }
 
     /// Delete session and all related data
     pub async fn delete_session(&self, session_id: Uuid) -> Result<()> {
-        let mut batch = WriteBatch::default();
+        let db = self.db.clone();
 
-        // Delete main session
-        let session_key = format!("session:{}", session_id);
-        batch.delete(session_key.as_bytes());
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut batch = WriteBatch::default();
 
-        // Delete all updates for this session
-        let update_prefix = format!("update:{}:", session_id);
-        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
-        let mut keys_to_delete = Vec::new();
+            // Delete main session
+            let session_key = format!("session:{}", session_id);
+            batch.delete(session_key.as_bytes());
 
-        for item in iter {
-            let (key, _) = item?;
-            let key_str = String::from_utf8_lossy(&key);
+            // Delete all updates for this session
+            let update_prefix = format!("update:{}:", session_id);
+            let iter = db.iterator(rocksdb::IteratorMode::Start);
+            let mut keys_to_delete = Vec::new();
 
-            if key_str.starts_with(&update_prefix) {
-                keys_to_delete.push(key.to_vec());
+            for item in iter {
+                let (key, _) = item?;
+                let key_str = String::from_utf8_lossy(&key);
+
+                if key_str.starts_with(&update_prefix) {
+                    keys_to_delete.push(key.to_vec());
+                }
             }
-        }
 
-        // Batch delete all related keys
-        for key in keys_to_delete {
-            batch.delete(&key);
-        }
-        self.db.write(batch)?;
+            // Batch delete all related keys
+            for key in keys_to_delete {
+                batch.delete(&key);
+            }
+            db.write(batch)?;
 
-        info!(
-            "RealRocksDBStorage: Deleted session {} and related data",
-            session_id
-        );
-        Ok(())
+            info!(
+                "RealRocksDBStorage: Deleted session {} and related data",
+                session_id
+            );
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
     }
 
     /// Get total number of keys in database
     pub async fn get_key_count(&self) -> Result<usize> {
-        let mut count = 0;
-        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
-        for _ in iter {
-            count += 1;
-        }
+        let db = self.db.clone();
 
-        Ok(count)
+        tokio::task::spawn_blocking(move || -> Result<usize> {
+            let mut count = 0;
+            let iter = db.iterator(rocksdb::IteratorMode::Start);
+            for _ in iter {
+                count += 1;
+            }
+
+            Ok(count)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
     }
 
     /// Check if session exists
     pub async fn session_exists(&self, session_id: Uuid) -> Result<bool> {
+        let db = self.db.clone();
         let key = format!("session:{}", session_id);
-        Ok(self.db.get(key.as_bytes())?.is_some())
+
+        tokio::task::spawn_blocking(move || -> Result<bool> {
+            Ok(db.get(key.as_bytes())?.is_some())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
     }
 
     // ========================================================================
@@ -308,33 +380,44 @@ impl RealRocksDBStorage {
             name, workspace_id
         );
 
-        #[derive(Serialize, Deserialize)]
-        struct WorkspaceData {
-            id: Uuid,
-            name: String,
-            description: String,
-            sessions: Vec<(Uuid, SessionRole)>,
-            created_at: u64,
-        }
+        let db = self.db.clone();
+        let name = name.to_string();
+        let description = description.to_string();
+        let session_ids = session_ids.clone();
 
-        let workspace_data = WorkspaceData {
-            id: workspace_id,
-            name: name.to_string(),
-            description: description.to_string(),
-            sessions: session_ids.iter().map(|id| (*id, SessionRole::Primary)).collect(),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        };
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            #[derive(Serialize, Deserialize)]
+            struct WorkspaceData {
+                id: Uuid,
+                name: String,
+                description: String,
+                sessions: Vec<(Uuid, SessionRole)>,
+                created_at: u64,
+            }
 
-        let data = bincode::serde::encode_to_vec(&workspace_data, bincode::config::standard())
-            .map_err(|e| anyhow::anyhow!("Failed to serialize workspace: {}", e))?;
+            let workspace_data = WorkspaceData {
+                id: workspace_id,
+                name,
+                description,
+                sessions: session_ids.iter().map(|id| (*id, SessionRole::Primary)).collect(),
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            };
 
-        let key = format!("workspace:{}", workspace_id);
-        self.db.put(key.as_bytes(), data)?;
+            let data = bincode::serde::encode_to_vec(&workspace_data, bincode::config::standard())
+                .map_err(|e| anyhow::anyhow!("Failed to serialize workspace: {}", e))?;
 
-        info!("RealRocksDBStorage: Workspace {} saved successfully", workspace_id);
+            let key = format!("workspace:{}", workspace_id);
+            db.put(key.as_bytes(), data)?;
+
+            info!("RealRocksDBStorage: Workspace {} saved successfully", workspace_id);
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+
         Ok(())
     }
 
@@ -342,31 +425,37 @@ impl RealRocksDBStorage {
     pub async fn delete_workspace(&self, workspace_id: Uuid) -> Result<()> {
         info!("RealRocksDBStorage: Deleting workspace {}", workspace_id);
 
-        let key = format!("workspace:{}", workspace_id);
-        self.db.delete(key.as_bytes())?;
+        let db = self.db.clone();
 
-        // Also delete all workspace-session associations
-        let ws_session_prefix = format!("ws_session:{}:", workspace_id);
-        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
-        let mut keys_to_delete = Vec::new();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let key = format!("workspace:{}", workspace_id);
+            db.delete(key.as_bytes())?;
 
-        for item in iter {
-            let (key, _) = item?;
-            let key_str = String::from_utf8_lossy(&key);
+            // Also delete all workspace-session associations
+            let ws_session_prefix = format!("ws_session:{}:", workspace_id);
+            let iter = db.iterator(rocksdb::IteratorMode::Start);
+            let mut keys_to_delete = Vec::new();
 
-            if key_str.starts_with(&ws_session_prefix) {
-                keys_to_delete.push(key.to_vec());
+            for item in iter {
+                let (key, _) = item?;
+                let key_str = String::from_utf8_lossy(&key);
+
+                if key_str.starts_with(&ws_session_prefix) {
+                    keys_to_delete.push(key.to_vec());
+                }
             }
-        }
 
-        let mut batch = WriteBatch::default();
-        for key in keys_to_delete {
-            batch.delete(&key);
-        }
-        self.db.write(batch)?;
+            let mut batch = WriteBatch::default();
+            for key in keys_to_delete {
+                batch.delete(&key);
+            }
+            db.write(batch)?;
 
-        info!("RealRocksDBStorage: Workspace {} deleted successfully", workspace_id);
-        Ok(())
+            info!("RealRocksDBStorage: Workspace {} deleted successfully", workspace_id);
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
     }
 
     /// Add session to workspace association
@@ -381,34 +470,42 @@ impl RealRocksDBStorage {
             session_id, workspace_id, role
         );
 
-        #[derive(Serialize, Deserialize)]
-        struct WorkspaceSession {
-            workspace_id: Uuid,
-            session_id: Uuid,
-            role: crate::workspace::SessionRole,
-            added_at: u64,
-        }
+        let db = self.db.clone();
 
-        let ws_session = WorkspaceSession {
-            workspace_id,
-            session_id,
-            role,
-            added_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        };
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            #[derive(Serialize, Deserialize)]
+            struct WorkspaceSession {
+                workspace_id: Uuid,
+                session_id: Uuid,
+                role: crate::workspace::SessionRole,
+                added_at: u64,
+            }
 
-        let data = bincode::serde::encode_to_vec(&ws_session, bincode::config::standard())
-            .map_err(|e| anyhow::anyhow!("Failed to serialize workspace-session: {}", e))?;
+            let ws_session = WorkspaceSession {
+                workspace_id,
+                session_id,
+                role,
+                added_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            };
 
-        let key = format!("ws_session:{}:{}", workspace_id, session_id);
-        self.db.put(key.as_bytes(), data)?;
+            let data = bincode::serde::encode_to_vec(&ws_session, bincode::config::standard())
+                .map_err(|e| anyhow::anyhow!("Failed to serialize workspace-session: {}", e))?;
 
-        info!(
-            "RealRocksDBStorage: Session {} added to workspace {} successfully",
-            session_id, workspace_id
-        );
+            let key = format!("ws_session:{}:{}", workspace_id, session_id);
+            db.put(key.as_bytes(), data)?;
+
+            info!(
+                "RealRocksDBStorage: Session {} added to workspace {} successfully",
+                session_id, workspace_id
+            );
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+
         Ok(())
     }
 
@@ -423,14 +520,20 @@ impl RealRocksDBStorage {
             session_id, workspace_id
         );
 
+        let db = self.db.clone();
         let key = format!("ws_session:{}:{}", workspace_id, session_id);
-        self.db.delete(key.as_bytes())?;
 
-        info!(
-            "RealRocksDBStorage: Session {} removed from workspace {} successfully",
-            session_id, workspace_id
-        );
-        Ok(())
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            db.delete(key.as_bytes())?;
+
+            info!(
+                "RealRocksDBStorage: Session {} removed from workspace {} successfully",
+                session_id, workspace_id
+            );
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
     }
 }
 
