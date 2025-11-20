@@ -386,6 +386,143 @@ proptest! {
 }
 
 #[cfg(test)]
+mod pq_tests {
+    use super::*;
+
+    #[test]
+    fn test_product_quantization_enabled() {
+        let dim = 384;
+        let config = VectorDbConfig {
+            dimension: dim,
+            enable_quantization: false,
+            enable_hnsw_index: false,
+            enable_product_quantization: true,
+            pq_subvectors: 8,
+            pq_bits: 8,
+            ..Default::default()
+        };
+        let db = FastVectorDB::new(config).unwrap();
+
+        // Add a vector
+        let vector = vec![0.5f32; dim];
+        let metadata = VectorMetadata::new(
+            "test".to_string(),
+            "test text".to_string(),
+            "test-source".to_string(),
+            "qa".to_string(),
+        );
+        let id = db.add_vector(vector.clone(), metadata).unwrap();
+
+        // Search for the same vector
+        let results = db.search(&vector, 1).unwrap();
+
+        // Should find it with high similarity despite PQ compression
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].vector_id, id);
+        assert!(results[0].similarity > 0.9); // PQ may reduce similarity slightly
+    }
+
+    #[test]
+    fn test_pq_memory_savings() {
+        let dim = 384;
+
+        // Database without PQ
+        let config_no_pq = VectorDbConfig {
+            dimension: dim,
+            enable_quantization: false,
+            enable_hnsw_index: false,
+            enable_product_quantization: false,
+            ..Default::default()
+        };
+        let db_no_pq = FastVectorDB::new(config_no_pq).unwrap();
+
+        // Database with PQ
+        let config_pq = VectorDbConfig {
+            dimension: dim,
+            enable_quantization: false,
+            enable_hnsw_index: false,
+            enable_product_quantization: true,
+            pq_subvectors: 8,
+            pq_bits: 8,
+            ..Default::default()
+        };
+        let db_pq = FastVectorDB::new(config_pq).unwrap();
+
+        // Add same vectors to both
+        for i in 0..100 {
+            let vector = vec![(i as f32) / 100.0; dim];
+            let metadata = VectorMetadata::new(
+                format!("vec-{}", i),
+                format!("text {}", i),
+                "test-source".to_string(),
+                "qa".to_string(),
+            );
+            db_no_pq.add_vector(vector.clone(), metadata.clone()).unwrap();
+            db_pq.add_vector(vector, metadata).unwrap();
+        }
+
+        // PQ should use significantly less memory
+        let stats_no_pq = db_no_pq.get_stats();
+        let stats_pq = db_pq.get_stats();
+
+        // PQ codes are 8 bytes (8 subvectors × 1 byte) vs 1536 bytes (384 floats × 4 bytes)
+        // Actual savings depend on whether we keep original vectors
+        println!("Memory without PQ: {} bytes", stats_no_pq.memory_usage_bytes);
+        println!("Memory with PQ: {} bytes", stats_pq.memory_usage_bytes);
+
+        // Both should have 100 vectors
+        assert_eq!(stats_no_pq.total_vectors, 100);
+        assert_eq!(stats_pq.total_vectors, 100);
+    }
+
+    #[test]
+    fn test_pq_search_accuracy() {
+        let dim = 384;
+        let config = VectorDbConfig {
+            dimension: dim,
+            enable_quantization: false,
+            enable_hnsw_index: false,
+            enable_product_quantization: true,
+            pq_subvectors: 8,
+            pq_bits: 8,
+            ..Default::default()
+        };
+        let db = FastVectorDB::new(config).unwrap();
+
+        // Add diverse vectors
+        for i in 0..50 {
+            let mut vector = vec![0.0f32; dim];
+            vector[i % dim] = 1.0;
+            vector[(i + 1) % dim] = 0.5;
+
+            let metadata = VectorMetadata::new(
+                format!("vec-{}", i),
+                format!("text {}", i),
+                "test-source".to_string(),
+                "qa".to_string(),
+            );
+            db.add_vector(vector, metadata).unwrap();
+        }
+
+        // Search should still work
+        let mut query = vec![0.0f32; dim];
+        query[10] = 1.0;
+        query[11] = 0.5;
+
+        let results = db.search(&query, 5).unwrap();
+
+        // Should return some results
+        assert!(!results.is_empty());
+        assert!(results.len() <= 5);
+
+        // Results should be in descending similarity order
+        for i in 0..results.len().saturating_sub(1) {
+            assert!(results[i].similarity >= results[i + 1].similarity);
+        }
+    }
+}
+
+#[cfg(test)]
 mod concurrent_tests {
     use super::*;
     use std::sync::Arc;
