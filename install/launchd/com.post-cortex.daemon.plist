@@ -9,7 +9,7 @@
     <!-- Program to run -->
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/post-cortex-daemon</string>
+        <string>/opt/homebrew/bin/post-cortex-daemon</string>
         <string>start</string>
     </array>
 
