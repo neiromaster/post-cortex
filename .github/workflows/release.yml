@@ -17,16 +17,10 @@ jobs:
         include:
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact_name: post-cortex
-            asset_name: post-cortex-macos-x64
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: post-cortex
-            asset_name: post-cortex-macos-arm64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: post-cortex
-            asset_name: post-cortex-linux-x64
 
     steps:
       - uses: actions/checkout@v4
@@ -35,23 +29,33 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-        # timeout-minutes: 10
-        # continue-on-error: false
 
-      - name: Build
+      - name: Build both binaries
         run: cargo build --release --target ${{ matrix.target }} --features embeddings
 
-      - name: Strip binary
-        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+      - name: Strip post-cortex binary
+        run: strip target/${{ matrix.target }}/release/post-cortex
 
-      - name: Rename binary
-        run: cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} ${{ matrix.asset_name }}
+      - name: Strip post-cortex-daemon binary
+        run: strip target/${{ matrix.target }}/release/post-cortex-daemon
 
-      - name: Upload binary
+      - name: Package binaries
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/post-cortex dist/post-cortex-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/post-cortex-daemon dist/post-cortex-daemon-${{ matrix.target }}
+
+      - name: Upload post-cortex binary
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}
+          name: post-cortex-${{ matrix.target }}
+          path: dist/post-cortex-${{ matrix.target }}
+
+      - name: Upload post-cortex-daemon binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-cortex-daemon-${{ matrix.target }}
+          path: dist/post-cortex-daemon-${{ matrix.target }}
 
   release:
     name: Create Release
@@ -72,24 +76,74 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/post-cortex-macos-x64/post-cortex-macos-x64
-            artifacts/post-cortex-macos-arm64/post-cortex-macos-arm64
-            artifacts/post-cortex-linux-x64/post-cortex-linux-x64
+            artifacts/post-cortex-x86_64-apple-darwin/post-cortex-x86_64-apple-darwin
+            artifacts/post-cortex-aarch64-apple-darwin/post-cortex-aarch64-apple-darwin
+            artifacts/post-cortex-x86_64-unknown-linux-gnu/post-cortex-x86_64-unknown-linux-gnu
+            artifacts/post-cortex-daemon-x86_64-apple-darwin/post-cortex-daemon-x86_64-apple-darwin
+            artifacts/post-cortex-daemon-aarch64-apple-darwin/post-cortex-daemon-aarch64-apple-darwin
+            artifacts/post-cortex-daemon-x86_64-unknown-linux-gnu/post-cortex-daemon-x86_64-unknown-linux-gnu
           body: |
+            ## Post-Cortex Release
+
+            This release includes **two binaries**:
+            1. **post-cortex** - Stdio MCP server (for Claude Desktop integration)
+            2. **post-cortex-daemon** - HTTP daemon server (for API usage)
+
             ## Installation
 
-            ### Homebrew (macOS/Linux)
+            ### Homebrew (macOS/Linux) - Recommended
             ```bash
             brew install julymetodiev/tap/post-cortex
             ```
+            This installs both binaries: `post-cortex` and `post-cortex-daemon`
 
             ### Direct Download
-            Download the binary for your platform and add to PATH:
-            - macOS Intel: `post-cortex-macos-x64`
-            - macOS Apple Silicon: `post-cortex-macos-arm64`
-            - Linux: `post-cortex-linux-x64`
+            Download binaries for your platform:
+
+            **post-cortex (stdio MCP server):**
+            - macOS Intel: `post-cortex-x86_64-apple-darwin`
+            - macOS Apple Silicon: `post-cortex-aarch64-apple-darwin`
+            - Linux: `post-cortex-x86_64-unknown-linux-gnu`
+
+            **post-cortex-daemon (HTTP server):**
+            - macOS Intel: `post-cortex-daemon-x86_64-apple-darwin`
+            - macOS Apple Silicon: `post-cortex-daemon-aarch64-apple-darwin`
+            - Linux: `post-cortex-daemon-x86_64-unknown-linux-gnu`
 
             ### Cargo
             ```bash
             cargo install --git https://github.com/julymetodiev/post-cortex --features embeddings
             ```
+
+            ## Usage
+
+            ### post-cortex (stdio MCP server)
+            For Claude Desktop integration, add to your Claude config:
+            ```json
+            {
+              "mcpServers": {
+                "post-cortex": {
+                  "command": "post-cortex"
+                }
+              }
+            }
+            ```
+
+            ### post-cortex-daemon (HTTP server)
+            ```bash
+            # Initialize config
+            post-cortex-daemon init
+
+            # Start daemon
+            post-cortex-daemon start
+
+            # Check status
+            post-cortex-daemon status
+
+            # Stop daemon
+            post-cortex-daemon stop
+            ```
+
+            Default: http://127.0.0.1:3737
+
+            For full documentation, see the [README](https://github.com/julymetodiev/post-cortex)

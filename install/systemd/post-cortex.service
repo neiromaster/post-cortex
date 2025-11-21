@@ -1,0 +1,37 @@
+[Unit]
+Description=Post-Cortex MCP Daemon
+Documentation=https://github.com/julymetodiev/post-cortex
+After=network.target
+
+[Service]
+Type=simple
+User=%u
+Group=%u
+
+# Binary location (uses PATH - Homebrew adds to PATH automatically)
+# If installed manually, adjust path to your installation location
+ExecStart=post-cortex-daemon start
+
+# Restart policy
+Restart=on-failure
+RestartSec=10s
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.post-cortex
+
+# Environment
+Environment=RUST_LOG=info
+Environment=PC_HOST=127.0.0.1
+Environment=PC_PORT=3737
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=post-cortex
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Service identity -->
+    <key>Label</key>
+    <string>com.post-cortex.daemon</string>
+
+    <!-- Program to run -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/post-cortex-daemon</string>
+        <string>start</string>
+    </array>
+
+    <!-- Run at load (auto-start) -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Keep alive (restart if crashes) -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- Working directory -->
+    <key>WorkingDirectory</key>
+    <string>/tmp</string>
+
+    <!-- Environment variables -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+        <key>PC_HOST</key>
+        <string>127.0.0.1</string>
+        <key>PC_PORT</key>
+        <string>3737</string>
+    </dict>
+
+    <!-- Logging -->
+    <key>StandardOutPath</key>
+    <string>/tmp/post-cortex.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/post-cortex-error.log</string>
+
+    <!-- Process type -->
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <!-- Throttle interval (seconds to wait before restart after crash) -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Nice value (process priority, -20 to 20, lower = higher priority) -->
+    <key>Nice</key>
+    <integer>0</integer>
+</dict>
+</plist>

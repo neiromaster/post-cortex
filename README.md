@@ -26,68 +26,56 @@ Post-Cortex is a high-performance MCP (Model Context Protocol) server that trans
 
 ### Installation
 
+Post-Cortex provides **two binaries**:
+1. **`post-cortex`** - Stdio MCP server for Claude Desktop integration
+2. **`post-cortex-daemon`** - HTTP daemon server for API usage and background service
+
 **Homebrew (macOS/Linux) - Recommended:**
 ```bash
 brew install julymetodiev/tap/post-cortex
 ```
+This installs both binaries: `post-cortex` and `post-cortex-daemon`
 
 **Direct Download:**
+
+Download binaries for your platform from the [latest release](https://github.com/julymetodiev/post-cortex/releases/latest):
+
 ```bash
-# macOS Intel
-curl -L https://github.com/julymetodiev/post-cortex/releases/latest/download/post-cortex-macos-x64 -o /usr/local/bin/post-cortex && chmod +x /usr/local/bin/post-cortex
+# post-cortex (stdio MCP server)
+# macOS Intel:        post-cortex-x86_64-apple-darwin
+# macOS Apple Silicon: post-cortex-aarch64-apple-darwin
+# Linux:              post-cortex-x86_64-unknown-linux-gnu
 
-# macOS Apple Silicon
-curl -L https://github.com/julymetodiev/post-cortex/releases/latest/download/post-cortex-macos-arm64 -o /usr/local/bin/post-cortex && chmod +x /usr/local/bin/post-cortex
+# post-cortex-daemon (HTTP daemon)
+# macOS Intel:        post-cortex-daemon-x86_64-apple-darwin
+# macOS Apple Silicon: post-cortex-daemon-aarch64-apple-darwin
+# Linux:              post-cortex-daemon-x86_64-unknown-linux-gnu
 
-# Linux
-curl -L https://github.com/julymetodiev/post-cortex/releases/latest/download/post-cortex-linux-x64 -o /usr/local/bin/post-cortex && chmod +x /usr/local/bin/post-cortex
+# Example installation (macOS Apple Silicon):
+curl -L https://github.com/julymetodiev/post-cortex/releases/latest/download/post-cortex-aarch64-apple-darwin -o /usr/local/bin/post-cortex && chmod +x /usr/local/bin/post-cortex
+curl -L https://github.com/julymetodiev/post-cortex/releases/latest/download/post-cortex-daemon-aarch64-apple-darwin -o /usr/local/bin/post-cortex-daemon && chmod +x /usr/local/bin/post-cortex-daemon
 ```
 
 **Build from source:**
 ```bash
 cargo build --release --features embeddings
+# Binaries: target/release/post-cortex and target/release/post-cortex-daemon
 ```
 
 ## Usage Modes
 
 Post-Cortex provides two deployment options:
 
-### 1. Daemon Mode (Recommended for Multiple Projects)
+### 1. Stdio Mode (Simple - Claude Desktop Integration)
 
-Run as a persistent daemon with shared RocksDB storage across all clients:
-
-```bash
-# Start daemon
-./target/release/post-cortex-daemon
-
-# Or with logging
-RUST_LOG=post_cortex=info ./target/release/post-cortex-daemon
-```
-
-**Benefits:**
-- Shared sessions across multiple AI assistants
-- Single RocksDB instance (avoids lock conflicts)
-- HTTP API on port 3000
-- Persistent background service
-
-**Claude Desktop Config:**
-```json
-{
-  "mcpServers": {
-    "post-cortex": {
-      "type": "sse",
-      "url": "http://localhost:3000/sse"
-    }
-  }
-}
-```
-
-### 2. Standalone Mode (Single Project)
-
-Run as a standalone MCP server for a single project:
+Use `post-cortex` binary for direct stdio MCP integration:
 
 ```bash
-./target/release/mcp-server
+# Run manually (for testing)
+post-cortex
+
+# Or from source
+./target/release/post-cortex
 ```
 
 **Benefits:**
@@ -101,14 +89,109 @@ Run as a standalone MCP server for a single project:
 {
   "mcpServers": {
     "post-cortex": {
-      "type": "stdio",
-      "command": "/path/to/post-cortex/target/release/mcp-server"
+      "command": "post-cortex"
     }
   }
 }
 ```
 
-**Recommendation:** Use daemon mode if working with multiple projects simultaneously. Use standalone mode for focused, single-project work.
+Or with absolute path:
+```json
+{
+  "mcpServers": {
+    "post-cortex": {
+      "command": "/usr/local/bin/post-cortex"
+    }
+  }
+}
+```
+
+### 2. Daemon Mode (Advanced - HTTP API + Background Service)
+
+Use `post-cortex-daemon` binary for persistent HTTP server:
+
+```bash
+# Initialize config (optional)
+post-cortex-daemon init
+
+# Start daemon in foreground
+post-cortex-daemon start
+
+# Check status
+post-cortex-daemon status
+
+# Stop daemon
+post-cortex-daemon stop
+```
+
+**Benefits:**
+- Shared sessions across multiple AI assistants
+- Single RocksDB instance (avoids lock conflicts)
+- HTTP RMCP API on port 3737 (default)
+- Persistent background service via systemd/launchd
+- RESTful health and stats endpoints
+
+**Claude Desktop Config:**
+```json
+{
+  "mcpServers": {
+    "post-cortex": {
+      "type": "sse",
+      "url": "http://localhost:3737/sse"
+    }
+  }
+}
+```
+
+**Configuration File:** `~/.post-cortex/daemon.toml`
+```toml
+host = "127.0.0.1"
+port = 3737
+data_dir = "~/.post-cortex/data"
+```
+
+**Environment Variables:**
+- `PC_HOST` - Override host (default: 127.0.0.1)
+- `PC_PORT` - Override port (default: 3737)
+- `PC_DATA_DIR` - Override data directory
+- `RUST_LOG` - Logging level (e.g., `RUST_LOG=debug`)
+
+### Service Management (Daemon Mode)
+
+#### Linux (systemd)
+
+```bash
+# Copy service file
+cp install/systemd/post-cortex.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+
+# Start and enable auto-start
+systemctl --user enable --now post-cortex
+
+# View logs
+journalctl --user -u post-cortex -f
+```
+
+See [install/systemd/README.md](install/systemd/README.md) for detailed instructions.
+
+#### macOS (launchd)
+
+```bash
+# Copy plist file
+cp install/launchd/com.post-cortex.daemon.plist ~/Library/LaunchAgents/
+
+# Load and start
+launchctl load ~/Library/LaunchAgents/com.post-cortex.daemon.plist
+
+# View logs
+tail -f /tmp/post-cortex.log
+```
+
+See [install/launchd/README.md](install/launchd/README.md) for detailed instructions.
+
+**Recommendation:**
+- Use **stdio mode** for simple Claude Desktop integration
+- Use **daemon mode** for multi-project workflows, API access, or background service
 
 ## Setting Up for Your Project
 
@@ -317,8 +400,8 @@ cargo test --features embeddings
 # Run daemon with debug logging
 RUST_LOG=post_cortex=debug cargo run --bin post-cortex-daemon --features embeddings
 
-# Run standalone server
-cargo run --bin mcp-server --features embeddings
+# Run stdio server
+cargo run --bin post-cortex --features embeddings
 
 # Property-based tests
 cargo test --features embeddings property_vector_db
@@ -328,14 +411,18 @@ cargo test --features embeddings property_vector_db
 ```
 src/
 ├── bin/
-│   ├── post-cortex-daemon.rs  # HTTP daemon (recommended)
-│   └── mcp-server.rs          # Standalone stdio server
+│   ├── post-cortex-daemon.rs  # HTTP daemon with RMCP SSE transport
+│   └── post-cortex.rs         # Stdio MCP server (renamed from mcp-server.rs)
 ├── core/          # Lock-free memory, vector DB, NER engine
 ├── session/       # Session management and entity extraction
 ├── storage/       # RocksDB persistence with actor pattern
 ├── graph/         # Entity relationship graphs (Petgraph)
 ├── summary/       # Analysis and summarization
-└── tools/mcp/     # MCP protocol (24 tools)
+├── tools/mcp/     # MCP protocol (24 tools)
+└── daemon/        # HTTP daemon configuration and RMCP implementation
+install/
+├── systemd/       # Linux systemd service files
+└── launchd/       # macOS launchd plist files
 ```
 
 ## Troubleshooting
@@ -354,10 +441,10 @@ src/
 - Check HNSW indexing is active
 - Monitor with `get_vectorization_stats`
 
-**Daemon vs Standalone:**
-- Use daemon mode for multiple projects sharing sessions
-- Use standalone for single-project focused work
-- Avoid running both simultaneously (RocksDB lock conflicts)
+**Choosing Between Modes:**
+- Use **stdio mode** (`post-cortex`) for simple Claude Desktop integration
+- Use **daemon mode** (`post-cortex-daemon`) for multi-project workflows or API access
+- Avoid running both simultaneously on same data directory (RocksDB lock conflicts)
 
 ## System Requirements
 

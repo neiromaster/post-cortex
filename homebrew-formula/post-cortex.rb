@@ -6,37 +6,74 @@ class PostCortex < Formula
 
   on_macos do
     if Hardware::CPU.intel?
-      url "https://github.com/julymetodiev/post-cortex/releases/download/v#{version}/post-cortex-macos-x64"
-      sha256 "PUT_SHA256_HERE_AFTER_FIRST_RELEASE"
+      url "https://github.com/julymetodiev/post-cortex/releases/download/v#{version}/post-cortex-x86_64-apple-darwin"
+      sha256 "UPDATE_AFTER_RELEASE"
+
+      resource "daemon" do
+        url "https://github.com/julymetodiev/post-cortex/releases/download/v#{version}/post-cortex-daemon-x86_64-apple-darwin"
+        sha256 "UPDATE_AFTER_RELEASE"
+      end
     else
-      url "https://github.com/julymetodiev/post-cortex/releases/download/v#{version}/post-cortex-macos-arm64"
-      sha256 "PUT_SHA256_HERE_AFTER_FIRST_RELEASE"
+      url "https://github.com/julymetodiev/post-cortex/releases/download/v#{version}/post-cortex-aarch64-apple-darwin"
+      sha256 "UPDATE_AFTER_RELEASE"
+
+      resource "daemon" do
+        url "https://github.com/julymetodiev/post-cortex/releases/download/v#{version}/post-cortex-daemon-aarch64-apple-darwin"
+        sha256 "UPDATE_AFTER_RELEASE"
+      end
     end
   end
 
   on_linux do
     if Hardware::CPU.intel?
-      url "https://github.com/julymetodiev/post-cortex/releases/download/v#{version}/post-cortex-linux-x64"
-      sha256 "PUT_SHA256_HERE_AFTER_FIRST_RELEASE"
+      url "https://github.com/julymetodiev/post-cortex/releases/download/v#{version}/post-cortex-x86_64-unknown-linux-gnu"
+      sha256 "UPDATE_AFTER_RELEASE"
+
+      resource "daemon" do
+        url "https://github.com/julymetodiev/post-cortex/releases/download/v#{version}/post-cortex-daemon-x86_64-unknown-linux-gnu"
+        sha256 "UPDATE_AFTER_RELEASE"
+      end
     end
   end
 
   def install
-    bin.install "post-cortex-macos-x64" => "post-cortex" if OS.mac? && Hardware::CPU.intel?
-    bin.install "post-cortex-macos-arm64" => "post-cortex" if OS.mac? && Hardware::CPU.arm?
-    bin.install "post-cortex-linux-x64" => "post-cortex" if OS.linux?
+    # Install post-cortex (stdio MCP server)
+    if OS.mac? && Hardware::CPU.intel?
+      bin.install "post-cortex-x86_64-apple-darwin" => "post-cortex"
+    elsif OS.mac? && Hardware::CPU.arm?
+      bin.install "post-cortex-aarch64-apple-darwin" => "post-cortex"
+    elsif OS.linux?
+      bin.install "post-cortex-x86_64-unknown-linux-gnu" => "post-cortex"
+    end
+
+    # Install post-cortex-daemon (HTTP daemon)
+    resource("daemon").stage do
+      if OS.mac? && Hardware::CPU.intel?
+        bin.install "post-cortex-daemon-x86_64-apple-darwin" => "post-cortex-daemon"
+      elsif OS.mac? && Hardware::CPU.arm?
+        bin.install "post-cortex-daemon-aarch64-apple-darwin" => "post-cortex-daemon"
+      elsif OS.linux?
+        bin.install "post-cortex-daemon-x86_64-unknown-linux-gnu" => "post-cortex-daemon"
+      end
+    end
   end
 
   def caveats
     <<~EOS
-      Post-Cortex MCP server has been installed!
+      Post-Cortex has been installed with TWO binaries:
 
-      To use with Claude Desktop, add to your config (~/.claude.json):
+      1. post-cortex        - Stdio MCP server (simple)
+      2. post-cortex-daemon - HTTP daemon (advanced)
+
+      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      📦 STDIO MODE (Simple - Claude Desktop Integration)
+      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+      Add to Claude Desktop config (~/.claude.json):
 
       {
         "mcpServers": {
           "post-cortex": {
-            "type": "stdio",
             "command": "#{bin}/post-cortex"
           }
         }
@@ -44,11 +81,49 @@ class PostCortex < Formula
 
       Then restart Claude Desktop.
 
-      Documentation: https://github.com/julymetodiev/post-cortex
+      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      🚀 DAEMON MODE (Advanced - HTTP API + Background Service)
+      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+      Initialize and start daemon:
+        post-cortex-daemon init
+        post-cortex-daemon start
+
+      Claude Desktop config:
+      {
+        "mcpServers": {
+          "post-cortex": {
+            "type": "sse",
+            "url": "http://localhost:3737/sse"
+          }
+        }
+      }
+
+      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      🔧 Service Management (Optional)
+      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+      For auto-start daemon on boot, see service installation:
+      https://github.com/julymetodiev/post-cortex#service-management-daemon-mode
+
+      macOS (launchd):  install/launchd/README.md
+      Linux (systemd):  install/systemd/README.md
+
+      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      📚 Full Documentation: https://github.com/julymetodiev/post-cortex
+      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     EOS
   end
 
   test do
-    assert_match "post-cortex", shell_output("#{bin}/post-cortex --version 2>&1", 0)
+    # Test stdio server
+    assert_predicate bin/"post-cortex", :exist?
+
+    # Test daemon binary
+    assert_predicate bin/"post-cortex-daemon", :exist?
+
+    # Test daemon help output
+    output = shell_output("#{bin}/post-cortex-daemon help 2>&1")
+    assert_match "Post-Cortex Daemon", output
   end
 end
