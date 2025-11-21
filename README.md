@@ -193,6 +193,72 @@ See [install/launchd/README.md](install/launchd/README.md) for detailed instruct
 - Use **stdio mode** for simple Claude Desktop integration
 - Use **daemon mode** for multi-project workflows, API access, or background service
 
+### Data Sharing Between Binaries
+
+**Important:** Both `post-cortex` and `post-cortex-daemon` share the **same codebase and data format**, which means:
+
+✅ **You can use the same database with both binaries** as long as they don't run simultaneously
+- Default data directory: `~/.post-cortex/data` (shared by both)
+- Switch freely between stdio and daemon modes without losing data
+- All sessions, embeddings, HNSW indices, entity graphs, and workspaces are preserved
+
+**What gets shared when switching between modes:**
+- All conversation sessions and history
+- Entity graphs and relationships
+- Semantic embeddings (384-dim vectors)
+- HNSW search indices
+- Workspaces and metadata
+- Hot/warm/cold memory state persisted in RocksDB
+
+**Why this works:**
+Both binaries use the exact same storage logic from `src/storage/rocksdb_storage.rs`. The only limitation is RocksDB's file lock, which prevents simultaneous access but releases automatically when a process stops.
+
+**Example workflow:**
+```bash
+# Morning: Use daemon mode
+post-cortex-daemon start
+# Work, create sessions, add data...
+post-cortex-daemon stop
+
+# Afternoon: Switch to stdio via Claude Desktop
+# Claude Desktop config: {"command": "post-cortex"}
+# All sessions from daemon are available!
+
+# Evening: Back to daemon
+post-cortex-daemon start
+# All data from stdio mode is here!
+```
+
+**Using separate databases (optional):**
+
+If you need isolated databases for testing or different projects:
+
+**For stdio mode** - Set in Claude Desktop config:
+```json
+{
+  "mcpServers": {
+    "post-cortex": {
+      "command": "post-cortex",
+      "env": {
+        "PC_DATA_DIR": "~/.post-cortex/stdio-data"
+      }
+    }
+  }
+}
+```
+
+**For daemon mode** - Use environment variable or config file:
+```bash
+PC_DATA_DIR=~/.post-cortex/daemon-data post-cortex-daemon start
+```
+
+Or in `~/.post-cortex/daemon.toml`:
+```toml
+data_directory = "~/.post-cortex/daemon-data"
+```
+
+⚠️ **Note:** With separate directories, data is NOT shared - each instance has independent sessions and indices.
+
 ## Setting Up for Your Project
 
 **1. Create a CLAUDE.md file in your project root:**
@@ -444,7 +510,9 @@ install/
 **Choosing Between Modes:**
 - Use **stdio mode** (`post-cortex`) for simple Claude Desktop integration
 - Use **daemon mode** (`post-cortex-daemon`) for multi-project workflows or API access
-- Avoid running both simultaneously on same data directory (RocksDB lock conflicts)
+- **Both share the same database** by default (`~/.post-cortex/data`) - switch freely but don't run simultaneously
+- RocksDB lock prevents concurrent access, but data persists when switching between modes
+- Configure separate directories via `PC_DATA_DIR` if you need isolated databases
 
 ## System Requirements
 
