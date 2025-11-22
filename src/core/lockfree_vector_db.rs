@@ -440,12 +440,12 @@ impl ProductQuantizationCodebook {
         let subvec_dim = self.dimension / self.subvectors;
         let mut total_dist = 0.0;
 
-        for i in 0..self.subvectors.min(codes.len()) {
+        for (i, &code) in codes.iter().enumerate().take(self.subvectors) {
             let start = i * subvec_dim;
             let end = start + subvec_dim;
             let query_subvec = &query[start..end];
 
-            let code_idx = codes[i] as usize;
+            let code_idx = code as usize;
             if code_idx < self.centroids[i].len() {
                 let centroid = &self.centroids[i][code_idx];
                 let dist = euclidean_distance(query_subvec, centroid);
@@ -961,7 +961,7 @@ impl LockFreeVectorDB {
             // No quantization parameters available, return raw bytes
             Ok(vector
                 .iter()
-                .map(|&x| (x * 255.0).min(255.0).max(0.0) as u8)
+                .map(|&x| (x * 255.0).clamp(0.0, 255.0) as u8)
                 .collect())
         }
     }
@@ -1015,10 +1015,10 @@ impl LockFreeVectorDB {
         // Remove metadata (lock-free) - we don't need the removed metadata
         self.metadata.remove(&vector_id);
 
-        if removed_vector.is_some() {
+        if let Some(removed) = removed_vector {
             // Update statistics (lock-free)
             let vector_size_bytes = std::mem::size_of::<LockFreeStoredVector>()
-                + removed_vector.unwrap().1.vector.len() * std::mem::size_of::<f32>();
+                + removed.1.vector.len() * std::mem::size_of::<f32>();
             self.stats.record_vector_removed(vector_size_bytes);
 
             // Remove from HNSW index (lock-free)

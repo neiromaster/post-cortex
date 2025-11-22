@@ -193,15 +193,18 @@ pub async fn get_memory_system() -> Result<Arc<ConversationMemorySystem>> {
     info!("MCP-TOOLS: System not initialized, proceeding with initialization");
 
     // Slow path - initialize new system
-    let mut config = SystemConfig::default();
-
     // Use same data directory as daemon mode: ~/.post-cortex/data
-    config.data_directory = dirs::home_dir()
+    let data_directory = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".post-cortex/data")
         .to_str()
         .unwrap()
         .to_string();
+
+    let mut config = SystemConfig {
+        data_directory,
+        ..SystemConfig::default()
+    };
 
     #[cfg(feature = "embeddings")]
     {

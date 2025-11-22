@@ -1291,7 +1291,7 @@ impl StorageActorHandle {
         workspace_id: Uuid,
         name: &str,
         description: &str,
-        session_ids: &Vec<Uuid>,
+        session_ids: &[Uuid],
     ) -> Result<(), String> {
         let (response_tx, mut response_rx) = channel::<Result<(), String>>(1);
 
@@ -1300,7 +1300,7 @@ impl StorageActorHandle {
                 workspace_id,
                 name: name.to_string(),
                 description: description.to_string(),
-                session_ids: session_ids.clone(),
+                session_ids: session_ids.to_vec(),
                 response_tx,
             })
             .map_err(|_| "Storage actor unavailable".to_string())?;
@@ -2288,7 +2288,7 @@ impl<'a> StorageCompatibilityWrapper<'a> {
         workspace_id: Uuid,
         name: &str,
         description: &str,
-        session_ids: &Vec<Uuid>,
+        session_ids: &[Uuid],
     ) -> Result<(), String> {
         self.actor
             .save_workspace_metadata(workspace_id, name, description, session_ids)

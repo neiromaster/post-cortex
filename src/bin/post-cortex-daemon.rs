@@ -251,10 +251,12 @@ async fn vectorize_all() -> Result<(), String> {
     println!();
 
     // Create memory system config with embeddings enabled
-    let mut config = SystemConfig::default();
-    config.enable_embeddings = true;
-    config.auto_vectorize_on_update = false; // Disable auto-vectorize during bulk operation
-    config.data_directory = daemon_config.data_directory;
+    let config = SystemConfig {
+        enable_embeddings: true,
+        auto_vectorize_on_update: false, // Disable auto-vectorize during bulk operation
+        data_directory: daemon_config.data_directory,
+        ..SystemConfig::default()
+    };
 
     // Initialize memory system
     println!("Initializing memory system...");

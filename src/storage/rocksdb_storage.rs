@@ -371,7 +371,7 @@ impl RealRocksDBStorage {
         workspace_id: Uuid,
         name: &str,
         description: &str,
-        session_ids: &Vec<Uuid>,
+        session_ids: &[Uuid],
     ) -> Result<()> {
         use crate::workspace::SessionRole;
 
@@ -383,7 +383,7 @@ impl RealRocksDBStorage {
         let db = self.db.clone();
         let name = name.to_string();
         let description = description.to_string();
-        let session_ids = session_ids.clone();
+        let session_ids = session_ids.to_vec();
 
         tokio::task::spawn_blocking(move || -> Result<()> {
             #[derive(Serialize, Deserialize)]
