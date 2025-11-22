@@ -10,7 +10,7 @@ use rmcp::{
     handler::server::wrapper::Parameters,
     model::{CallToolResult, Content, ErrorData as McpError, *},
     service::RequestContext,
-    tool, tool_router, tool_handler,
+    tool, tool_handler, tool_router,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -33,7 +33,9 @@ pub struct LoadSessionRequest {
 
 #[derive(Deserialize, JsonSchema, Debug)]
 pub struct UpdateConversationContextRequest {
-    #[schemars(description = "Type of interaction: qa, decision_made, problem_solved, code_change")]
+    #[schemars(
+        description = "Type of interaction: qa, decision_made, problem_solved, code_change"
+    )]
     pub interaction_type: String,
     #[schemars(description = "Content as key-value pairs")]
     pub content: std::collections::HashMap<String, String>,
@@ -93,7 +95,9 @@ pub struct GetKeyDecisionsRequest {
 pub struct QueryConversationContextRequest {
     #[schemars(description = "Session ID")]
     pub session_id: String,
-    #[schemars(description = "Query type: find_related_entities, get_entity_context, search_updates, etc.")]
+    #[schemars(
+        description = "Query type: find_related_entities, get_entity_context, search_updates, etc."
+    )]
     pub query_type: String,
     #[schemars(description = "Query parameters as key-value pairs")]
     pub parameters: std::collections::HashMap<String, String>,
@@ -222,11 +226,10 @@ impl PostCortexService {
     #[tool(description = "Create a new conversation session")]
     async fn create_session(&self) -> Result<CallToolResult, McpError> {
         match self.memory_system.create_session(None, None).await {
-            Ok(session_id) => {
-                Ok(CallToolResult::success(vec![Content::text(
-                    format!("Created session: {}", session_id)
-                )]))
-            }
+            Ok(session_id) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Created session: {}",
+                session_id
+            ))])),
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
     }
@@ -240,9 +243,11 @@ impl PostCortexService {
                     .map(|id| id.to_string())
                     .collect::<Vec<_>>()
                     .join("\n");
-                Ok(CallToolResult::success(vec![Content::text(
-                    format!("Sessions ({}): \n{}", session_ids.len(), sessions_text)
-                )]))
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Sessions ({}): \n{}",
+                    session_ids.len(),
+                    sessions_text
+                ))]))
             }
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
@@ -262,7 +267,9 @@ impl PostCortexService {
         }
     }
 
-    #[tool(description = "Add context update to conversation (qa, decision_made, problem_solved, code_change)")]
+    #[tool(
+        description = "Add context update to conversation (qa, decision_made, problem_solved, code_change)"
+    )]
     async fn update_conversation_context(
         &self,
         params: Parameters<UpdateConversationContextRequest>,
@@ -272,9 +279,10 @@ impl PostCortexService {
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
         // Convert code_reference from Option<Value> to Option<CodeReference>
-        let code_ref = req.code_reference.as_ref().and_then(|v| {
-            serde_json::from_value(v.clone()).ok()
-        });
+        let code_ref = req
+            .code_reference
+            .as_ref()
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         match crate::tools::mcp::update_conversation_context(
             req.interaction_type.clone(),
@@ -345,7 +353,10 @@ impl PostCortexService {
             Ok(result) => {
                 let mut contents = vec![Content::text(result.message)];
                 if let Some(data) = result.data {
-                    contents.push(Content::text(format!("\n\nStructured Data:\n{}", serde_json::to_string_pretty(&data).unwrap_or_default())));
+                    contents.push(Content::text(format!(
+                        "\n\nStructured Data:\n{}",
+                        serde_json::to_string_pretty(&data).unwrap_or_default()
+                    )));
                 }
                 Ok(CallToolResult::success(contents))
             }
@@ -380,7 +391,16 @@ impl PostCortexService {
         )
         .await
         {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
+            Ok(result) => {
+                let mut contents = vec![Content::text(result.message)];
+                if let Some(data) = result.data {
+                    contents.push(Content::text(format!(
+                        "\n\nResults:\n{}",
+                        serde_json::to_string_pretty(&data).unwrap_or_default()
+                    )));
+                }
+                Ok(CallToolResult::success(contents))
+            }
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
     }
@@ -394,8 +414,12 @@ impl PostCortexService {
         let uuid = Uuid::parse_str(&req.session_id)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
-        match crate::tools::mcp::update_session_metadata(uuid, req.name.clone(), req.description.clone())
-            .await
+        match crate::tools::mcp::update_session_metadata(
+            uuid,
+            req.name.clone(),
+            req.description.clone(),
+        )
+        .await
         {
             Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
@@ -411,7 +435,8 @@ impl PostCortexService {
         let uuid = Uuid::parse_str(&req.session_id)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
-        let updates: Vec<crate::tools::mcp::ContextUpdateItem> = req.updates
+        let updates: Vec<crate::tools::mcp::ContextUpdateItem> = req
+            .updates
             .iter()
             .filter_map(|v| serde_json::from_value(v.clone()).ok())
             .collect();
@@ -427,7 +452,8 @@ impl PostCortexService {
         &self,
         params: Parameters<GetKeyInsightsRequest>,
     ) -> Result<CallToolResult, McpError> {
-        match crate::tools::mcp::get_key_insights(params.0.session_id.clone(), params.0.limit).await {
+        match crate::tools::mcp::get_key_insights(params.0.session_id.clone(), params.0.limit).await
+        {
             Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
@@ -564,7 +590,13 @@ impl PostCortexService {
         let session_id = Uuid::parse_str(&req.session_id)
             .map_err(|e| McpError::invalid_params(format!("Invalid session ID: {}", e), None))?;
 
-        match crate::tools::mcp::add_session_to_workspace(workspace_id, session_id, req.role.clone()).await {
+        match crate::tools::mcp::add_session_to_workspace(
+            workspace_id,
+            session_id,
+            req.role.clone(),
+        )
+        .await
+        {
             Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
@@ -589,8 +621,10 @@ impl PostCortexService {
 
     #[tool(description = "Get daemon status")]
     async fn get_status(&self) -> Result<CallToolResult, McpError> {
-        let msg = format!("Post-Cortex daemon running. Version: {} | rmcp 0.9 with Parameters<T>",
-            env!("CARGO_PKG_VERSION"));
+        let msg = format!(
+            "Post-Cortex daemon running. Version: {} | rmcp 0.9 with Parameters<T>",
+            env!("CARGO_PKG_VERSION")
+        );
         Ok(CallToolResult::success(vec![Content::text(msg)]))
     }
 

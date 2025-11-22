@@ -24,9 +24,7 @@
         <false/>
     </dict>
 
-    <!-- Working directory -->
-    <key>WorkingDirectory</key>
-    <string>/tmp</string>
+    <!-- Working directory removed - daemon will use config file or environment -->
 
     <!-- Environment variables -->
     <key>EnvironmentVariables</key>

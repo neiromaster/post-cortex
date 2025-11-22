@@ -195,6 +195,14 @@ pub async fn get_memory_system() -> Result<Arc<ConversationMemorySystem>> {
     // Slow path - initialize new system
     let mut config = SystemConfig::default();
 
+    // Use same data directory as daemon mode: ~/.post-cortex/data
+    config.data_directory = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".post-cortex/data")
+        .to_str()
+        .unwrap()
+        .to_string();
+
     #[cfg(feature = "embeddings")]
     {
         config.enable_embeddings = true;

@@ -39,11 +39,14 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
-    // Create logs directory
-    std::fs::create_dir_all("./logs").ok();
+    // Create logs directory in ~/.post-cortex/logs
+    let log_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".post-cortex/logs");
+    std::fs::create_dir_all(&log_dir).ok();
 
     // Initialize tracing with file appender
-    let file_appender = RollingFileAppender::new(Rotation::DAILY, "./logs", "mcp-server.log");
+    let file_appender = RollingFileAppender::new(Rotation::DAILY, log_dir, "mcp-server.log");
 
     tracing_subscriber::registry()
         .with(fmt::layer().with_writer(file_appender))
