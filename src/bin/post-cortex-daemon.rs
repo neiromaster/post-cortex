@@ -35,7 +35,7 @@ const BUILD_DATE: &str = match option_env!("BUILD_DATE") {
 use post_cortex::daemon::{DaemonConfig, start_rmcp_daemon};
 use std::env;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
@@ -97,7 +97,9 @@ fn print_usage() {
     println!("    status         Check if daemon is running");
     println!("    stop           Stop running daemon (sends SIGTERM to port 3737)");
     println!("    init           Create example config file at ~/.post-cortex/daemon.toml");
-    println!("    vectorize-all  Vectorize all sessions in the system (requires embeddings feature)");
+    println!(
+        "    vectorize-all  Vectorize all sessions in the system (requires embeddings feature)"
+    );
     println!("    version        Print version information");
     println!("    help           Print this help message");
     println!();
@@ -150,36 +152,37 @@ async fn start_daemon() -> Result<(), String> {
 
 async fn check_status() -> Result<(), String> {
     let config = DaemonConfig::load();
-    let url = format!("http://{}:{}/health", config.host, config.port);
 
-    println!("Checking daemon status at {}...", url);
+    println!(
+        "Checking daemon status at {}:{}...",
+        config.host, config.port
+    );
 
-    match reqwest::get(&url).await {
-        Ok(response) => {
-            if response.status().is_success() {
-                println!("Daemon is running");
-                println!("Status: OK");
-                println!("URL: http://{}:{}", config.host, config.port);
+    // Check if port is listening by attempting a TCP connection
+    use tokio::net::TcpStream;
+    use tokio::time::{Duration, timeout};
 
-                // Try to get stats
-                if let Ok(stats_response) =
-                    reqwest::get(format!("http://{}:{}/stats", config.host, config.port)).await
-                {
-                    if let Ok(stats_text) = stats_response.text().await {
-                        println!("\nServer Statistics:");
-                        println!("{}", stats_text);
-                    }
-                }
+    let addr = format!("{}:{}", config.host, config.port);
 
-                Ok(())
-            } else {
-                println!("Daemon responded but with error status: {}", response.status());
-                Err(format!("Daemon unhealthy: {}", response.status()))
-            }
+    match timeout(Duration::from_secs(2), TcpStream::connect(&addr)).await {
+        Ok(Ok(_)) => {
+            println!("✓ Daemon is running");
+            println!("  Status: OK");
+            println!("  SSE endpoint: http://{}:{}/sse", config.host, config.port);
+            println!(
+                "  POST endpoint: http://{}:{}/message",
+                config.host, config.port
+            );
+            Ok(())
         }
-        Err(e) => {
-            println!("Daemon is not running");
-            println!("Error: {}", e);
+        Ok(Err(e)) => {
+            println!("✗ Daemon is not running");
+            println!("  Error: Cannot connect to port {} ({})", config.port, e);
+            Err("Daemon not running".to_string())
+        }
+        Err(_) => {
+            println!("✗ Daemon is not running");
+            println!("  Error: Connection timeout");
             Err("Daemon not running".to_string())
         }
     }
@@ -191,7 +194,10 @@ async fn stop_daemon() -> Result<(), String> {
     println!("Stopping daemon at {}:{}...", config.host, config.port);
     println!();
     println!("Note: This will send SIGTERM signal");
-    println!("If daemon doesn't stop, use: kill $(lsof -t -i:{}))", config.port);
+    println!(
+        "If daemon doesn't stop, use: kill $(lsof -t -i:{}))",
+        config.port
+    );
 
     // Try graceful shutdown via /shutdown endpoint (if we add it)
     // For now, just provide instructions
@@ -229,9 +235,9 @@ fn init_config() -> Result<(), String> {
 
 #[cfg(feature = "embeddings")]
 async fn vectorize_all() -> Result<(), String> {
+    use post_cortex::SystemConfig;
     use post_cortex::core::lockfree_memory_system::LockFreeConversationMemorySystem;
     use post_cortex::daemon::DaemonConfig;
-    use post_cortex::SystemConfig;
 
     println!("Starting vectorization of all sessions...");
     println!();
@@ -299,4 +305,3 @@ async fn vectorize_all() -> Result<(), String> {
     eprintln!();
     Err("Embeddings feature not enabled".to_string())
 }
-
