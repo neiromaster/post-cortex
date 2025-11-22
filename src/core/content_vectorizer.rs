@@ -286,6 +286,8 @@ impl ContentVectorizer {
             match self.vector_db.add_vector(embedding, metadata) {
                 Ok(_) => {
                     debug!("Successfully vectorized latest update {}", update.id);
+                    // Mark update as vectorized
+                    session.vectorized_update_ids.insert(update.id);
                     Ok(1)
                 }
                 Err(e) => {
@@ -301,38 +303,49 @@ impl ContentVectorizer {
 
     /// Vectorize context updates from a session
     async fn vectorize_context_updates(&self, session: &ActiveSession) -> Result<usize> {
-        let total_updates = session.hot_context.len() + session.warm_context.len();
+        // Count only non-vectorized updates for threshold decision
+        let non_vectorized_count = session
+            .incremental_updates
+            .iter()
+            .filter(|u| !session.vectorized_update_ids.contains(&u.id))
+            .count();
 
         // Use parallel processing for large sessions, sequential for small ones
-        let (texts_to_embed, metadata_list) = if total_updates >= PARALLEL_PROCESSING_THRESHOLD {
+        let (texts_to_embed, metadata_list) = if non_vectorized_count >= PARALLEL_PROCESSING_THRESHOLD {
             debug!(
                 "Using parallel processing for {} updates (threshold: {})",
-                total_updates, PARALLEL_PROCESSING_THRESHOLD
+                non_vectorized_count, PARALLEL_PROCESSING_THRESHOLD
             );
             self.collect_updates_parallel(session)?
         } else {
-            debug!("Using sequential processing for {} updates", total_updates);
+            debug!("Using sequential processing for {} updates", non_vectorized_count);
             self.collect_updates_sequential(session)?
         };
 
         if texts_to_embed.is_empty() {
-            debug!("No texts to vectorize for session {}", session.id());
+            debug!("No new texts to vectorize for session {}", session.id());
             return Ok(0);
         }
 
         // Generate embeddings in batches
         let embeddings = self.embedding_engine.encode_batch(texts_to_embed.clone()).await?;
 
-        // Add to vector database
+        // Add to vector database and track successfully vectorized IDs
         let mut added_count = 0;
-        for (embedding, metadata) in embeddings.into_iter().zip(metadata_list) {
-            match self.vector_db.add_vector(embedding, metadata) {
-                Ok(_) => added_count += 1,
+        for (embedding, metadata) in embeddings.into_iter().zip(metadata_list.iter()) {
+            match self.vector_db.add_vector(embedding, metadata.clone()) {
+                Ok(_) => {
+                    added_count += 1;
+                    // Mark update as vectorized
+                    if let Ok(update_id) = Uuid::parse_str(&metadata.id) {
+                        session.vectorized_update_ids.insert(update_id);
+                    }
+                }
                 Err(e) => warn!("Failed to add vector to database: {}", e),
             }
         }
 
-        debug!("Added {} context update vectors", added_count);
+        debug!("Added {} context update vectors, marked as vectorized", added_count);
         Ok(added_count)
     }
 
@@ -764,6 +777,7 @@ impl ContentVectorizer {
     }
 
     /// Collect updates sequentially (for small sessions)
+    /// Uses incremental_updates to ensure ALL updates are vectorized (including evicted ones)
     fn collect_updates_sequential(
         &self,
         session: &ActiveSession,
@@ -771,8 +785,14 @@ impl ContentVectorizer {
         let mut texts_to_embed = Vec::new();
         let mut metadata_list = Vec::new();
 
-        // Process hot context
-        for update in &session.hot_context.iter() {
+        // Process ALL incremental updates (hot + warm + cold tier)
+        // Skip already vectorized updates for efficiency
+        for update in &session.incremental_updates {
+            // Skip if already vectorized
+            if session.vectorized_update_ids.contains(&update.id) {
+                continue;
+            }
+
             let raw_text = Self::extract_text_from_update(update);
             if self.should_vectorize_text(&raw_text) {
                 let content_type = Self::determine_content_type(update);
@@ -787,36 +807,26 @@ impl ContentVectorizer {
             }
         }
 
-        // Process warm context
-        for update in &session.warm_context {
-            let raw_text = Self::extract_text_from_compressed_update(update);
-            if self.should_vectorize_text(&raw_text) {
-                let content_type = Self::determine_content_type(&update.update);
-                let prepared_text = self.prepare_text_for_vectorization(&raw_text);
-                texts_to_embed.push(prepared_text.clone());
-                metadata_list.push(VectorMetadata::new(
-                    update.update.id.to_string(),
-                    prepared_text,
-                    session.id().to_string(),
-                    format!("{content_type:?}"),
-                ));
-            }
-        }
-
         Ok((texts_to_embed, metadata_list))
     }
 
     /// Collect updates in parallel (for large sessions)
+    /// Uses incremental_updates to ensure ALL updates are vectorized (including evicted ones)
     fn collect_updates_parallel(
         &self,
         session: &ActiveSession,
     ) -> Result<(Vec<String>, Vec<VectorMetadata>)> {
-        // Process hot context in parallel
-        let hot_results: Vec<(String, VectorMetadata)> = session
-            .hot_context
-            .iter()
+        // Process ALL incremental updates in parallel
+        // Skip already vectorized updates for efficiency
+        let results: Vec<(String, VectorMetadata)> = session
+            .incremental_updates
             .par_iter()
             .filter_map(|update| {
+                // Skip if already vectorized
+                if session.vectorized_update_ids.contains(&update.id) {
+                    return None;
+                }
+
                 let raw_text = Self::extract_text_from_update(update);
                 if self.should_vectorize_text(&raw_text) {
                     let content_type = Self::determine_content_type(update);
@@ -834,33 +844,11 @@ impl ContentVectorizer {
             })
             .collect();
 
-        // Process warm context in parallel
-        let warm_results: Vec<(String, VectorMetadata)> = session
-            .warm_context
-            .par_iter()
-            .filter_map(|update| {
-                let raw_text = Self::extract_text_from_compressed_update(update);
-                if self.should_vectorize_text(&raw_text) {
-                    let content_type = Self::determine_content_type(&update.update);
-                    let prepared_text = self.prepare_text_for_vectorization(&raw_text);
-                    let metadata = VectorMetadata::new(
-                        update.update.id.to_string(),
-                        prepared_text.clone(),
-                        session.id().to_string(),
-                        format!("{content_type:?}"),
-                    );
-                    Some((prepared_text, metadata))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Split results into texts and metadata
+        let mut texts_to_embed = Vec::with_capacity(results.len());
+        let mut metadata_list = Vec::with_capacity(results.len());
 
-        // Combine results
-        let mut texts_to_embed = Vec::with_capacity(hot_results.len() + warm_results.len());
-        let mut metadata_list = Vec::with_capacity(hot_results.len() + warm_results.len());
-
-        for (text, metadata) in hot_results.into_iter().chain(warm_results.into_iter()) {
+        for (text, metadata) in results {
             texts_to_embed.push(text);
             metadata_list.push(metadata);
         }

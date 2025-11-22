@@ -23,6 +23,7 @@ use crate::graph::entity_graph::SimpleEntityGraph;
 use crate::session::session_components::{HotContext, SessionMetadata};
 
 use chrono::DateTime;
+use dashmap::DashSet;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -108,6 +109,9 @@ pub struct ActiveSession {
     // Entity extraction metrics
     pub total_entity_truncations: usize,
     pub total_entities_truncated: usize,
+
+    // Vectorization tracking (lock-free set for concurrent access)
+    pub vectorized_update_ids: Arc<DashSet<Uuid>>,
 }
 
 // Serialization helper - contains data in serializable form
@@ -137,6 +141,8 @@ struct ActiveSessionData {
     total_entity_truncations: usize,
     #[serde(default)]
     total_entities_truncated: usize,
+    #[serde(default)]
+    vectorized_update_ids: Vec<Uuid>,
 }
 
 fn default_max_entities() -> usize {
@@ -222,6 +228,7 @@ impl Serialize for ActiveSession {
             enable_smart_entity_ranking: self.enable_smart_entity_ranking,
             total_entity_truncations: self.total_entity_truncations,
             total_entities_truncated: self.total_entities_truncated,
+            vectorized_update_ids: self.vectorized_update_ids.iter().map(|id| *id).collect(),
         };
         data.serialize(serializer)
     }
@@ -246,6 +253,12 @@ impl<'de> Deserialize<'de> for ActiveSession {
 
         let hot_context = Arc::new(HotContext::from_deque(data.hot_context, max_hot_size));
 
+        // Reconstruct vectorized_update_ids DashSet from Vec
+        let vectorized_ids = Arc::new(DashSet::new());
+        for id in data.vectorized_update_ids {
+            vectorized_ids.insert(id);
+        }
+
         Ok(ActiveSession {
             metadata,
             last_updated: data.last_updated,
@@ -262,6 +275,7 @@ impl<'de> Deserialize<'de> for ActiveSession {
             enable_smart_entity_ranking: data.enable_smart_entity_ranking,
             total_entity_truncations: data.total_entity_truncations,
             total_entities_truncated: data.total_entities_truncated,
+            vectorized_update_ids: vectorized_ids,
         })
     }
 }
@@ -305,6 +319,7 @@ impl ActiveSession {
             enable_smart_entity_ranking: true,
             total_entity_truncations: 0,
             total_entities_truncated: 0,
+            vectorized_update_ids: Arc::new(DashSet::new()),
         }
     }
 
