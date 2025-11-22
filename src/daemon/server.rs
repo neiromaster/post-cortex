@@ -494,11 +494,9 @@ async fn handle_update_context(
 
     let mut content = HashMap::new();
     for (key, value) in content_obj {
-        let value_str = if value.is_string() {
-            value.as_str().unwrap().to_string()
-        } else {
-            value.to_string()
-        };
+        let value_str = value.as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| value.to_string());
         content.insert(key.clone(), value_str);
     }
 
@@ -618,11 +616,9 @@ async fn handle_query_context(
 
     let mut parameters = HashMap::new();
     for (key, value) in params_obj {
-        let value_str = if value.is_string() {
-            value.as_str().unwrap().to_string()
-        } else {
-            value.to_string()
-        };
+        let value_str = value.as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| value.to_string());
         parameters.insert(key.clone(), value_str);
     }
 
