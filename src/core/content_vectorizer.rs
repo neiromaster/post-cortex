@@ -897,14 +897,6 @@ impl ContentVectorizer {
 
         text_parts.join(" ")
     }
-
-    /// Extract text content from a compressed update
-    fn extract_text_from_compressed_update(
-        update: &crate::session::active_session::CompressedUpdate,
-    ) -> String {
-        Self::extract_text_from_update(&update.update)
-    }
-
     /// Determine content type from context update
     const fn determine_content_type(update: &ContextUpdate) -> ContentType {
         match &update.update_type {
