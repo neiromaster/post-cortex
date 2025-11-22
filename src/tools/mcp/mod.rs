@@ -1408,14 +1408,17 @@ pub async fn semantic_search(
             ("global".to_string(), None)
         };
 
-        // Check for semantic query engine
-        let engine = if let Some(engine) = system.semantic_query_engine.get() {
-            engine
-        } else {
-            return Ok(MCPToolResult::error(
-                "Semantic search engine not initialized".to_string(),
-            ));
-        };
+        // Ensure semantic query engine is initialized
+        system
+            .as_ref()
+            .ensure_semantic_engine_initialized()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize semantic engine: {}", e))?;
+
+        let engine = system
+            .semantic_query_engine
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("Semantic engine initialization failed"))?;
 
         let results = match scope_type.as_str() {
             "session" => {

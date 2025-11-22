@@ -165,12 +165,15 @@ impl Default for ContentVectorizerConfig {
     }
 }
 
+use std::sync::Arc;
+
 /// Main content vectorization pipeline
+#[derive(Clone)]
 pub struct ContentVectorizer {
-    embedding_engine: LocalEmbeddingEngine,
-    vector_db: FastVectorDB,
+    embedding_engine: Arc<LocalEmbeddingEngine>,
+    vector_db: Arc<FastVectorDB>,
     config: ContentVectorizerConfig,
-    query_cache: Option<QueryCache>,
+    query_cache: Option<Arc<QueryCache>>,
 }
 
 impl ContentVectorizer {
@@ -204,10 +207,10 @@ impl ContentVectorizer {
         );
 
         Ok(Self {
-            embedding_engine,
-            vector_db,
+            embedding_engine: Arc::new(embedding_engine),
+            vector_db: Arc::new(vector_db),
             config,
-            query_cache,
+            query_cache: query_cache.map(Arc::new),
         })
     }
 

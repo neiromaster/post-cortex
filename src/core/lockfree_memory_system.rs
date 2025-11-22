@@ -1797,6 +1797,41 @@ impl LockFreeConversationMemorySystem {
             .map(Arc::clone)
     }
 
+    /// Lazy-initialize semantic query engine on first use
+    #[cfg(feature = "embeddings")]
+    pub async fn ensure_semantic_engine_initialized(
+        &self,
+    ) -> Result<Arc<crate::core::semantic_query_engine::SemanticQueryEngine>, String> {
+        if let Some(engine) = self.semantic_query_engine.get() {
+            return Ok(Arc::clone(engine));
+        }
+
+        // Ensure vectorizer is initialized first
+        let vectorizer = self.ensure_vectorizer_initialized().await?;
+
+        // Initialize semantic engine
+        self.semantic_query_engine
+            .get_or_try_init(|| async {
+                info!("Lazy-initializing semantic query engine...");
+
+                use crate::core::semantic_query_engine::{SemanticQueryConfig, SemanticQueryEngine};
+
+                let config = SemanticQueryConfig {
+                    cross_session_enabled: self
+                        .embedding_config_holder
+                        .cross_session_search_enabled,
+                    similarity_threshold: self.config.semantic_search_threshold,
+                    ..Default::default()
+                };
+
+                let engine = SemanticQueryEngine::new((*vectorizer).clone(), config);
+
+                Ok(Arc::new(engine))
+            })
+            .await
+            .map(Arc::clone)
+    }
+
     /// Vectorize a session's content (requires embeddings feature)
     #[cfg(feature = "embeddings")]
     pub async fn vectorize_session(&self, session_id: Uuid) -> Result<usize, String> {

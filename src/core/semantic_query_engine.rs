@@ -30,7 +30,6 @@ use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::core::content_vectorizer::{ContentVectorizer, SemanticSearchResult};
-use crate::core::lockfree_memory_system::LockFreeConversationMemorySystem;
 
 /// Related experience from other sessions
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,8 +90,6 @@ impl Default for SemanticQueryConfig {
 pub struct SemanticQueryEngine {
     vectorizer: ContentVectorizer,
     #[allow(dead_code)]
-    memory_system: LockFreeConversationMemorySystem,
-    #[allow(dead_code)]
     config: SemanticQueryConfig,
 }
 
@@ -100,12 +97,10 @@ impl SemanticQueryEngine {
     /// Create a new semantic query engine
     pub fn new(
         vectorizer: ContentVectorizer,
-        memory_system: LockFreeConversationMemorySystem,
         config: SemanticQueryConfig,
     ) -> Self {
         Self {
             vectorizer,
-            memory_system,
             config,
         }
     }
