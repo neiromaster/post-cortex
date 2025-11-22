@@ -360,7 +360,13 @@ impl ContentVectorizer {
                     description_parts.push(format!("Type: {:?}", entity_data.entity_type));
 
                     // Add related entities context
-                    let related: Vec<String> = vec![]; // TODO: Get relationships from entity graph
+                    let related: Vec<String> = session
+                        .entity_graph
+                        .get_entity_relationships(entity_name)
+                        .into_iter()
+                        .take(5)
+                        .map(|(target, rel, _)| format!("{} {:?}", target, rel))
+                        .collect();
                     if !related.is_empty() {
                         description_parts.push(format!("Related to: {}", related.join(", ")));
                     }
@@ -406,7 +412,13 @@ impl ContentVectorizer {
                 description_parts.push(format!("Type: {:?}", entity_data.entity_type));
 
                 // Add related entities context
-                let related: Vec<String> = vec![]; // TODO: Get relationships from entity graph
+                let related: Vec<String> = session
+                    .entity_graph
+                    .get_entity_relationships(entity_name)
+                    .into_iter()
+                    .take(5)
+                    .map(|(target, rel, _)| format!("{} {:?}", target, rel))
+                    .collect();
                 if !related.is_empty() {
                     description_parts.push(format!("Related to: {}", related.join(", ")));
                 }
