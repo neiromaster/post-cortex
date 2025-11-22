@@ -523,7 +523,7 @@ pub async fn create_session_checkpoint_with_system(
     let session = session_arc.load();
 
     // Create checkpoint
-    let checkpoint = create_comprehensive_checkpoint(&*session).await?;
+    let checkpoint = create_comprehensive_checkpoint(&session).await?;
 
     // Save checkpoint
     let storage_wrapper = system.storage();
@@ -1063,7 +1063,7 @@ pub async fn create_session_checkpoint(session_id: Uuid) -> Result<MCPToolResult
         let session = session_arc.load();
 
         // Create checkpoint
-        let checkpoint = create_comprehensive_checkpoint(&*session).await?;
+        let checkpoint = create_comprehensive_checkpoint(&session).await?;
 
         // Save checkpoint
         let storage_wrapper = system.storage();

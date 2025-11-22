@@ -168,7 +168,7 @@ impl LockFreeNEREngine {
 
 
         // Create VarBuilder for loading model and classifier weights
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[weights_path.clone()], DType::F32, &device)? };
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(std::slice::from_ref(&weights_path), DType::F32, &device)? };
 
         // Load DistilBERT base model with "distilbert" prefix (like DistilBertForMaskedLM does)
         let model = DistilBertModel::load(vb.pp("distilbert"), &config)?;
@@ -327,16 +327,14 @@ impl LockFreeNEREngine {
                 }
             } else if label.starts_with("I-") {
                 // Continue current entity
-                if let Some((ref mut text, ref etype, ref mut conf, start, ref mut end)) = current_entity {
-                    if let Some(entity_type) = EntityType::from_bio_tag(label) {
-                        if entity_type == *etype {
+                if let Some((ref mut text, ref etype, ref mut conf, start, ref mut end)) = current_entity
+                    && let Some(entity_type) = EntityType::from_bio_tag(label)
+                        && entity_type == *etype {
                             *text = original_text[start..char_end].to_string();
                             *end = char_end;
                             // Update confidence to minimum across all tokens (conservative)
                             *conf = conf.min(confidence);
                         }
-                    }
-                }
             } else {
                 // "O" tag - outside entity
                 if let Some((text, etype, conf, start, end)) = current_entity.take() {

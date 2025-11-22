@@ -920,14 +920,13 @@ impl ContentVectorizer {
 
         // 1. Always preserve Title and Description (highest priority)
         for line in text.lines() {
-            if line.starts_with("Title:") || line.starts_with("Description:") {
-                if !add_part(&mut parts, &mut current_length, line) {
+            if (line.starts_with("Title:") || line.starts_with("Description:"))
+                && !add_part(&mut parts, &mut current_length, line) {
                     // Title/Description alone exceeds max_length - truncate it
                     let truncated = &line.chars().take(max_length - 20).collect::<String>();
                     parts.push(format!("{}...", truncated));
                     return parts.join(" | ");
                 }
-            }
         }
 
         // 2. Extract code snippets (technical information is valuable)
@@ -953,7 +952,7 @@ impl ContentVectorizer {
             let trimmed = line.trim();
             if trimmed.starts_with('-')
                 || trimmed.starts_with('*')
-                || trimmed.chars().next().map_or(false, |c| c.is_ascii_digit())
+                || trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())
                 || trimmed.contains("Performance:")
                 || trimmed.contains("Algorithm:")
                 || trimmed.contains("O(")  // Big-O notation

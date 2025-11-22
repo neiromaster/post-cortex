@@ -1,44 +1,15 @@
-# Data and cache
-data/
-*.csv
-*.html
-
-# IDE
-.vscode/
+target/
+**/*.rs.bk
+Cargo.lock
+.DS_Store
+.env
 .idea/
+.vscode/
+*.log
+tmp/
+temp/
 *.swp
 *.swo
-*~
-
-.claude/
-CLAUDE.md
-mcp.json
-start-mcp-server.sh
-benches
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb
-
-# Logs
-*.log
-
-# Environment variables
-.env
-.env.local
-
-post_cortex_data
-logs
-dev.txt
-vector_db/
-# Ignore Python and shell test files but keep Rust integration tests
-tests/*.py
-tests/*.sh
-tests/test_data_*
-target
-examples
-scripts
+dist/
+build/
+GEMINI.md

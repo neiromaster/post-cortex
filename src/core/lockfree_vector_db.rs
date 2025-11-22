@@ -36,20 +36,17 @@ type QuantizationParams = Arc<arc_swap::ArcSwap<Option<(Vec<f32>, Vec<f32>)>>>;
 
 /// Search mode for vector similarity search
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum SearchMode {
     /// Exact search using full linear scan - highest accuracy, slowest
     Exact,
     /// Approximate search using HNSW - fastest, good accuracy
     Approximate,
     /// Balanced search with optimized HNSW parameters - good speed/accuracy tradeoff
+    #[default]
     Balanced,
 }
 
-impl Default for SearchMode {
-    fn default() -> Self {
-        SearchMode::Balanced
-    }
-}
 
 /// Search quality preset for automatic parameter tuning
 #[derive(Debug, Clone, Copy)]
@@ -325,7 +322,7 @@ pub struct ProductQuantizationCodebook {
 impl ProductQuantizationCodebook {
     /// Create new PQ codebook with random initialization
     pub fn new(dimension: usize, subvectors: usize, bits: usize) -> Result<Self> {
-        if dimension % subvectors != 0 {
+        if !dimension.is_multiple_of(subvectors) {
             return Err(anyhow::anyhow!(
                 "Dimension {} must be divisible by subvectors {}",
                 dimension,
@@ -462,7 +459,7 @@ impl ProductQuantizationCodebook {
     /// Get compression ratio information
     pub fn compression_info(&self) -> (usize, usize, f32) {
         let original_size = self.dimension * std::mem::size_of::<f32>();
-        let compressed_size = self.subvectors * ((self.bits + 7) / 8); // Round up to bytes
+        let compressed_size = self.subvectors * self.bits.div_ceil(8); // Round up to bytes
         let ratio = original_size as f32 / compressed_size as f32;
         (original_size, compressed_size, ratio)
     }
@@ -691,11 +688,7 @@ impl LockFreeVectorDB {
         };
 
         // Product Quantization encoding if enabled
-        let pq_codes = if let Some(codebook) = &self.pq_codebook {
-            Some(codebook.encode(&vector))
-        } else {
-            None
-        };
+        let pq_codes = self.pq_codebook.as_ref().map(|codebook| codebook.encode(&vector));
 
         // Create stored vector
         let stored_vector = LockFreeStoredVector::new(id, vector, quantized, pq_codes);
@@ -983,7 +976,7 @@ impl LockFreeVectorDB {
         let existing_vectors: Vec<u32> = self
             .vectors
             .iter()
-            .map(|entry| entry.key().clone())
+            .map(|entry| *entry.key())
             .filter(|&id| id != vector_id)
             .take(max_connections * 2) // Take more for random selection
             .collect();

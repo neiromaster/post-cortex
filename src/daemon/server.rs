@@ -243,7 +243,7 @@ async fn handle_sse_stream(State(server): State<Arc<LockFreeDaemonServer>>) -> i
                 let endpoint_event = Event::default()
                     .event("endpoint")
                     .id("0")
-                    .json_data(&serde_json::json!({"uri": "/message"}))
+                    .json_data(serde_json::json!({"uri": "/message"}))
                     .ok()?;
                 return Some((
                     Ok::<_, std::convert::Infallible>(endpoint_event),

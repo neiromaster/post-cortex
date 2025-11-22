@@ -1722,7 +1722,7 @@ impl LockFreeConversationMemorySystem {
                 info!("Lazy-initializing content vectorizer...");
 
                 let embedding_config = EmbeddingConfig {
-                    model_type: self.embedding_config_holder.model_type.clone(),
+                    model_type: self.embedding_config_holder.model_type,
                     max_batch_size: 32,
                     ..Default::default()
                 };
@@ -1748,7 +1748,7 @@ impl LockFreeConversationMemorySystem {
                     .map_err(|e| format!("Failed to initialize content vectorizer: {}", e))
             })
             .await
-            .map(|arc| Arc::clone(arc))
+            .map(Arc::clone)
     }
 
     /// Vectorize a session's content (requires embeddings feature)

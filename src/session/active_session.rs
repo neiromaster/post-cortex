@@ -2012,8 +2012,7 @@ impl ActiveSession {
     }
 
     fn should_create_summary(&self) -> bool {
-        self.incremental_updates.len() % self.metadata.user_preferences.auto_summary_threshold
-            == 0
+        self.incremental_updates.len().is_multiple_of(self.metadata.user_preferences.auto_summary_threshold)
             && !self.incremental_updates.is_empty()
     }
 

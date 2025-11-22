@@ -29,6 +29,7 @@ use chrono::Utc;
 
 /// Options for filtering and limiting summary output
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct SummaryOptions {
     pub decisions_limit: Option<usize>,
     pub entities_limit: Option<usize>,
@@ -38,18 +39,6 @@ pub struct SummaryOptions {
     pub compact: bool,
 }
 
-impl Default for SummaryOptions {
-    fn default() -> Self {
-        Self {
-            decisions_limit: None,
-            entities_limit: None,
-            questions_limit: None,
-            concepts_limit: None,
-            min_confidence: None,
-            compact: false,
-        }
-    }
-}
 
 impl SummaryOptions {
     /// Create compact mode options (returns minimal data)

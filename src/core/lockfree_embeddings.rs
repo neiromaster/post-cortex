@@ -535,7 +535,7 @@ impl LockFreeLocalEmbeddingEngine {
         debug!(
             "L2 normalization - batch size: {}, first norm: {:.6}",
             l2_norm_values.len(),
-            l2_norm_values.get(0).and_then(|v| v.get(0)).unwrap_or(&0.0)
+            l2_norm_values.first().and_then(|v| v.first()).unwrap_or(&0.0)
         );
 
         // Avoid division by zero by adding small epsilon

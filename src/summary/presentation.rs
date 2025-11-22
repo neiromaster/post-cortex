@@ -165,7 +165,7 @@ impl EntitySummary {
         };
 
         let now = Utc::now();
-        let days_since_last_seen = (now - analysis.last_seen).num_days() as i64;
+        let days_since_last_seen = (now - analysis.last_seen).num_days();
         let recency_level = match days_since_last_seen {
             0 => RecencyLevel::Today,
             1..=3 => RecencyLevel::Recent,

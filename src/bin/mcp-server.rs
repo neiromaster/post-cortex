@@ -256,7 +256,7 @@ impl MCPServer {
                 let result = ToolsResult {
                     tools: Self::get_tool_definitions()
                         .into_iter()
-                        .map(|tool| safe_to_value(tool))
+                        .map(safe_to_value)
                         .collect::<Vec<_>>(),
                 };
                 let id_clone = id.clone();

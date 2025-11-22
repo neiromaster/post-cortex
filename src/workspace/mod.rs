@@ -47,6 +47,7 @@ pub enum SessionRole {
 
 /// Metadata for a workspace
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct WorkspaceMetadata {
     /// Type of project (e.g., "microservices", "monorepo")
     pub project_type: Option<String>,
@@ -58,16 +59,6 @@ pub struct WorkspaceMetadata {
     pub custom_data: std::collections::HashMap<String, String>,
 }
 
-impl Default for WorkspaceMetadata {
-    fn default() -> Self {
-        Self {
-            project_type: None,
-            tags: Vec::new(),
-            root_paths: Vec::new(),
-            custom_data: std::collections::HashMap::new(),
-        }
-    }
-}
 
 /// A workspace groups related sessions (e.g., microservices in same ecosystem)
 ///
