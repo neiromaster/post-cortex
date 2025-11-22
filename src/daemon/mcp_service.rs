@@ -13,7 +13,7 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::info;
 use uuid::Uuid;
@@ -163,6 +163,23 @@ pub struct SemanticSearchGlobalRequest {
     pub date_to: Option<String>,
     #[schemars(description = "Filter by interaction types")]
     pub interaction_type: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, JsonSchema, Debug, Serialize)]
+pub struct SearchScope {
+    #[schemars(description = "Scope type: session, workspace, global")]
+    #[serde(rename = "type")]
+    pub type_: String,
+    #[schemars(description = "ID for session/workspace scope")]
+    pub id: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema, Debug)]
+pub struct SemanticSearchRequest {
+    #[schemars(description = "Search query")]
+    pub query: String,
+    #[schemars(description = "Search scope")]
+    pub scope: Option<SearchScope>,
 }
 
 #[derive(Deserialize, JsonSchema, Debug)]
@@ -511,6 +528,22 @@ impl PostCortexService {
         )
         .await
         {
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
+            Err(e) => Err(McpError::internal_error(e.to_string(), None)),
+        }
+    }
+
+    #[tool(description = "Universal semantic search with scope (session, workspace, global)")]
+    async fn semantic_search(
+        &self,
+        params: Parameters<SemanticSearchRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let req = &params.0;
+
+        // Convert scope struct to JSON for the tool function
+        let scope_json = req.scope.as_ref().map(|s| serde_json::to_value(s).unwrap());
+
+        match crate::tools::mcp::semantic_search(req.query.clone(), scope_json).await {
             Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
             Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }

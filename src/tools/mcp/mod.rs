@@ -1387,6 +1387,105 @@ pub async fn search_sessions(query: String) -> Result<MCPToolResult> {
     }
 }
 
+// Universal semantic search tool
+pub async fn semantic_search(
+    query: String,
+    scope: Option<serde_json::Value>,
+) -> Result<MCPToolResult> {
+    let result = with_storage_timeout(async {
+        let system = get_memory_system().await?;
+
+        // Parse scope
+        let (scope_type, scope_id) = if let Some(scope_json) = scope {
+            let type_ = scope_json["type"]
+                .as_str()
+                .unwrap_or("global")
+                .to_string();
+            let id_str = scope_json.get("id").and_then(|v| v.as_str());
+            let id = id_str.and_then(|s| Uuid::parse_str(s).ok());
+            (type_, id)
+        } else {
+            ("global".to_string(), None)
+        };
+
+        // Check for semantic query engine
+        let engine = if let Some(engine) = system.semantic_query_engine.get() {
+            engine
+        } else {
+            return Ok(MCPToolResult::error(
+                "Semantic search engine not initialized".to_string(),
+            ));
+        };
+
+        let results = match scope_type.as_str() {
+            "session" => {
+                let session_id = scope_id
+                    .ok_or_else(|| anyhow::anyhow!("Missing session ID for session scope"))?;
+                engine
+                    .semantic_search_session(session_id, &query, None, None)
+                    .await
+            }
+            "workspace" => {
+                let ws_id = scope_id
+                    .ok_or_else(|| anyhow::anyhow!("Missing workspace ID for workspace scope"))?;
+                let workspace = system
+                    .workspace_manager
+                    .get_workspace(&ws_id)
+                    .ok_or_else(|| anyhow::anyhow!("Workspace {} not found", ws_id))?;
+
+                let session_ids: Vec<Uuid> = workspace
+                    .get_all_sessions()
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect();
+
+                engine
+                    .semantic_search_multisession(&session_ids, &query, None, None)
+                    .await
+            }
+            "global" => engine.semantic_search_global(&query, None, None).await,
+            _ => return Ok(MCPToolResult::error(format!(
+                "Invalid search scope type: {}",
+                scope_type
+            ))),
+        };
+
+        match results {
+            Ok(results) => {
+                let formatted: Vec<serde_json::Value> = results
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "content": r.text_content,
+                            "score": r.combined_score,
+                            "session_id": r.session_id,
+                            "type": format!("{:?}", r.content_type),
+                            "timestamp": r.timestamp.to_rfc3339()
+                        })
+                    })
+                    .collect();
+
+                Ok(MCPToolResult::success(
+                    format!("Found {} results", results.len()),
+                    Some(serde_json::json!({ "results": formatted })),
+                ))
+            }
+            Err(e) => Ok(MCPToolResult::error(format!("Search failed: {e}"))),
+        }
+    })
+    .await;
+
+    match result {
+        Ok(success_result) => success_result,
+        Err(timeout_error) => {
+            error!("TIMEOUT: semantic_search - error: {timeout_error}");
+            Ok(MCPToolResult::error(format!(
+                "Semantic search timed out: {timeout_error}"
+            )))
+        }
+    }
+}
+
 #[instrument(skip(session_id), fields(session_id = %session_id))]
 pub async fn update_session_metadata(
     session_id: Uuid,

@@ -172,6 +172,31 @@ impl SemanticQueryEngine {
         Ok(results)
     }
 
+    /// Search within a specific set of sessions
+    pub async fn semantic_search_multisession(
+        &self,
+        session_ids: &[Uuid],
+        query: &str,
+        limit: Option<usize>,
+        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+    ) -> Result<Vec<SemanticSearchResult>> {
+        let search_limit = limit.unwrap_or(self.config.max_context_results);
+
+        debug!(
+            "Performing multisession semantic search in {} sessions for: '{}'",
+            session_ids.len(),
+            query
+        );
+
+        let results = self
+            .vectorizer
+            .semantic_search_multisession(query, search_limit, session_ids, date_range)
+            .await
+            .context("Failed to perform multisession semantic search")?;
+
+        Ok(results)
+    }
+
     /// Find related experiences from other sessions
     pub async fn find_related_experiences(
         &self,

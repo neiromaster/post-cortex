@@ -535,6 +535,68 @@ impl ContentVectorizer {
             _ => return Ok(Vec::new()),
         };
 
+        let results = self.process_search_results(search_results)?;
+
+        // Cache the results
+        if let Some(ref cache) = self.query_cache
+            && let Err(e) = cache
+                .cache_results(
+                    query.to_string(),
+                    query_embedding,
+                    results.clone(),
+                    params_hash,
+                    session_filter,
+                )
+                .await
+        {
+            warn!("Failed to cache search results: {}", e);
+        }
+
+        Ok(results)
+    }
+
+    /// Perform semantic search within a specific set of sessions
+    pub async fn semantic_search_multisession(
+        &self,
+        query: &str,
+        limit: usize,
+        allowed_sessions: &[Uuid],
+        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+    ) -> Result<Vec<SemanticSearchResult>> {
+        debug!("Performing multisession semantic search for: '{}'", query);
+
+        // Check query cache first (simplified key generation for now)
+        // Ideally we should hash the allowed_sessions too
+        let query_embedding = self.embedding_engine.encode_text(query).await?;
+
+        // Pre-calculate valid session strings for fast lookup
+        let valid_sessions: std::collections::HashSet<String> = allowed_sessions
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+
+        let search_results = if let Some((start, end)) = date_range {
+            self.vector_db
+                .search_with_filter(&query_embedding, limit, |metadata| {
+                    valid_sessions.contains(&metadata.source)
+                        && metadata.timestamp >= start
+                        && metadata.timestamp <= end
+                })?
+        } else {
+            self.vector_db
+                .search_with_filter(&query_embedding, limit, |metadata| {
+                    valid_sessions.contains(&metadata.source)
+                })?
+        };
+
+        self.process_search_results(search_results)
+    }
+
+    /// Process raw vector search results into semantic results
+    fn process_search_results(
+        &self,
+        search_results: Vec<crate::core::vector_db::SearchMatch>,
+    ) -> Result<Vec<SemanticSearchResult>> {
         // Convert to semantic search results
         let mut results = Vec::new();
         for result in search_results {
@@ -597,21 +659,6 @@ impl ContentVectorizer {
                 .partial_cmp(&a.combined_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-
-        // Cache the results
-        if let Some(ref cache) = self.query_cache
-            && let Err(e) = cache
-                .cache_results(
-                    query.to_string(),
-                    query_embedding,
-                    results.clone(),
-                    params_hash,
-                    session_filter,
-                )
-                .await
-        {
-            warn!("Failed to cache search results: {}", e);
-        }
 
         debug!("Found {} semantic search results", results.len());
         Ok(results)
