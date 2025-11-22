@@ -334,7 +334,8 @@ impl LockFreeQueryCache {
         }
 
         // Then try similarity-based matching (lock-free)
-        if let Some((results, similarity)) = self.find_similar_query(query_vector) {
+        // Now checks params_hash to prevent cross-session result leakage
+        if let Some((results, similarity)) = self.find_similar_query(query_vector, params_hash) {
             self.stats.record_hit(similarity);
             return Some(results);
         }
@@ -403,14 +404,25 @@ impl LockFreeQueryCache {
     }
 
     /// Find similar query based on vector similarity (lock-free)
-    fn find_similar_query(&self, query_vector: &[f32]) -> Option<(Vec<SemanticSearchResult>, f32)> {
+    ///
+    /// CRITICAL: This method now checks params_hash to ensure cached results
+    /// match the current query parameters (session filter, date range, etc.)
+    fn find_similar_query(&self, query_vector: &[f32], params_hash: u64) -> Option<(Vec<SemanticSearchResult>, f32)> {
         let mut best_match: Option<(Vec<SemanticSearchResult>, f32, Uuid)> = None;
         let mut best_similarity = 0.0f32;
 
         for entry in self.cache.iter() {
             let cached_query = entry.value();
-            
+
             if cached_query.is_expired(self.config.ttl_minutes) {
+                continue;
+            }
+
+            // CRITICAL FIX: Check params_hash matches before considering similarity
+            // This prevents returning cached results from different sessions/filters
+            // Bug: Previously, similar queries with different session filters
+            // would return wrong cached results from other sessions
+            if cached_query.params_hash != params_hash {
                 continue;
             }
 
@@ -606,15 +618,22 @@ mod tests {
         let query_vector1 = vec![1.0, 0.0, 0.0];
         let query_vector2 = vec![0.9, 0.1, 0.0]; // Similar vector
         let results = vec![];
+        let params_hash = 123; // Same params_hash for both queries
 
         // Cache first query
         cache
-            .cache_results("query1".to_string(), query_vector1, results, 123, None)
+            .cache_results("query1".to_string(), query_vector1, results, params_hash, None)
             .unwrap();
 
-        // Search with similar vector
-        let cached_results = cache.search("query2", &query_vector2, 456);
+        // Search with similar vector and SAME params_hash
+        // After fix: similarity matching only works if params_hash matches
+        let cached_results = cache.search("query2", &query_vector2, params_hash);
         assert!(cached_results.is_some());
+
+        // Search with different params_hash should NOT return cached results
+        let different_params = cache.search("query2", &query_vector2, 456);
+        assert!(different_params.is_none(),
+            "Bug fix verification: different params_hash should not return cached results");
     }
 
     #[test]
