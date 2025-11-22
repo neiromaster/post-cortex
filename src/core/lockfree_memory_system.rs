@@ -300,8 +300,8 @@ impl Default for SystemConfig {
             enable_smart_entity_ranking: true, // Enable by default for better quality
             // Embeddings defaults
             enable_embeddings: true, // Enabled for semantic search functionality
-            embeddings_model_type: "MiniLM".to_string(),
-            vector_dimension: 384, // MiniLM uses 384-dimensional embeddings
+            embeddings_model_type: "MultilingualMiniLM".to_string(),
+            vector_dimension: 384, // MultilingualMiniLM uses 384-dimensional embeddings
             max_vectors_per_session: 1000,
             semantic_search_threshold: 0.7,
             auto_vectorize_on_update: true,
@@ -388,14 +388,15 @@ impl LockFreeConversationMemorySystem {
                 let model_type = match config.embeddings_model_type.as_str() {
                     "StaticSimilarityMRL" => EmbeddingModelType::StaticSimilarityMRL,
                     "MiniLM" => EmbeddingModelType::MiniLM,
+                    "MultilingualMiniLM" => EmbeddingModelType::MultilingualMiniLM,
                     "TinyBERT" => EmbeddingModelType::TinyBERT,
                     "BGESmall" => EmbeddingModelType::BGESmall,
                     _ => {
                         warn!(
-                            "Unknown embedding model type: {}, defaulting to StaticSimilarityMRL",
+                            "Unknown embedding model type: {}, defaulting to MultilingualMiniLM",
                             config.embeddings_model_type
                         );
-                        EmbeddingModelType::StaticSimilarityMRL
+                        EmbeddingModelType::MultilingualMiniLM
                     }
                 };
 
@@ -1831,6 +1832,113 @@ impl LockFreeConversationMemorySystem {
             }
         }
         Ok(())
+    }
+
+    /// Vectorize all sessions in the system
+    /// Returns total number of vectorized items across all sessions and statistics
+    #[cfg(feature = "embeddings")]
+    pub async fn vectorize_all_sessions(&self) -> Result<(usize, usize, usize), String> {
+        info!("Starting full vectorization of all sessions");
+        let start_time = std::time::Instant::now();
+
+        // Lazy-initialize vectorizer if needed
+        let vectorizer = self.ensure_vectorizer_initialized().await?;
+
+        // Get all session IDs
+        let session_ids = self.list_sessions().await?;
+        let total_sessions = session_ids.len();
+
+        if total_sessions == 0 {
+            info!("No sessions found to vectorize");
+            return Ok((0, 0, 0));
+        }
+
+        info!("Found {} sessions to vectorize", total_sessions);
+
+        let mut total_vectorized = 0;
+        let mut successful_sessions = 0;
+        let mut failed_sessions = 0;
+
+        // Process each session
+        for (index, session_id) in session_ids.iter().enumerate() {
+            info!(
+                "Vectorizing session {}/{}: {}",
+                index + 1,
+                total_sessions,
+                session_id
+            );
+
+            // Load session
+            match self.get_session_internal(*session_id).await {
+                Ok(session_arc) => {
+                    let session = session_arc.load();
+
+                    // Check if session already has embeddings
+                    let already_vectorized = vectorizer.is_session_vectorized(*session_id);
+                    if already_vectorized {
+                        let existing_count = vectorizer.count_session_embeddings(*session_id);
+                        info!(
+                            "Session {} already has {} embeddings, re-vectorizing...",
+                            session_id, existing_count
+                        );
+                    }
+
+                    // Vectorize the session
+                    match vectorizer.vectorize_session(&session).await {
+                        Ok(count) => {
+                            total_vectorized += count;
+                            successful_sessions += 1;
+                            info!(
+                                "Successfully vectorized {} items for session {} ({}/{} complete)",
+                                count,
+                                session_id,
+                                successful_sessions,
+                                total_sessions
+                            );
+                        }
+                        Err(e) => {
+                            failed_sessions += 1;
+                            warn!(
+                                "Failed to vectorize session {} ({}/{}): {}",
+                                session_id,
+                                index + 1,
+                                total_sessions,
+                                e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    failed_sessions += 1;
+                    warn!(
+                        "Failed to load session {} ({}/{}): {}",
+                        session_id,
+                        index + 1,
+                        total_sessions,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Clear query cache after bulk vectorization
+        if let Err(e) = vectorizer.clear_query_cache().await {
+            warn!(
+                "Failed to clear query cache after bulk vectorization: {}",
+                e
+            );
+        }
+
+        let elapsed = start_time.elapsed();
+        info!(
+            "Bulk vectorization complete in {:.2}s: {} total items across {} successful sessions ({} failed)",
+            elapsed.as_secs_f64(),
+            total_vectorized,
+            successful_sessions,
+            failed_sessions
+        );
+
+        Ok((total_vectorized, successful_sessions, failed_sessions))
     }
 
     /// Perform semantic search across all sessions

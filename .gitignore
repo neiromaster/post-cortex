@@ -41,3 +41,4 @@ tests/*.sh
 tests/test_data_*
 target
 examples
+scripts

@@ -198,7 +198,7 @@ pub async fn get_memory_system() -> Result<Arc<ConversationMemorySystem>> {
     #[cfg(feature = "embeddings")]
     {
         config.enable_embeddings = true;
-        config.embeddings_model_type = "MiniLM".to_string();
+        config.embeddings_model_type = "MultilingualMiniLM".to_string();
         config.auto_vectorize_on_update = true;
         config.cross_session_search_enabled = true;
         info!("MCP-TOOLS: Embeddings enabled in config");
@@ -2219,7 +2219,7 @@ fn interaction_type_to_content_type(interaction_type: &str) -> Option<ContentTyp
         "qa" => Some(ContentType::UserMessage),
         "code_change" => Some(ContentType::CodeSnippet),
         "decision_made" => Some(ContentType::DecisionPoint),
-        "problem_solved" => Some(ContentType::UpdateContent),
+        "problem_solved" => Some(ContentType::ProblemSolution),
         _ => None,
     }
 }
@@ -2265,8 +2265,18 @@ pub async fn semantic_search_global(
         (None, None) => None,
     };
 
+    // When interaction_type filter is provided, request more results to ensure
+    // we get enough results of the desired ContentType after filtering
+    // (EntityDescription with high similarity often dominates top results)
+    let search_limit = if interaction_type.is_some() {
+        // Request 10x more results to account for ContentType filtering
+        Some(limit.unwrap_or(10) * 10)
+    } else {
+        limit
+    };
+
     match system
-        .semantic_search_global(&query, limit, date_range)
+        .semantic_search_global(&query, search_limit, date_range)
         .await
     {
         Ok(mut results) => {
@@ -2295,6 +2305,13 @@ pub async fn semantic_search_global(
                         results_before_filter,
                         results.len()
                     );
+
+                    // Trim to original limit after filtering
+                    let final_limit = limit.unwrap_or(10);
+                    if results.len() > final_limit {
+                        results.truncate(final_limit);
+                        info!("Truncated to {} results after filtering", final_limit);
+                    }
                 } else {
                     info!("No valid ContentTypes mapped, skipping filter");
                 }
@@ -2311,11 +2328,12 @@ pub async fn semantic_search_global(
 
             for (idx, r) in results.iter().enumerate() {
                 message.push_str(&format!(
-                    "{}. [Session: {}] [{:?}] Score: {:.3} ({})\n",
+                    "{}. [Session: {}] [{:?}] Similarity: {:.1}% | Relevance: {:.1}% ({})\n",
                     idx + 1,
                     &r.session_id.to_string()[..8],
                     r.content_type,
-                    r.combined_score,
+                    r.similarity_score * 100.0,
+                    r.combined_score * 100.0,
                     r.similarity_quality()
                 ));
                 message.push_str(&format!(
@@ -2324,9 +2342,10 @@ pub async fn semantic_search_global(
                 ));
                 message.push_str(&format!("   {}\n", r.score_explanation()));
 
-                // Truncate text_content if too long
-                let content = if r.text_content.len() > 500 {
-                    format!("{}...", &r.text_content[..500])
+                // Truncate text_content if too long (UTF-8 safe)
+                let content = if r.text_content.chars().count() > 500 {
+                    let truncated: String = r.text_content.chars().take(500).collect();
+                    format!("{}...", truncated)
                 } else {
                     r.text_content.clone()
                 };
@@ -2420,8 +2439,18 @@ pub async fn semantic_search_session(
         (None, None) => None,
     };
 
+    // When interaction_type filter is provided, request more results to ensure
+    // we get enough results of the desired ContentType after filtering
+    // (EntityDescription with high similarity often dominates top results)
+    let search_limit = if interaction_type.is_some() {
+        // Request 10x more results to account for ContentType filtering
+        Some(limit.unwrap_or(10) * 10)
+    } else {
+        limit
+    };
+
     match system
-        .semantic_search_session(session_id, &query, limit, date_range)
+        .semantic_search_session(session_id, &query, search_limit, date_range)
         .await
     {
         Ok(mut results) => {
@@ -2450,6 +2479,13 @@ pub async fn semantic_search_session(
                         results_before_filter,
                         results.len()
                     );
+
+                    // Trim to original limit after filtering
+                    let final_limit = limit.unwrap_or(10);
+                    if results.len() > final_limit {
+                        results.truncate(final_limit);
+                        info!("Truncated to {} results after filtering", final_limit);
+                    }
                 } else {
                     info!("No valid ContentTypes mapped, skipping filter");
                 }
@@ -2466,10 +2502,11 @@ pub async fn semantic_search_session(
 
             for (idx, r) in results.iter().enumerate() {
                 message.push_str(&format!(
-                    "{}. [{:?}] Score: {:.3} ({})\n",
+                    "{}. [{:?}] Similarity: {:.1}% | Relevance: {:.1}% ({})\n",
                     idx + 1,
                     r.content_type,
-                    r.combined_score,
+                    r.similarity_score * 100.0,
+                    r.combined_score * 100.0,
                     r.similarity_quality()
                 ));
                 message.push_str(&format!(
@@ -2478,9 +2515,10 @@ pub async fn semantic_search_session(
                 ));
                 message.push_str(&format!("   {}\n", r.score_explanation()));
 
-                // Truncate text_content if too long
-                let content = if r.text_content.len() > 500 {
-                    format!("{}...", &r.text_content[..500])
+                // Truncate text_content if too long (UTF-8 safe)
+                let content = if r.text_content.chars().count() > 500 {
+                    let truncated: String = r.text_content.chars().take(500).collect();
+                    format!("{}...", truncated)
                 } else {
                     r.text_content.clone()
                 };
@@ -2574,9 +2612,10 @@ pub async fn find_related_content(
                     r.timestamp.format("%Y-%m-%d %H:%M:%S")
                 ));
 
-                // Truncate text_content if too long
-                let content = if r.text_content.len() > 500 {
-                    format!("{}...", &r.text_content[..500])
+                // Truncate text_content if too long (UTF-8 safe)
+                let content = if r.text_content.chars().count() > 500 {
+                    let truncated: String = r.text_content.chars().take(500).collect();
+                    format!("{}...", truncated)
                 } else {
                     r.text_content.clone()
                 };

@@ -1058,6 +1058,16 @@ impl LockFreeVectorDB {
             .count()
     }
 
+    /// Check if session has update embeddings (not just entities) - lock-free
+    pub fn has_session_update_embeddings(&self, session_id: &str) -> bool {
+        self.metadata
+            .iter()
+            .any(|entry| {
+                entry.value().source == session_id
+                    && entry.value().content_type != "EntityDescription"
+            })
+    }
+
     /// Build HNSW index for all vectors (lock-free)
     pub fn build_index(&self) -> Result<()> {
         info!("Building HNSW index for {} vectors", self.vectors.len());
@@ -1135,7 +1145,42 @@ impl LockFreeVectorDB {
     where
         F: Fn(&VectorMetadata) -> bool,
     {
-        let all_matches = self.search(query_vector, k * 2)?; // Get more results for filtering
+        // Dynamic ef_search to ensure HNSW returns enough candidates for filtering
+        // We need ef_search >= k*2 to get k*2 results before filtering
+        // Using k*3 provides safety margin for session/content_type filtering
+        let dynamic_ef_search = self.config.ef_search.max(k * 3);
+
+        debug!(
+            "search_with_filter: k={}, config.ef_search={}, dynamic_ef_search={}",
+            k, self.config.ef_search, dynamic_ef_search
+        );
+
+        let all_matches = self.search_with_mode(
+            query_vector,
+            k * 2,
+            SearchMode::Balanced,
+            Some(dynamic_ef_search),
+        )?;
+
+        debug!(
+            "search_with_filter: got {} results before filtering",
+            all_matches.len()
+        );
+
+        // Log ContentType distribution for debugging cross-language search issues
+        if log::log_enabled!(log::Level::Debug) {
+            let mut content_type_counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for m in &all_matches {
+                *content_type_counts
+                    .entry(m.metadata.content_type.clone())
+                    .or_insert(0) += 1;
+            }
+            debug!(
+                "search_with_filter: ContentType distribution: {:?}",
+                content_type_counts
+            );
+        }
 
         let filtered_matches: Vec<_> = all_matches
             .into_iter()

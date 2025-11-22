@@ -26,6 +26,12 @@
 //!   post-cortex-daemon status   - Check if daemon is running
 //!   post-cortex-daemon stop     - Stop running daemon
 
+const VERSION: &str = "0.1.2-fix-embedding-model";
+const BUILD_DATE: &str = match option_env!("BUILD_DATE") {
+    Some(date) => date,
+    None => "dev-build",
+};
+
 use post_cortex::daemon::{DaemonConfig, start_rmcp_daemon};
 use std::env;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
@@ -57,6 +63,11 @@ async fn main() -> Result<(), String> {
         "status" => check_status().await,
         "stop" => stop_daemon().await,
         "init" => init_config(),
+        "vectorize-all" => vectorize_all().await,
+        "version" | "--version" | "-v" => {
+            print_version();
+            Ok(())
+        }
         "help" | "--help" | "-h" => {
             print_usage();
             Ok(())
@@ -69,18 +80,26 @@ async fn main() -> Result<(), String> {
     }
 }
 
+fn print_version() {
+    println!("Post-Cortex Daemon v{}", VERSION);
+    println!("Build date: {}", BUILD_DATE);
+}
+
 fn print_usage() {
     println!("Post-Cortex Daemon - Lock-free HTTP MCP server");
+    println!("Version: {}", VERSION);
     println!();
     println!("USAGE:");
     println!("    post-cortex-daemon <COMMAND>");
     println!();
     println!("COMMANDS:");
-    println!("    start     Start daemon server in foreground");
-    println!("    status    Check if daemon is running");
-    println!("    stop      Stop running daemon (sends SIGTERM to port 3737)");
-    println!("    init      Create example config file at ~/.post-cortex/daemon.toml");
-    println!("    help      Print this help message");
+    println!("    start          Start daemon server in foreground");
+    println!("    status         Check if daemon is running");
+    println!("    stop           Stop running daemon (sends SIGTERM to port 3737)");
+    println!("    init           Create example config file at ~/.post-cortex/daemon.toml");
+    println!("    vectorize-all  Vectorize all sessions in the system (requires embeddings feature)");
+    println!("    version        Print version information");
+    println!("    help           Print this help message");
     println!();
     println!("CONFIGURATION:");
     println!("    Config File:    ~/.post-cortex/daemon.toml (optional)");
@@ -107,12 +126,16 @@ fn print_usage() {
     println!("    # Check daemon status");
     println!("    post-cortex-daemon status");
     println!();
+    println!("    # Vectorize all sessions");
+    println!("    post-cortex-daemon vectorize-all");
+    println!();
     println!("    # Start daemon with environment override");
     println!("    PC_PORT=8080 post-cortex-daemon start");
 }
 
 async fn start_daemon() -> Result<(), String> {
     println!("Starting Post-Cortex daemon with RMCP SSE transport...");
+    println!("Version: {} (built: {})", VERSION, BUILD_DATE);
     println!();
 
     // Load configuration (priority: env vars > config file > defaults)
@@ -202,5 +225,78 @@ fn init_config() -> Result<(), String> {
             Err(e)
         }
     }
+}
+
+#[cfg(feature = "embeddings")]
+async fn vectorize_all() -> Result<(), String> {
+    use post_cortex::core::lockfree_memory_system::LockFreeConversationMemorySystem;
+    use post_cortex::daemon::DaemonConfig;
+    use post_cortex::SystemConfig;
+
+    println!("Starting vectorization of all sessions...");
+    println!();
+
+    // Load daemon config to get data directory
+    let daemon_config = DaemonConfig::load();
+    println!("Data directory: {}", daemon_config.data_directory);
+    println!();
+
+    // Create memory system config with embeddings enabled
+    let mut config = SystemConfig::default();
+    config.enable_embeddings = true;
+    config.auto_vectorize_on_update = false; // Disable auto-vectorize during bulk operation
+    config.data_directory = daemon_config.data_directory;
+
+    // Initialize memory system
+    println!("Initializing memory system...");
+    let system = match LockFreeConversationMemorySystem::new(config).await {
+        Ok(sys) => sys,
+        Err(e) => {
+            eprintln!("Failed to initialize memory system: {}", e);
+            return Err(e);
+        }
+    };
+    println!("Memory system initialized successfully");
+    println!();
+
+    // Run vectorization
+    println!("Starting bulk vectorization...");
+    println!("This may take a while depending on the number of sessions and their size");
+    println!();
+
+    match system.vectorize_all_sessions().await {
+        Ok((total_items, successful, failed)) => {
+            println!();
+            println!("Vectorization Complete!");
+            println!("======================");
+            println!("Total items vectorized: {}", total_items);
+            println!("Successful sessions:    {}", successful);
+            println!("Failed sessions:        {}", failed);
+            println!();
+
+            if failed > 0 {
+                println!("Some sessions failed to vectorize. Check logs for details.");
+                println!();
+            }
+
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!();
+            eprintln!("Vectorization failed: {}", e);
+            eprintln!();
+            Err(e)
+        }
+    }
+}
+
+#[cfg(not(feature = "embeddings"))]
+async fn vectorize_all() -> Result<(), String> {
+    eprintln!("Error: Vectorization requires the 'embeddings' feature");
+    eprintln!();
+    eprintln!("Please rebuild with:");
+    eprintln!("  cargo build --release --features embeddings");
+    eprintln!();
+    Err("Embeddings feature not enabled".to_string())
 }
 

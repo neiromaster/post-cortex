@@ -689,8 +689,10 @@ impl ContentVectorizer {
 
     /// Check if a session has been vectorized
     pub fn is_session_vectorized(&self, session_id: uuid::Uuid) -> bool {
+        // Check if session has UPDATE embeddings (not just entities)
+        // This ensures auto-vectorization runs even if only entities are vectorized
         self.vector_db
-            .has_session_embeddings(&session_id.to_string())
+            .has_session_update_embeddings(&session_id.to_string())
     }
 
     /// Count embeddings for a specific session
@@ -708,7 +710,7 @@ impl ContentVectorizer {
         let mut metadata_list = Vec::new();
 
         // Process hot context
-        for update in session.hot_context.iter().iter() {
+        for update in &session.hot_context.iter() {
             let raw_text = Self::extract_text_from_update(update);
             if self.should_vectorize_text(&raw_text) {
                 let content_type = Self::determine_content_type(update);
@@ -808,32 +810,42 @@ impl ContentVectorizer {
     fn extract_text_from_update(update: &ContextUpdate) -> String {
         let mut text_parts = Vec::new();
 
-        // Add title and description
-        text_parts.push(format!("Title: {}", update.content.title));
-        text_parts.push(format!("Description: {}", update.content.description));
+        // ALWAYS include title (question) for all update types
+        // For QA updates: Including the question is CRITICAL for semantic search
+        // Users typically search with questions, not answers, so we need question text
+        // in the embedding to match query embeddings effectively
+        let title = update.content.title.clone();
+        let description = update.content.description.clone();
+
+        tracing::debug!("extract_text_from_update: title='{}', description='{}'",
+            &title[..title.len().min(50)],
+            &description[..description.len().min(50)]);
+
+        text_parts.push(title);
+        text_parts.push(description);
 
         // Add details
         for detail in &update.content.details {
-            text_parts.push(format!("Detail: {detail}"));
+            text_parts.push(detail.clone());
         }
 
         // Add examples
         for example in &update.content.examples {
-            text_parts.push(format!("Example: {example}"));
+            text_parts.push(example.clone());
         }
 
         // Add implications
         for implication in &update.content.implications {
-            text_parts.push(format!("Implication: {implication}"));
+            text_parts.push(implication.clone());
         }
 
         // Add code reference if available
         if let Some(code_ref) = &update.related_code {
-            text_parts.push(format!("Code: {}", code_ref.code_snippet));
-            text_parts.push(format!("File: {}", code_ref.file_path));
+            text_parts.push(code_ref.code_snippet.clone());
+            text_parts.push(code_ref.file_path.clone());
         }
 
-        text_parts.join(" | ")
+        text_parts.join(" ")
     }
 
     /// Extract text content from a compressed update

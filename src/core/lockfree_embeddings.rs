@@ -245,8 +245,10 @@ struct BatchPerformanceStats {
 pub enum EmbeddingModelType {
     /// Static embeddings (fast, lightweight)
     StaticSimilarityMRL,
-    /// MiniLM model (balanced performance)
+    /// MiniLM model (balanced performance, English-only)
     MiniLM,
+    /// Multilingual MiniLM model (supports 50+ languages including Bulgarian)
+    MultilingualMiniLM,
     /// TinyBERT model (smallest BERT variant)
     TinyBERT,
     /// BGE Small model (balanced BERT)
@@ -255,7 +257,7 @@ pub enum EmbeddingModelType {
 
 impl Default for EmbeddingModelType {
     fn default() -> Self {
-        Self::MiniLM
+        Self::MultilingualMiniLM
     }
 }
 
@@ -265,6 +267,7 @@ impl EmbeddingModelType {
         match self {
             Self::StaticSimilarityMRL => 1024,
             Self::MiniLM => 384,
+            Self::MultilingualMiniLM => 384,
             Self::TinyBERT => 312,
             Self::BGESmall => 384,
         }
@@ -275,6 +278,7 @@ impl EmbeddingModelType {
         match self {
             Self::StaticSimilarityMRL => "sentence-transformers/all-MiniLM-L6-v2",
             Self::MiniLM => "sentence-transformers/all-MiniLM-L6-v2",
+            Self::MultilingualMiniLM => "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
             Self::TinyBERT => "huawei-noah/TinyBERT_General_6L_312D",
             Self::BGESmall => "BAAI/bge-small-en-v1.5",
         }
@@ -282,7 +286,7 @@ impl EmbeddingModelType {
 
     /// Check if this is a BERT-based model
     pub fn is_bert_based(&self) -> bool {
-        matches!(self, Self::MiniLM | Self::TinyBERT | Self::BGESmall)
+        matches!(self, Self::MiniLM | Self::MultilingualMiniLM | Self::TinyBERT | Self::BGESmall)
     }
 }
 
@@ -518,8 +522,39 @@ impl LockFreeLocalEmbeddingEngine {
         Ok(all_embeddings)
     }
 
+    /// L2 normalize embeddings tensor (critical for cosine similarity)
+    fn l2_normalize_embeddings(&self, embeddings: &Tensor) -> Result<Tensor> {
+        // Calculate L2 norm (magnitude) for each embedding vector
+        // embeddings shape: [batch_size, embedding_dim]
+        let squared = embeddings.sqr()?; // Square each element
+        let sum_squared = squared.sum_keepdim(1)?; // Sum across embedding dimension
+        let l2_norm = sum_squared.sqrt()?; // Take square root to get L2 norm
+
+        // Debug: Check if vectors are already normalized
+        let l2_norm_values = l2_norm.to_vec2::<f32>()?;
+        debug!(
+            "L2 normalization - batch size: {}, first norm: {:.6}",
+            l2_norm_values.len(),
+            l2_norm_values.get(0).and_then(|v| v.get(0)).unwrap_or(&0.0)
+        );
+
+        // Avoid division by zero by adding small epsilon
+        let epsilon = 1e-12_f64;
+        let l2_norm_safe = l2_norm.affine(1.0, epsilon)?; // l2_norm * 1.0 + epsilon
+
+        // Normalize: embeddings / l2_norm
+        let normalized = embeddings.broadcast_div(&l2_norm_safe)?;
+
+        debug!("L2 normalization completed successfully");
+
+        Ok(normalized)
+    }
+
     /// Process a single BERT batch (lock-free implementation)
     async fn process_bert_batch(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        // Maximum sequence length for BERT models (most use 512)
+        const MAX_SEQ_LENGTH: usize = 512;
+
         // Tokenize texts (lock-free)
         let mut tokenized = Vec::with_capacity(texts.len());
         for text in &texts {
@@ -532,7 +567,14 @@ impl LockFreeLocalEmbeddingEngine {
         }
 
         // Create tensor from tokenized input (lock-free)
-        let max_len = tokenized.iter().map(|enc| enc.len()).max().unwrap_or(0);
+        // Limit max_len to MAX_SEQ_LENGTH to prevent index out of bounds
+        let max_len = tokenized
+            .iter()
+            .map(|enc| enc.len())
+            .max()
+            .unwrap_or(0)
+            .min(MAX_SEQ_LENGTH);
+
         let mut input_ids = Vec::new();
         let mut attention_mask = Vec::new();
 
@@ -540,8 +582,16 @@ impl LockFreeLocalEmbeddingEngine {
             let ids = encoding.get_ids();
             let mask = encoding.get_attention_mask();
 
-            input_ids.extend_from_slice(ids);
-            attention_mask.extend_from_slice(mask);
+            // Truncate to max_len if necessary
+            let truncate_len = ids.len().min(max_len);
+            input_ids.extend_from_slice(&ids[..truncate_len]);
+            attention_mask.extend_from_slice(&mask[..truncate_len]);
+
+            // Pad to max_len if shorter
+            if truncate_len < max_len {
+                input_ids.extend(vec![0u32; max_len - truncate_len]);
+                attention_mask.extend(vec![0u32; max_len - truncate_len]);
+            }
         }
 
         // Create tensors (lock-free)
@@ -556,7 +606,19 @@ impl LockFreeLocalEmbeddingEngine {
 
         // Extract embeddings (lock-free)
         let embeddings = outputs.mean(1)?; // Mean pooling over sequence dimension - returns [batch_size, 384]
-        let embeddings_vec = embeddings.to_vec2::<f32>()?; // Convert 2D tensor to 2D vec
+
+        // L2 normalize embeddings for correct cosine similarity calculation
+        let embeddings_normalized = self.l2_normalize_embeddings(&embeddings)?;
+
+        let embeddings_vec = embeddings_normalized.to_vec2::<f32>()?; // Convert 2D tensor to 2D vec
+
+        // Debug: Check norms after normalization
+        if log::log_enabled!(log::Level::Debug) {
+            for (i, emb) in embeddings_vec.iter().enumerate() {
+                let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+                debug!("Embedding {} norm after L2 normalization: {:.6}", i, norm);
+            }
+        }
 
         // Split into individual embeddings (lock-free)
         let mut results = Vec::with_capacity(texts.len());
