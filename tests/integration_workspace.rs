@@ -14,7 +14,7 @@ async fn create_test_system() -> (Arc<ConversationMemorySystem>, TempDir) {
 }
 
 #[tokio::test]
-#[ignore] // TODO: Implement workspace persistence in RocksDB
+// #[ignore] // TODO: Implement workspace persistence in RocksDB
 async fn test_workspace_create_and_persist() {
     let temp_dir = tempfile::tempdir().unwrap();
     let data_dir = temp_dir.path().to_str().unwrap().to_string();
@@ -31,6 +31,14 @@ async fn test_workspace_create_and_persist() {
         let workspace_id = system
             .workspace_manager
             .create_workspace("Test Workspace".to_string(), "Real test".to_string());
+
+        // Persist workspace
+        system.save_workspace_metadata(
+            workspace_id,
+            "Test Workspace",
+            "Real test",
+            &[],
+        ).await.unwrap();
 
         // Verify in memory
         let workspace = system.workspace_manager.get_workspace(&workspace_id);

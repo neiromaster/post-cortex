@@ -31,6 +31,23 @@ use tracing::info;
 
 use uuid::Uuid;
 
+#[derive(Serialize, Deserialize)]
+pub struct StoredWorkspace {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub sessions: Vec<(Uuid, crate::workspace::SessionRole)>,
+    pub created_at: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct StoredWorkspaceSession {
+    pub workspace_id: Uuid,
+    pub session_id: Uuid,
+    pub role: crate::workspace::SessionRole,
+    pub added_at: u64,
+}
+
 /// Real RocksDB storage implementation for high performance
 #[derive(Clone)]
 pub struct RealRocksDBStorage {
@@ -365,6 +382,63 @@ impl RealRocksDBStorage {
     // Workspace Persistence Methods
     // ========================================================================
 
+    /// List all workspaces with their sessions (hydrated from ws_session records)
+    pub async fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>> {
+        let db = self.db.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<StoredWorkspace>> {
+            let mut workspaces: HashMap<Uuid, StoredWorkspace> = HashMap::new();
+            let iter = db.iterator(rocksdb::IteratorMode::Start);
+
+            // First pass: Load all workspaces and sessions
+            // Note: Since iterator order is lexicographical, we might see "workspace:..." after "ws_session:..." or vice-versa
+            // depending on UUID string representation. But usually "workspace:" comes after "session:" but before "ws_session:"
+            // Actually "wo" comes after "ws". Wait. "workspace" vs "ws_session".
+            // 'o' (111) vs 's' (115). So "workspace" comes BEFORE "ws_session".
+            // This is great, we can likely do it in one pass if order is guaranteed, but HashMapping is safer.
+
+            for item in iter {
+                let (key, value) = item?;
+                let key_str = String::from_utf8_lossy(&key);
+
+                if key_str.starts_with("workspace:") {
+                    if let Ok((mut workspace, _)) = bincode::serde::decode_from_slice::<StoredWorkspace, _>(
+                        &value,
+                        bincode::config::standard(),
+                    ) {
+                        // Clear stored sessions as they might be stale (source of truth is ws_session records)
+                        workspace.sessions.clear();
+                        workspaces.insert(workspace.id, workspace);
+                    }
+                } else if key_str.starts_with("ws_session:") {
+                    if let Ok((ws_session, _)) = bincode::serde::decode_from_slice::<StoredWorkspaceSession, _>(
+                        &value,
+                        bincode::config::standard(),
+                    ) {
+                        // We can only add to workspace if we've seen it or if we store it temporarily
+                        // Since "workspace:" comes before "ws_session:" alphabetically, we should be fine in one pass!
+                        if let Some(ws) = workspaces.get_mut(&ws_session.workspace_id) {
+                            ws.sessions.push((ws_session.session_id, ws_session.role));
+                        } else {
+                            // If order is not guaranteed or mixed, we might miss sessions.
+                            // But UUIDs are random.
+                            // "ws_session:{id}" key depends on ID.
+                            // "workspace:{id}" key depends on ID.
+                            // The prefix "workspace" vs "ws_session" determines major order.
+                            // 'w' 'o' vs 'w' 's'. 'o' < 's'.
+                            // So "workspace:..." keys ALWAYS come before "ws_session:..." keys.
+                            // So one pass is safe!
+                        }
+                    }
+                }
+            }
+
+            Ok(workspaces.into_values().collect())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+    }
+
     /// Save workspace metadata to RocksDB
     pub async fn save_workspace_metadata(
         &self,
@@ -386,16 +460,7 @@ impl RealRocksDBStorage {
         let session_ids = session_ids.to_vec();
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            #[derive(Serialize, Deserialize)]
-            struct WorkspaceData {
-                id: Uuid,
-                name: String,
-                description: String,
-                sessions: Vec<(Uuid, SessionRole)>,
-                created_at: u64,
-            }
-
-            let workspace_data = WorkspaceData {
+            let workspace_data = StoredWorkspace {
                 id: workspace_id,
                 name,
                 description,
@@ -473,15 +538,7 @@ impl RealRocksDBStorage {
         let db = self.db.clone();
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            #[derive(Serialize, Deserialize)]
-            struct WorkspaceSession {
-                workspace_id: Uuid,
-                session_id: Uuid,
-                role: crate::workspace::SessionRole,
-                added_at: u64,
-            }
-
-            let ws_session = WorkspaceSession {
+            let ws_session = StoredWorkspaceSession {
                 workspace_id,
                 session_id,
                 role,

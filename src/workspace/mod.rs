@@ -161,6 +161,27 @@ impl LockFreeWorkspaceManager {
         id
     }
 
+    /// Restore a workspace from storage (lock-free)
+    pub fn restore_workspace(
+        &self,
+        id: Uuid,
+        name: String,
+        description: String,
+        sessions: Vec<(Uuid, SessionRole)>,
+    ) {
+        let workspace = Workspace::new(id, name.clone(), description);
+
+        // Restore sessions
+        for (session_id, role) in sessions {
+            workspace.add_session(session_id, role);
+        }
+
+        self.workspaces
+            .insert(id, Arc::new(ArcSwap::from_pointee(workspace)));
+        self.name_index.insert(name, id);
+        self.total_workspaces.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Get workspace by ID (lock-free)
     pub fn get_workspace(&self, id: &Uuid) -> Option<Arc<Workspace>> {
         self.workspaces.get(id).map(|entry| {

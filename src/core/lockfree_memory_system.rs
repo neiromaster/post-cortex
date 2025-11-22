@@ -239,6 +239,9 @@ pub enum StorageMessage {
         session_id: Uuid,
         response_tx: Sender<Result<(), String>>,
     },
+    ListAllWorkspaces {
+        response_tx: Sender<Result<Vec<crate::storage::rocksdb_storage::StoredWorkspace>, String>>,
+    },
     Shutdown,
 }
 
@@ -377,6 +380,25 @@ impl LockFreeConversationMemorySystem {
 
         // Create workspace manager
         let workspace_manager = Arc::new(LockFreeWorkspaceManager::new());
+
+        // Hydrate workspaces from storage
+        match storage_actor.list_all_workspaces().await {
+            Ok(workspaces) => {
+                tracing::info!("Hydrating {} workspaces from storage", workspaces.len());
+                for stored_ws in workspaces {
+                    workspace_manager.restore_workspace(
+                        stored_ws.id,
+                        stored_ws.name,
+                        stored_ws.description,
+                        stored_ws.sessions,
+                    );
+                }
+            }
+            Err(e) => {
+                // Just log error, don't fail startup as this is optional functionality or might fail on fresh install
+                tracing::warn!("Failed to hydrate workspaces (this is expected on first run): {}", e);
+            }
+        }
 
         // Prepare embeddings configuration for lazy initialization
         #[cfg(feature = "embeddings")]
@@ -1311,6 +1333,22 @@ impl StorageActorHandle {
             .ok_or_else(|| "Storage actor response channel closed".to_string())?
     }
 
+    pub async fn list_all_workspaces(
+        &self,
+    ) -> Result<Vec<crate::storage::rocksdb_storage::StoredWorkspace>, String> {
+        let (response_tx, mut response_rx) =
+            channel::<Result<Vec<crate::storage::rocksdb_storage::StoredWorkspace>, String>>(1);
+
+        self.sender
+            .send(StorageMessage::ListAllWorkspaces { response_tx })
+            .map_err(|_| "Storage actor unavailable".to_string())?;
+
+        tokio::time::timeout(self.operation_timeout, response_rx.recv())
+            .await
+            .map_err(|_| "Storage operation timed out".to_string())?
+            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+    }
+
     pub async fn delete_workspace(&self, workspace_id: Uuid) -> Result<(), String> {
         let (response_tx, mut response_rx) = channel::<Result<(), String>>(1);
 
@@ -1556,6 +1594,14 @@ impl StorageActor {
                 let result = self
                     .storage
                     .remove_session_from_workspace(workspace_id, session_id)
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = response_tx.send(result).await;
+            }
+            StorageMessage::ListAllWorkspaces { response_tx } => {
+                let result = self
+                    .storage
+                    .list_workspaces()
                     .await
                     .map_err(|e| e.to_string());
                 let _ = response_tx.send(result).await;
@@ -2265,6 +2311,19 @@ impl LockFreeConversationMemorySystem {
             Ok(None) => Err(format!("Session {session_id} not found")),
             Err(e) => Err(format!("Storage error: {e}")),
         }
+    }
+
+    /// Save workspace metadata (proxy to storage actor)
+    pub async fn save_workspace_metadata(
+        &self,
+        workspace_id: Uuid,
+        name: &str,
+        description: &str,
+        session_ids: &[Uuid],
+    ) -> Result<(), String> {
+        self.storage_actor
+            .save_workspace_metadata(workspace_id, name, description, session_ids)
+            .await
     }
 }
 
