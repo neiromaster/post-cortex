@@ -29,6 +29,7 @@ use crate::summary::SummaryGenerator;
 use crate::core::content_vectorizer::ContentType;
 use anyhow::Result;
 use arc_swap::ArcSwap;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
@@ -659,7 +660,7 @@ impl MCPToolResult {
 }
 
 /// Structure for a single context update in bulk operations
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, JsonSchema, Clone)]
 pub struct ContextUpdateItem {
     pub interaction_type: String,
     pub content: HashMap<String, String>,
@@ -1397,7 +1398,7 @@ pub async fn semantic_search(
 
         // Parse scope
         let (scope_type, scope_id) = if let Some(scope_json) = scope {
-            let type_ = scope_json["type"]
+            let type_ = scope_json["scope_type"]
                 .as_str()
                 .unwrap_or("global")
                 .to_string();

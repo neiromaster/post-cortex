@@ -13,7 +13,7 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
 use tracing::info;
 use uuid::Uuid;
@@ -39,7 +39,7 @@ pub struct UpdateConversationContextRequest {
     pub interaction_type: String,
     #[schemars(description = "Content as key-value pairs")]
     pub content: std::collections::HashMap<String, String>,
-    #[schemars(description = "Optional code reference")]
+    #[schemars(description = "Optional code reference (JSON object with file_path, start_line, end_line, code_snippet, change_description)")]
     pub code_reference: Option<serde_json::Value>,
     #[schemars(description = "Session ID")]
     pub session_id: String,
@@ -115,7 +115,7 @@ pub struct UpdateSessionMetadataRequest {
 
 #[derive(Deserialize, JsonSchema, Debug)]
 pub struct BulkUpdateContextRequest {
-    #[schemars(description = "Array of context updates")]
+    #[schemars(description = "Array of context updates (each with interaction_type, content map, optional code_reference)")]
     pub updates: Vec<serde_json::Value>,
     #[schemars(description = "Session ID")]
     pub session_id: String,
@@ -165,21 +165,14 @@ pub struct SemanticSearchGlobalRequest {
     pub interaction_type: Option<Vec<String>>,
 }
 
-#[derive(Deserialize, JsonSchema, Debug, Serialize)]
-pub struct SearchScope {
-    #[schemars(description = "Scope type: session, workspace, global")]
-    #[serde(rename = "type")]
-    pub type_: String,
-    #[schemars(description = "ID for session/workspace scope")]
-    pub id: Option<String>,
-}
-
 #[derive(Deserialize, JsonSchema, Debug)]
 pub struct SemanticSearchRequest {
     #[schemars(description = "Search query")]
     pub query: String,
-    #[schemars(description = "Search scope")]
-    pub scope: Option<SearchScope>,
+    #[schemars(description = "Scope type: session, workspace, or global")]
+    pub scope_type: Option<String>,
+    #[schemars(description = "Scope ID (session_id or workspace_id when scope_type is session/workspace)")]
+    pub scope_id: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema, Debug)]
@@ -452,6 +445,7 @@ impl PostCortexService {
         let uuid = Uuid::parse_str(&req.session_id)
             .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
+        // Convert Vec<Value> to Vec<ContextUpdateItem>
         let updates: Vec<crate::tools::mcp::ContextUpdateItem> = req
             .updates
             .iter()
@@ -540,8 +534,19 @@ impl PostCortexService {
     ) -> Result<CallToolResult, McpError> {
         let req = &params.0;
 
-        // Convert scope struct to JSON for the tool function
-        let scope_json = req.scope.as_ref().map(|s| serde_json::to_value(s).unwrap());
+        // Build scope JSON from flattened fields
+        let scope_json = if req.scope_type.is_some() || req.scope_id.is_some() {
+            let mut scope = serde_json::Map::new();
+            if let Some(ref st) = req.scope_type {
+                scope.insert("scope_type".to_string(), serde_json::Value::String(st.clone()));
+            }
+            if let Some(ref id) = req.scope_id {
+                scope.insert("id".to_string(), serde_json::Value::String(id.clone()));
+            }
+            Some(serde_json::Value::Object(scope))
+        } else {
+            None
+        };
 
         match crate::tools::mcp::semantic_search(req.query.clone(), scope_json).await {
             Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
@@ -652,14 +657,14 @@ impl PostCortexService {
         }
     }
 
-    #[tool(description = "Get daemon status")]
-    async fn get_status(&self) -> Result<CallToolResult, McpError> {
-        let msg = format!(
-            "Post-Cortex daemon running. Version: {} | rmcp 0.9 with Parameters<T>",
-            env!("CARGO_PKG_VERSION")
-        );
-        Ok(CallToolResult::success(vec![Content::text(msg)]))
-    }
+    // #[tool(description = "Get daemon status")]
+    // async fn get_status(&self) -> Result<CallToolResult, McpError> {
+    //     let msg = format!(
+    //         "Post-Cortex daemon running. Version: {} | rmcp 0.9 with Parameters<T>",
+    //         env!("CARGO_PKG_VERSION")
+    //     );
+    //     Ok(CallToolResult::success(vec![Content::text(msg)]))
+    // }
 
     #[tool(description = "Get tool catalog")]
     async fn get_tool_catalog(&self) -> Result<CallToolResult, McpError> {
