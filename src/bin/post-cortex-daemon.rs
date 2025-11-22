@@ -26,7 +26,7 @@
 //!   post-cortex-daemon status   - Check if daemon is running
 //!   post-cortex-daemon stop     - Stop running daemon
 
-const VERSION: &str = "0.1.3";
+const VERSION: &str = "0.1.4";
 const BUILD_DATE: &str = match option_env!("BUILD_DATE") {
     Some(date) => date,
     None => "dev-build",
