@@ -1256,6 +1256,22 @@ impl StorageActorHandle {
             .ok_or_else(|| "Storage actor response channel closed".to_string())?
     }
 
+    pub async fn delete_session(&self, session_id: Uuid) -> Result<bool, String> {
+        let (response_tx, mut response_rx) = channel::<Result<bool, String>>(1);
+
+        self.sender
+            .send(StorageMessage::DeleteSession {
+                session_id,
+                response_tx,
+            })
+            .map_err(|_| "Storage actor unavailable".to_string())?;
+
+        tokio::time::timeout(self.operation_timeout, response_rx.recv())
+            .await
+            .map_err(|_| "Storage operation timed out".to_string())?
+            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+    }
+
     pub async fn list_sessions(&self) -> Result<Vec<Uuid>, String> {
         let (response_tx, mut response_rx) = channel::<Result<Vec<Uuid>, String>>(1);
 

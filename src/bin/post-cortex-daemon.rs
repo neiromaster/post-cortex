@@ -18,13 +18,15 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//! Post-Cortex daemon binary for manual HTTP server management
+//! Post-Cortex daemon binary for manual HTTP server management and admin tasks
 //!
 //! Usage:
 //!   post-cortex-daemon init     - Create example config file
 //!   post-cortex-daemon start    - Start daemon server (foreground)
 //!   post-cortex-daemon status   - Check if daemon is running
 //!   post-cortex-daemon stop     - Stop running daemon
+//!   post-cortex-daemon workspace - Manage workspaces
+//!   post-cortex-daemon session   - Manage sessions
 
 const VERSION: &str = "0.1.4";
 const BUILD_DATE: &str = match option_env!("BUILD_DATE") {
@@ -33,9 +35,12 @@ const BUILD_DATE: &str = match option_env!("BUILD_DATE") {
 };
 
 use post_cortex::daemon::{DaemonConfig, start_rmcp_daemon};
+use post_cortex::workspace::SessionRole;
+use post_cortex::{LockFreeConversationMemorySystem, SystemConfig};
 use std::env;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
@@ -67,6 +72,8 @@ async fn main() -> Result<(), String> {
         "stop" => stop_daemon().await,
         "init" => init_config(),
         "vectorize-all" => vectorize_all().await,
+        "workspace" => handle_workspace_command(&args[2..]).await,
+        "session" => handle_session_command(&args[2..]).await,
         "version" | "--version" | "-v" => {
             print_version();
             Ok(())
@@ -103,6 +110,8 @@ fn print_usage() {
     println!(
         "    vectorize-all  Vectorize all sessions in the system (requires embeddings feature)"
     );
+    println!("    workspace      Manage workspaces (create, delete, list, attach)");
+    println!("    session        Manage sessions (create, delete, list)");
     println!("    version        Print version information");
     println!("    help           Print this help message");
     println!();
@@ -112,30 +121,6 @@ fn print_usage() {
     println!("      Host:           127.0.0.1 (localhost only)");
     println!("      Port:           3737");
     println!("      Data Directory: ~/.post-cortex/data");
-    println!();
-    println!("    Priority: Environment variables > Config file > Defaults");
-    println!();
-    println!("ENVIRONMENT VARIABLES:");
-    println!("    RUST_LOG        Set logging level (e.g., RUST_LOG=debug)");
-    println!("    PC_HOST         Override host");
-    println!("    PC_PORT         Override port");
-    println!("    PC_DATA_DIR     Override data directory");
-    println!();
-    println!("EXAMPLES:");
-    println!("    # Create config file");
-    println!("    post-cortex-daemon init");
-    println!();
-    println!("    # Start daemon with debug logging");
-    println!("    RUST_LOG=debug post-cortex-daemon start");
-    println!();
-    println!("    # Check daemon status");
-    println!("    post-cortex-daemon status");
-    println!();
-    println!("    # Vectorize all sessions");
-    println!("    post-cortex-daemon vectorize-all");
-    println!();
-    println!("    # Start daemon with environment override");
-    println!("    PC_PORT=8080 post-cortex-daemon start");
 }
 
 async fn start_daemon() -> Result<(), String> {
@@ -236,10 +221,206 @@ fn init_config() -> Result<(), String> {
     }
 }
 
+// --- Admin Commands ---
+
+async fn init_admin_system() -> Result<LockFreeConversationMemorySystem, String> {
+    let daemon_config = DaemonConfig::load();
+    let config = SystemConfig {
+        enable_embeddings: false, // Admin tasks don't need embeddings
+        data_directory: daemon_config.data_directory,
+        ..SystemConfig::default()
+    };
+    LockFreeConversationMemorySystem::new(config).await
+}
+
+async fn handle_workspace_command(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        print_workspace_usage();
+        return Err("Missing workspace subcommand".to_string());
+    }
+
+    match args[0].as_str() {
+        "create" => {
+            if args.len() < 2 {
+                println!("Usage: workspace create <name> [description]");
+                return Err("Missing workspace name".to_string());
+            }
+            let name = args[1].clone();
+            let description = args.get(2).cloned().unwrap_or_default();
+
+            let system = init_admin_system().await?;
+            let id = Uuid::new_v4();
+
+            // Use storage actor directly for persistence
+            system
+                .get_storage()
+                .save_workspace_metadata(id, &name, &description, &[])
+                .await?;
+
+            println!("Workspace created:");
+            println!("  ID:          {}", id);
+            println!("  Name:        {}", name);
+            println!("  Description: {}", description);
+            Ok(())
+        }
+        "delete" => {
+            if args.len() < 2 {
+                println!("Usage: workspace delete <id>");
+                return Err("Missing workspace ID".to_string());
+            }
+            let id = Uuid::parse_str(&args[1]).map_err(|e| format!("Invalid UUID: {}", e))?;
+
+            let system = init_admin_system().await?;
+            system.get_storage().delete_workspace(id).await?;
+            println!("Workspace {} deleted", id);
+            Ok(())
+        }
+        "list" => {
+            let system = init_admin_system().await?;
+            let workspaces = system.get_storage().list_all_workspaces().await?;
+
+            println!("Workspaces ({})", workspaces.len());
+            println!("{:<38} {:<20} {}", "ID", "Name", "Sessions");
+            println!("{:-<38} {:-<20} {:-<10}", "", "", "");
+
+            for ws in workspaces {
+                println!("{:<38} {:<20} {}", ws.id, ws.name, ws.sessions.len());
+            }
+            Ok(())
+        }
+        "attach" => {
+            if args.len() < 3 {
+                println!("Usage: workspace attach <workspace_id> <session_id> [role]");
+                println!("Roles: primary, related, dependency, shared (default: related)");
+                return Err("Missing arguments".to_string());
+            }
+            let ws_id =
+                Uuid::parse_str(&args[1]).map_err(|e| format!("Invalid workspace UUID: {}", e))?;
+            let session_id =
+                Uuid::parse_str(&args[2]).map_err(|e| format!("Invalid session UUID: {}", e))?;
+
+            let role_str = args.get(3).map(|s| s.as_str()).unwrap_or("related");
+            let role = match role_str.to_lowercase().as_str() {
+                "primary" => SessionRole::Primary,
+                "related" => SessionRole::Related,
+                "dependency" => SessionRole::Dependency,
+                "shared" => SessionRole::Shared,
+                _ => {
+                    return Err(format!(
+                        "Invalid role: {}. Allowed: primary, related, dependency, shared",
+                        role_str
+                    ));
+                }
+            };
+
+            let system = init_admin_system().await?;
+            system
+                .get_storage()
+                .add_session_to_workspace(ws_id, session_id, role)
+                .await?;
+
+            println!(
+                "Session {} attached to workspace {} as {:?}",
+                session_id, ws_id, role
+            );
+            Ok(())
+        }
+        "help" => {
+            print_workspace_usage();
+            Ok(())
+        }
+        _ => {
+            print_workspace_usage();
+            Err(format!("Unknown workspace command: {}", args[0]))
+        }
+    }
+}
+
+async fn handle_session_command(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        print_session_usage();
+        return Err("Missing session subcommand".to_string());
+    }
+
+    match args[0].as_str() {
+        "create" => {
+            let name = args.get(1).cloned();
+            let description = args.get(2).cloned();
+
+            let system = init_admin_system().await?;
+            let id = system
+                .create_session(name.clone(), description.clone())
+                .await?;
+
+            println!("Session created:");
+            println!("  ID:          {}", id);
+            if let Some(n) = name {
+                println!("  Name:        {}", n);
+            }
+            if let Some(d) = description {
+                println!("  Description: {}", d);
+            }
+            Ok(())
+        }
+        "delete" => {
+            if args.len() < 2 {
+                println!("Usage: session delete <id>");
+                return Err("Missing session ID".to_string());
+            }
+            let id = Uuid::parse_str(&args[1]).map_err(|e| format!("Invalid UUID: {}", e))?;
+
+            let system = init_admin_system().await?;
+            // LockFreeConversationMemorySystem doesn't have delete_session, use storage directly
+            system.get_storage().delete_session(id).await?;
+            println!("Session {} deleted", id);
+            Ok(())
+        }
+        "list" => {
+            let system = init_admin_system().await?;
+            let ids = system.list_sessions().await?;
+
+            println!("Sessions ({})", ids.len());
+            for id in ids {
+                // Try to get details if possible, but list_sessions only returns IDs.
+                // To show names we'd need to load each session which is slow.
+                // For CLI list, just IDs is standard unless we implement list_sessions_with_details
+                println!("{}", id);
+            }
+            Ok(())
+        }
+        "help" => {
+            print_session_usage();
+            Ok(())
+        }
+        _ => {
+            print_session_usage();
+            Err(format!("Unknown session command: {}", args[0]))
+        }
+    }
+}
+
+fn print_workspace_usage() {
+    println!("Usage: post-cortex-daemon workspace <COMMAND>");
+    println!();
+    println!("Commands:");
+    println!("  create <name> [desc]               Create a new workspace");
+    println!("  delete <id>                        Delete a workspace");
+    println!("  list                               List all workspaces");
+    println!("  attach <ws_id> <sess_id> [role]    Attach session to workspace");
+    println!("                                     Roles: primary, related, dependency, shared");
+}
+
+fn print_session_usage() {
+    println!("Usage: post-cortex-daemon session <COMMAND>");
+    println!();
+    println!("Commands:");
+    println!("  create [name] [desc]    Create a new session");
+    println!("  delete <id>             Delete a session");
+    println!("  list                    List all sessions");
+}
+
 #[cfg(feature = "embeddings")]
 async fn vectorize_all() -> Result<(), String> {
-    use post_cortex::SystemConfig;
-    use post_cortex::core::lockfree_memory_system::LockFreeConversationMemorySystem;
     use post_cortex::daemon::DaemonConfig;
 
     println!("Starting vectorization of all sessions...");
