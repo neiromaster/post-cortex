@@ -5,6 +5,25 @@ All notable changes to Post-Cortex will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2025-11-24
+
+### Added
+
+- **CLI workspace and session management**: New commands `post-cortex-daemon workspace` and `post-cortex-daemon session` for comprehensive workspace and session administration
+- **Integration tests for admin tasks**: Comprehensive test suite covering workspace creation, session management, and administrative operations
+- **Gemini API compatibility**: Flattened semantic search schema structure for full compatibility with Gemini's JSON Schema validation
+
+### Changed
+
+- **Semantic search API schema**: Replaced nested SearchScope struct with flattened scope_type and scope_id fields for better API compatibility
+- **CLI daemon binary**: Enhanced with extensive workspace and session management capabilities
+
+### Technical
+
+- Added JsonSchema derives to CodeReference and ContextUpdateItem for better API documentation
+- Improved schema descriptions for MCP tool documentation
+- Enhanced daemon parameter parsing with safe error handling
+
 ## [0.1.4] - 2025-11-22
 
 ### Added

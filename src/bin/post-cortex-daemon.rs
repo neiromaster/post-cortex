@@ -28,7 +28,7 @@
 //!   post-cortex-daemon workspace - Manage workspaces
 //!   post-cortex-daemon session   - Manage sessions
 
-const VERSION: &str = "0.1.4";
+const VERSION: &str = "0.1.5";
 const BUILD_DATE: &str = match option_env!("BUILD_DATE") {
     Some(date) => date,
     None => "dev-build",
