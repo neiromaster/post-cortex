@@ -5,6 +5,40 @@ All notable changes to Post-Cortex will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2025-11-25
+
+### Added
+
+- **REST API for CLI commands**: Added HTTP endpoints to daemon for CLI administration when daemon is running
+  - `/health` - Health check endpoint
+  - `/api/sessions` - GET/POST for session listing and creation
+  - `/api/sessions/{id}` - DELETE for session deletion
+  - `/api/workspaces` - GET/POST for workspace listing and creation
+  - `/api/workspaces/{id}` - DELETE for workspace deletion
+  - `/api/workspaces/{workspace_id}/sessions/{session_id}` - POST for attaching sessions
+
+### Fixed
+
+- **CLI RocksDB lock conflict**: CLI commands now detect running daemon and route through HTTP API instead of direct RocksDB access, preventing "Resource temporarily unavailable" lock errors
+- **Stale workspace session count**: Workspace listing now filters deleted sessions, showing accurate count of existing sessions only
+
+### Changed
+
+- **CLI architecture**: Added `DaemonClient` HTTP client and `is_daemon_running()` detection for seamless daemon/direct mode switching
+
+## [0.1.6] - 2025-11-25
+
+### Changed
+
+- **Unified binary**: Merged `post-cortex` and `post-cortex-daemon` into single `pcx` binary supporting both stdio and SSE transports
+- **Simplified CLI**: `pcx` (stdio mode), `pcx start` (daemon mode), `pcx status`, `pcx stop`
+- **Updated README**: Simplified documentation reflecting unified binary architecture
+
+### Added
+
+- **Docker MCP Registry support**: Added Dockerfile and configuration for Docker-based deployment
+- **Auto-daemon startup**: Stdio mode automatically starts daemon in background if not running
+
 ## [0.1.5] - 2025-11-24
 
 ### Added

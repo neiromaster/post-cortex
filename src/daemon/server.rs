@@ -26,13 +26,13 @@ use crate::ConversationMemorySystem;
 use crate::daemon::sse::LockFreeSSEBroadcaster;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     response::{
         IntoResponse, Response,
         sse::{Event, Sse},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use dashmap::DashMap;
 use futures::stream::{self};
@@ -126,6 +126,12 @@ impl LockFreeDaemonServer {
             .route("/sse", get(handle_sse_stream))
             .route("/message", post(handle_mcp_request))
             .route("/stats", get(get_stats))
+            // REST API for CLI
+            .route("/api/sessions", get(api_list_sessions).post(api_create_session))
+            .route("/api/sessions/:id", delete(api_delete_session))
+            .route("/api/workspaces", get(api_list_workspaces).post(api_create_workspace))
+            .route("/api/workspaces/:id", delete(api_delete_workspace))
+            .route("/api/workspaces/:workspace_id/sessions/:session_id", post(api_attach_session))
             .layer(CorsLayer::permissive())
             .with_state(server)
     }
@@ -1271,6 +1277,214 @@ where
     fn from(err: E) -> Self {
         AppError(err.to_string())
     }
+}
+
+// ============================================================================
+// REST API Handlers for CLI
+// ============================================================================
+
+/// Session info for API responses
+#[derive(Serialize)]
+struct SessionInfo {
+    id: String,
+    name: String,
+    workspace: Option<String>,
+}
+
+/// Workspace info for API responses
+#[derive(Serialize)]
+struct WorkspaceInfo {
+    id: String,
+    name: String,
+    description: String,
+    session_count: usize,
+}
+
+/// Create session request
+#[derive(Deserialize)]
+struct CreateSessionRequest {
+    name: Option<String>,
+    description: Option<String>,
+}
+
+/// Create workspace request
+#[derive(Deserialize)]
+struct CreateWorkspaceRequest {
+    name: String,
+    description: Option<String>,
+}
+
+/// Attach session request
+#[derive(Deserialize)]
+struct AttachSessionRequest {
+    role: Option<String>,
+}
+
+/// List all sessions
+async fn api_list_sessions(
+    State(server): State<Arc<LockFreeDaemonServer>>,
+) -> Result<Json<Vec<SessionInfo>>, (StatusCode, String)> {
+    let ids = server
+        .memory_system
+        .list_sessions()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    // Build workspace map
+    let workspaces = server.memory_system.workspace_manager.list_workspaces();
+    let mut session_workspace_map = std::collections::HashMap::new();
+    for ws in workspaces {
+        for (session_id, _role) in ws.get_all_sessions() {
+            session_workspace_map.insert(session_id, ws.name.clone());
+        }
+    }
+
+    let mut sessions = Vec::new();
+    for id in ids {
+        let name = match server.memory_system.get_session(id).await {
+            Ok(session_arc) => {
+                let session = session_arc.load();
+                session.name().unwrap_or_else(|| "Unnamed".to_string())
+            }
+            Err(_) => "Error loading".to_string(),
+        };
+
+        sessions.push(SessionInfo {
+            id: id.to_string(),
+            name,
+            workspace: session_workspace_map.get(&id).cloned(),
+        });
+    }
+
+    Ok(Json(sessions))
+}
+
+/// Create a new session
+async fn api_create_session(
+    State(server): State<Arc<LockFreeDaemonServer>>,
+    Json(req): Json<CreateSessionRequest>,
+) -> Result<Json<SessionInfo>, (StatusCode, String)> {
+    let id = server
+        .memory_system
+        .create_session(req.name.clone(), req.description)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(SessionInfo {
+        id: id.to_string(),
+        name: req.name.unwrap_or_else(|| "Unnamed".to_string()),
+        workspace: None,
+    }))
+}
+
+/// Delete a session
+async fn api_delete_session(
+    State(server): State<Arc<LockFreeDaemonServer>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid UUID: {}", e)))?;
+
+    server
+        .memory_system
+        .get_storage()
+        .delete_session(uuid)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// List all workspaces
+async fn api_list_workspaces(
+    State(server): State<Arc<LockFreeDaemonServer>>,
+) -> Result<Json<Vec<WorkspaceInfo>>, (StatusCode, String)> {
+    let workspaces = server
+        .memory_system
+        .get_storage()
+        .list_all_workspaces()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let result: Vec<WorkspaceInfo> = workspaces
+        .into_iter()
+        .map(|ws| WorkspaceInfo {
+            id: ws.id.to_string(),
+            name: ws.name,
+            description: ws.description,
+            session_count: ws.sessions.len(),
+        })
+        .collect();
+
+    Ok(Json(result))
+}
+
+/// Create a new workspace
+async fn api_create_workspace(
+    State(server): State<Arc<LockFreeDaemonServer>>,
+    Json(req): Json<CreateWorkspaceRequest>,
+) -> Result<Json<WorkspaceInfo>, (StatusCode, String)> {
+    let id = Uuid::new_v4();
+    let description = req.description.unwrap_or_default();
+
+    server
+        .memory_system
+        .get_storage()
+        .save_workspace_metadata(id, &req.name, &description, &[])
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(WorkspaceInfo {
+        id: id.to_string(),
+        name: req.name,
+        description,
+        session_count: 0,
+    }))
+}
+
+/// Delete a workspace
+async fn api_delete_workspace(
+    State(server): State<Arc<LockFreeDaemonServer>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let uuid = Uuid::parse_str(&id).map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid UUID: {}", e)))?;
+
+    server
+        .memory_system
+        .get_storage()
+        .delete_workspace(uuid)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Attach session to workspace
+async fn api_attach_session(
+    State(server): State<Arc<LockFreeDaemonServer>>,
+    Path((workspace_id, session_id)): Path<(String, String)>,
+    Json(req): Json<AttachSessionRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let ws_id = Uuid::parse_str(&workspace_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid workspace UUID: {}", e)))?;
+    let sess_id = Uuid::parse_str(&session_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid session UUID: {}", e)))?;
+
+    let role = match req.role.as_deref().unwrap_or("related") {
+        "primary" => crate::workspace::SessionRole::Primary,
+        "related" => crate::workspace::SessionRole::Related,
+        "dependency" => crate::workspace::SessionRole::Dependency,
+        "shared" => crate::workspace::SessionRole::Shared,
+        other => return Err((StatusCode::BAD_REQUEST, format!("Invalid role: {}", other))),
+    };
+
+    server
+        .memory_system
+        .get_storage()
+        .add_session_to_workspace(ws_id, sess_id, role)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(StatusCode::OK)
 }
 
 #[cfg(test)]
