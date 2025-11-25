@@ -19,7 +19,7 @@ about:
   icon: https://raw.githubusercontent.com/juliusbiascan/post-cortex/main/design/v1.svg
 source:
   project: https://github.com/juliusbiascan/post-cortex
-  commit: 7a7944c62bf849014a421b23e65dc471a4727e94
+  commit: 5399186c00d8c52b3f6d4662ec27a93dd0cadac9
 config:
   description: Configure Post-Cortex memory system
   env:
