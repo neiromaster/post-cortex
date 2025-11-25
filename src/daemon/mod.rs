@@ -28,9 +28,11 @@ pub mod mcp_service;
 pub mod rmcp_server;
 pub mod server;
 pub mod sse;
+pub mod stdio_proxy;
 
 pub use config::DaemonConfig;
 pub use mcp_service::PostCortexService;
 pub use rmcp_server::start_rmcp_daemon;
 pub use server::LockFreeDaemonServer;
 pub use sse::LockFreeSSEBroadcaster;
+pub use stdio_proxy::{ensure_daemon_running, is_daemon_running, run_stdio_proxy};

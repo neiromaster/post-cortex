@@ -70,12 +70,8 @@ portpicker = "0.1"
 proptest = "1.5"
 
 [[bin]]
-name = "post-cortex"
-path = "src/bin/mcp-server.rs"
-
-[[bin]]
-name = "post-cortex-daemon"
-path = "src/bin/post-cortex-daemon.rs"
+name = "pcx"
+path = "src/bin/pcx.rs"
 
 [features]
 default = ["embeddings"]
