@@ -6,13 +6,12 @@ WORKDIR /app
 # Copy manifests
 COPY Cargo.toml Cargo.lock ./
 
-# Create dummy main.rs to build dependencies
+# Create dummy files to build dependencies
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
     echo "fn main() {}" > src/lib.rs && \
     mkdir -p src/bin && \
-    echo "fn main() {}" > src/bin/post-cortex.rs && \
-    echo "fn main() {}" > src/bin/post-cortex-daemon.rs
+    echo "fn main() {}" > src/bin/pcx.rs
 
 # Build dependencies
 RUN cargo build --release --features embeddings
@@ -24,7 +23,7 @@ COPY . .
 RUN touch src/main.rs src/lib.rs src/bin/*.rs
 
 # Build the actual application
-RUN cargo build --release --features embeddings
+RUN cargo build --release --bin pcx --features embeddings
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -37,9 +36,8 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy binaries from builder
-COPY --from=builder /app/target/release/post-cortex /usr/local/bin/
-COPY --from=builder /app/target/release/post-cortex-daemon /usr/local/bin/
+# Copy binary from builder
+COPY --from=builder /app/target/release/pcx /usr/local/bin/
 
 # Create data directory
 RUN mkdir -p /root/.post-cortex/data
@@ -48,5 +46,5 @@ RUN mkdir -p /root/.post-cortex/data
 ENV PC_DATA_DIR=/root/.post-cortex/data
 ENV RUST_LOG=info
 
-# Default entrypoint is the stdio server
-ENTRYPOINT ["post-cortex"]
+# Default entrypoint is the stdio server (auto-starts daemon internally)
+ENTRYPOINT ["pcx"]
