@@ -1319,6 +1319,25 @@ impl LockFreeVectorDB {
         })
     }
 
+    /// Check if a specific update_id exists as an embedding - lock-free
+    pub fn has_update_embedding(&self, update_id: &str) -> bool {
+        self.metadata
+            .iter()
+            .any(|entry| entry.value().id == update_id)
+    }
+
+    /// Get list of update IDs that exist in vector DB for a session - lock-free
+    pub fn get_vectorized_update_ids(&self, session_id: &str) -> Vec<String> {
+        self.metadata
+            .iter()
+            .filter(|entry| {
+                entry.value().source == session_id
+                    && entry.value().content_type != "EntityDescription"
+            })
+            .map(|entry| entry.value().id.clone())
+            .collect()
+    }
+
     /// Build HNSW index for all vectors (lock-free)
     pub fn build_index(&self) -> Result<()> {
         info!("Building HNSW index for {} vectors", self.vectors.len());

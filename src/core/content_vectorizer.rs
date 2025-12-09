@@ -305,16 +305,32 @@ impl ContentVectorizer {
     async fn vectorize_context_updates(&self, session: &ActiveSession) -> Result<usize> {
         // CRITICAL FIX: vectorized_update_ids is persisted to RocksDB but vector_db is in-memory.
         // After daemon restart, vectorized_update_ids may contain IDs that are no longer in vector_db.
-        // We must verify that vector_db actually has update embeddings for this session.
+        // We must verify EACH update_id actually exists in vector_db, not just check if session has any.
         let session_id_str = session.id().to_string();
-        if !self.vector_db.has_session_update_embeddings(&session_id_str) {
-            // Vector DB doesn't have update embeddings - clear stale vectorized_update_ids
-            if !session.vectorized_update_ids.is_empty() {
-                tracing::info!(
-                    "Clearing stale vectorized_update_ids for session {} (vector_db has no update embeddings)",
-                    session.id()
-                );
-                session.vectorized_update_ids.clear();
+
+        // Get the actual vectorized IDs from vector_db for this session
+        let actual_vectorized: std::collections::HashSet<String> = self
+            .vector_db
+            .get_vectorized_update_ids(&session_id_str)
+            .into_iter()
+            .collect();
+
+        // Remove stale IDs from session.vectorized_update_ids that don't exist in vector_db
+        let stale_ids: Vec<uuid::Uuid> = session
+            .vectorized_update_ids
+            .iter()
+            .filter(|id| !actual_vectorized.contains(&id.to_string()))
+            .map(|id| *id)
+            .collect();
+
+        if !stale_ids.is_empty() {
+            tracing::info!(
+                "Removing {} stale vectorized_update_ids for session {} (not in vector_db)",
+                stale_ids.len(),
+                session.id()
+            );
+            for stale_id in stale_ids {
+                session.vectorized_update_ids.remove(&stale_id);
             }
         }
 
