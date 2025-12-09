@@ -670,6 +670,298 @@ mod concurrent_tests {
     }
 }
 
+/// Tests for lockfree_vector_db.rs fixes
+#[cfg(test)]
+mod lockfree_fix_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+
+    /// Test for issue #1/#2: Entry point race condition under concurrent load
+    /// Verifies that concurrent vector additions don't corrupt the HNSW entry point
+    #[test]
+    fn test_entry_point_race_condition() {
+        let dim = 384;
+        let config = VectorDbConfig {
+            dimension: dim,
+            enable_quantization: false,
+            enable_hnsw_index: true,
+            max_connections: 16,
+            ..Default::default()
+        };
+        let db = Arc::new(FastVectorDB::new(config).unwrap());
+
+        let num_threads = 20;
+        let vectors_per_thread = 50;
+
+        // Concurrent additions with varying layer priorities
+        let handles: Vec<_> = (0..num_threads)
+            .map(|thread_id| {
+                let db_clone = Arc::clone(&db);
+                thread::spawn(move || {
+                    for i in 0..vectors_per_thread {
+                        // Create vectors with different magnitudes to stress entry point selection
+                        let scale = ((thread_id * vectors_per_thread + i) as f32) / 1000.0;
+                        let vector = vec![scale; dim];
+                        let metadata = VectorMetadata::new(
+                            format!("t{}-v{}", thread_id, i),
+                            format!("text {} {}", thread_id, i),
+                            "test-source".to_string(),
+                            "qa".to_string(),
+                        );
+                        db_clone.add_vector(vector, metadata).unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify all vectors were added
+        let stats = db.get_stats();
+        assert_eq!(stats.total_vectors, num_threads * vectors_per_thread);
+
+        // Verify search still works (entry point is valid)
+        let query = vec![0.5f32; dim];
+        let results = db.search(&query, 10).unwrap();
+        assert!(!results.is_empty(), "Search should return results if entry point is valid");
+
+        // Verify results are properly ordered
+        for i in 0..results.len().saturating_sub(1) {
+            assert!(
+                results[i].similarity >= results[i + 1].similarity,
+                "Results should be in descending similarity order"
+            );
+        }
+    }
+
+    /// Test for issue #4: Nearest neighbor selection quality
+    /// Verifies that HNSW connects to actual nearest neighbors, not random vectors
+    #[test]
+    fn test_nearest_neighbor_selection_quality() {
+        let dim = 384;
+        let config = VectorDbConfig {
+            dimension: dim,
+            enable_quantization: false,
+            enable_hnsw_index: true,
+            max_connections: 16,
+            ef_construction: 200,
+            ..Default::default()
+        };
+        let db = FastVectorDB::new(config).unwrap();
+
+        // Add a cluster of similar vectors
+        let cluster_center = vec![0.8f32; dim];
+        for i in 0..20 {
+            let mut vector = cluster_center.clone();
+            // Small perturbation to create cluster
+            vector[i % dim] += 0.01 * (i as f32);
+            let metadata = VectorMetadata::new(
+                format!("cluster-{}", i),
+                format!("cluster text {}", i),
+                "cluster".to_string(),
+                "qa".to_string(),
+            );
+            db.add_vector(vector, metadata).unwrap();
+        }
+
+        // Add distant vectors
+        for i in 0..20 {
+            let mut vector = vec![0.1f32; dim];
+            vector[i % dim] = 0.9;
+            let metadata = VectorMetadata::new(
+                format!("distant-{}", i),
+                format!("distant text {}", i),
+                "distant".to_string(),
+                "qa".to_string(),
+            );
+            db.add_vector(vector, metadata).unwrap();
+        }
+
+        // Search near cluster center - should find cluster members first
+        let query = cluster_center.clone();
+        let results = db.search(&query, 10).unwrap();
+
+        // At least 7 of top 10 should be from the cluster (high similarity)
+        let cluster_count = results
+            .iter()
+            .filter(|r| r.metadata.source == "cluster")
+            .count();
+
+        assert!(
+            cluster_count >= 7,
+            "Expected at least 7 cluster members in top 10, got {}. \
+             This suggests HNSW is not connecting to nearest neighbors.",
+            cluster_count
+        );
+
+        // Top result should have very high similarity (cluster member)
+        assert!(
+            results[0].similarity > 0.95,
+            "Top result similarity {} is too low for cluster query",
+            results[0].similarity
+        );
+    }
+
+    /// Test for issue #6: Statistics underflow protection
+    /// Verifies that double-remove doesn't cause underflow
+    #[test]
+    fn test_statistics_underflow_protection() {
+        let dim = 384;
+        let config = VectorDbConfig {
+            dimension: dim,
+            enable_quantization: false,
+            enable_hnsw_index: false,
+            ..Default::default()
+        };
+        let db = FastVectorDB::new(config).unwrap();
+
+        // Add a vector
+        let vector = vec![0.5f32; dim];
+        let metadata = VectorMetadata::new(
+            "test".to_string(),
+            "test text".to_string(),
+            "test-source".to_string(),
+            "qa".to_string(),
+        );
+        let id = db.add_vector(vector, metadata).unwrap();
+
+        let stats_after_add = db.get_stats();
+        assert_eq!(stats_after_add.total_vectors, 1);
+
+        // First remove - should succeed
+        let removed = db.remove_vector(id).unwrap();
+        assert!(removed);
+
+        let stats_after_remove = db.get_stats();
+        assert_eq!(stats_after_remove.total_vectors, 0);
+
+        // Second remove - should fail gracefully, not underflow
+        let removed_again = db.remove_vector(id).unwrap();
+        assert!(!removed_again, "Second remove should return false");
+
+        // Stats should still be 0, not wrapped to MAX
+        let stats_after_double_remove = db.get_stats();
+        assert_eq!(
+            stats_after_double_remove.total_vectors, 0,
+            "Statistics should be 0, not underflowed"
+        );
+        assert!(
+            stats_after_double_remove.memory_usage_bytes < 1_000_000_000,
+            "Memory usage should not underflow to huge value"
+        );
+    }
+
+    /// Test for issue #9: Memory statistics accuracy
+    /// Verifies that add/remove keeps memory stats accurate
+    #[test]
+    fn test_memory_statistics_accuracy() {
+        let dim = 384;
+        let config = VectorDbConfig {
+            dimension: dim,
+            enable_quantization: true, // Enable to test quantized size calculation
+            enable_hnsw_index: false,
+            enable_product_quantization: true,
+            pq_subvectors: 8,
+            pq_bits: 8,
+            ..Default::default()
+        };
+        let db = FastVectorDB::new(config).unwrap();
+
+        let initial_memory = db.get_stats().memory_usage_bytes;
+
+        // Add vectors
+        let mut ids = Vec::new();
+        for i in 0..10 {
+            let vector = vec![(i as f32) / 10.0; dim];
+            let metadata = VectorMetadata::new(
+                format!("vec-{}", i),
+                format!("text {}", i),
+                "test-source".to_string(),
+                "qa".to_string(),
+            );
+            let id = db.add_vector(vector, metadata).unwrap();
+            ids.push(id);
+        }
+
+        let memory_after_add = db.get_stats().memory_usage_bytes;
+        assert!(
+            memory_after_add > initial_memory,
+            "Memory should increase after adding vectors"
+        );
+
+        // Remove all vectors
+        for id in ids {
+            db.remove_vector(id).unwrap();
+        }
+
+        let memory_after_remove = db.get_stats().memory_usage_bytes;
+
+        // Memory should return close to initial (may not be exact due to overhead)
+        assert_eq!(
+            memory_after_remove, initial_memory,
+            "Memory should return to initial after removing all vectors"
+        );
+    }
+
+    /// Test for issue #8: DashMap iteration during modification
+    /// Verifies that build_index works correctly under concurrent access
+    #[test]
+    fn test_build_index_concurrent_safety() {
+        let dim = 384;
+        let config = VectorDbConfig {
+            dimension: dim,
+            enable_quantization: false,
+            enable_hnsw_index: true,
+            max_connections: 8,
+            ..Default::default()
+        };
+        let db = Arc::new(FastVectorDB::new(config).unwrap());
+
+        // Add initial vectors
+        for i in 0..20 {
+            let vector = vec![(i as f32) / 20.0; dim];
+            let metadata = VectorMetadata::new(
+                format!("vec-{}", i),
+                format!("text {}", i),
+                "test-source".to_string(),
+                "qa".to_string(),
+            );
+            db.add_vector(vector, metadata).unwrap();
+        }
+
+        // Concurrent: one thread rebuilds index, others add vectors
+        let db_clone = Arc::clone(&db);
+        let rebuild_handle = thread::spawn(move || {
+            db_clone.build_index().unwrap();
+        });
+
+        let db_clone2 = Arc::clone(&db);
+        let add_handle = thread::spawn(move || {
+            for i in 20..40 {
+                let vector = vec![(i as f32) / 40.0; dim];
+                let metadata = VectorMetadata::new(
+                    format!("vec-{}", i),
+                    format!("text {}", i),
+                    "test-source".to_string(),
+                    "qa".to_string(),
+                );
+                let _ = db_clone2.add_vector(vector, metadata);
+            }
+        });
+
+        rebuild_handle.join().unwrap();
+        add_handle.join().unwrap();
+
+        // Verify database is still functional
+        let query = vec![0.5f32; dim];
+        let results = db.search(&query, 10).unwrap();
+        assert!(!results.is_empty(), "Search should work after concurrent build_index");
+    }
+}
+
 /// Phase 6: Semantic Search Optimization Tests
 #[cfg(test)]
 mod search_mode_tests {

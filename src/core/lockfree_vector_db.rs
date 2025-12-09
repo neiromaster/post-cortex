@@ -35,8 +35,7 @@ use tracing::{debug, info, warn};
 type QuantizationParams = Arc<arc_swap::ArcSwap<Option<(Vec<f32>, Vec<f32>)>>>;
 
 /// Search mode for vector similarity search
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchMode {
     /// Exact search using full linear scan - highest accuracy, slowest
     Exact,
@@ -46,7 +45,6 @@ pub enum SearchMode {
     #[default]
     Balanced,
 }
-
 
 /// Search quality preset for automatic parameter tuning
 #[derive(Debug, Clone, Copy)]
@@ -149,7 +147,12 @@ pub struct LockFreeStoredVector {
 }
 
 impl LockFreeStoredVector {
-    fn new(id: u32, vector: Vec<f32>, quantized: Option<Vec<u8>>, pq_codes: Option<Vec<u8>>) -> Self {
+    fn new(
+        id: u32,
+        vector: Vec<f32>,
+        quantized: Option<Vec<u8>>,
+        pq_codes: Option<Vec<u8>>,
+    ) -> Self {
         let magnitude = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
         Self {
             id,
@@ -209,11 +212,34 @@ pub struct SearchMatch {
     pub metadata: VectorMetadata,
 }
 
-/// Internal search result
+/// Internal search result with ordering support for BinaryHeap
 #[derive(Debug, Clone)]
 struct SearchResult {
     id: u32,
     similarity: f32,
+}
+
+impl PartialEq for SearchResult {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for SearchResult {}
+
+impl PartialOrd for SearchResult {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SearchResult {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Compare by similarity (max-heap: higher similarity first)
+        self.similarity
+            .partial_cmp(&other.similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }
 }
 
 /// Lock-free vector database statistics using atomics
@@ -250,11 +276,19 @@ impl LockFreeVectorDbStats {
             .fetch_add(vector_size_bytes, Ordering::Relaxed);
     }
 
-    /// Record a vector removal
+    /// Record a vector removal with saturating subtraction to prevent underflow
     pub fn record_vector_removed(&self, vector_size_bytes: usize) {
-        self.total_vectors.fetch_sub(1, Ordering::Relaxed);
-        self.memory_usage_bytes
-            .fetch_sub(vector_size_bytes, Ordering::Relaxed);
+        // Use fetch_update with saturating_sub to prevent underflow on double-remove
+        let _ = self
+            .total_vectors
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
+        let _ = self
+            .memory_usage_bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(vector_size_bytes))
+            });
     }
 
     /// Record a search operation
@@ -321,6 +355,13 @@ pub struct ProductQuantizationCodebook {
 
 impl ProductQuantizationCodebook {
     /// Create new PQ codebook with random initialization
+    ///
+    /// # Warning
+    /// This initializes centroids randomly, which provides poor quantization accuracy.
+    /// For production use, centroids should be trained using k-means on representative data.
+    ///
+    /// # TODO
+    /// Implement `train_from_data(vectors: &[Vec<f32>])` method for proper PQ training.
     pub fn new(dimension: usize, subvectors: usize, bits: usize) -> Result<Self> {
         if !dimension.is_multiple_of(subvectors) {
             return Err(anyhow::anyhow!(
@@ -332,6 +373,12 @@ impl ProductQuantizationCodebook {
 
         let subvec_dim = dimension / subvectors;
         let num_centroids = 1 << bits; // 2^bits (e.g., 2^8 = 256)
+
+        // WARNING: Random centroids provide poor quantization - consider training
+        warn!(
+            "PQ codebook initialized with random centroids - search accuracy will be degraded. \
+             For production use, train centroids using k-means on representative data."
+        );
 
         debug!(
             "Initializing PQ codebook: {} subvectors, {} bits ({} centroids), {} dim per subvec",
@@ -394,7 +441,10 @@ impl ProductQuantizationCodebook {
 
         for (i, &code) in codes.iter().enumerate() {
             if i >= self.subvectors {
-                warn!("PQ decode: code index {} >= subvectors {}", i, self.subvectors);
+                warn!(
+                    "PQ decode: code index {} >= subvectors {}",
+                    i, self.subvectors
+                );
                 break;
             }
 
@@ -492,59 +542,101 @@ struct HnswConnection {
 }
 
 /// Lock-free HNSW index using DashMap for concurrent access
+///
+/// Uses a combined AtomicU64 for entry_point and max_layer to enable
+/// atomic compare-and-swap updates, preventing race conditions.
 #[derive(Debug, Default)]
 struct LockFreeHnswIndex {
     /// Graph connections for each vector (lock-free)
     connections: DashMap<u32, Vec<u32>>,
-    /// Entry point for search (atomic)
-    entry_point: AtomicU32,
+    /// Combined entry point and max layer state (atomic)
+    /// Upper 32 bits = entry_point (u32::MAX = no entry point)
+    /// Lower 32 bits = max_layer
+    entry_state: AtomicU64,
     /// Layer assignments for each vector (lock-free)
     layers: DashMap<u32, usize>,
-    /// Maximum layer in the graph (atomic)
-    max_layer: AtomicUsize,
 }
 
 impl LockFreeHnswIndex {
+    /// Pack entry point and max layer into a single u64
+    /// Upper 32 bits = entry_point, Lower 32 bits = max_layer
+    #[inline]
+    fn pack_state(entry_point: u32, max_layer: u32) -> u64 {
+        ((entry_point as u64) << 32) | (max_layer as u64)
+    }
+
+    /// Unpack u64 into (entry_point, max_layer)
+    #[inline]
+    fn unpack_state(state: u64) -> (u32, u32) {
+        let entry_point = (state >> 32) as u32;
+        let max_layer = (state & 0xFFFFFFFF) as u32;
+        (entry_point, max_layer)
+    }
+
     fn new() -> Self {
         Self {
             connections: DashMap::new(),
-            entry_point: AtomicU32::new(u32::MAX), // MAX means no entry point
+            // Initialize with no entry point (u32::MAX) and max_layer = 0
+            entry_state: AtomicU64::new(Self::pack_state(u32::MAX, 0)),
             layers: DashMap::new(),
-            max_layer: AtomicUsize::new(0),
         }
     }
 
     /// Check if index is empty
     fn is_empty(&self) -> bool {
-        self.entry_point.load(Ordering::Relaxed) == u32::MAX
+        let (entry_point, _) = Self::unpack_state(self.entry_state.load(Ordering::Acquire));
+        entry_point == u32::MAX
     }
 
     /// Get entry point
     fn get_entry_point(&self) -> Option<u32> {
-        let ep = self.entry_point.load(Ordering::Relaxed);
-        if ep == u32::MAX { None } else { Some(ep) }
+        let (entry_point, _) = Self::unpack_state(self.entry_state.load(Ordering::Acquire));
+        if entry_point == u32::MAX {
+            None
+        } else {
+            Some(entry_point)
+        }
     }
 
-    /// Set entry point
-    fn set_entry_point(&self, vector_id: u32) {
-        self.entry_point.store(vector_id, Ordering::Relaxed);
+    /// Get max layer
+    #[allow(dead_code)]
+    fn get_max_layer(&self) -> usize {
+        let (_, max_layer) = Self::unpack_state(self.entry_state.load(Ordering::Acquire));
+        max_layer as usize
     }
 
-    /// Add vector to index
+    /// Add vector to index with atomic CAS loop to prevent race conditions
     fn add_vector(&self, vector_id: u32, layer: usize, connections: Vec<u32>) {
         self.layers.insert(vector_id, layer);
         self.connections.insert(vector_id, connections);
 
-        // Update max layer if necessary
-        self.max_layer.fetch_max(layer, Ordering::Relaxed);
+        // CAS loop to atomically update entry point if this is higher/equal layer
+        loop {
+            let current = self.entry_state.load(Ordering::Acquire);
+            let (current_ep, current_max) = Self::unpack_state(current);
 
-        // Set entry point if this is the first vector or highest layer
-        if self.is_empty() || layer >= self.max_layer.load(Ordering::Relaxed) {
-            self.set_entry_point(vector_id);
+            // Update entry point if: empty OR this layer is >= max layer
+            let should_update = current_ep == u32::MAX || layer as u32 >= current_max;
+            if !should_update {
+                break;
+            }
+
+            let new_max = current_max.max(layer as u32);
+            let new_state = Self::pack_state(vector_id, new_max);
+
+            match self.entry_state.compare_exchange(
+                current,
+                new_state,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(_) => continue, // CAS failed, retry
+            }
         }
     }
 
-    /// Remove vector from index
+    /// Remove vector from index with atomic CAS loop
     fn remove_vector(&self, vector_id: u32) {
         self.layers.remove(&vector_id);
         self.connections.remove(&vector_id);
@@ -555,26 +647,38 @@ impl LockFreeHnswIndex {
             connections.retain(|&id| id != vector_id);
         }
 
-        // Reset entry point if we removed it
-        if self.get_entry_point() == Some(vector_id) {
+        // CAS loop to atomically update entry point if we removed it
+        loop {
+            let current = self.entry_state.load(Ordering::Acquire);
+            let (current_ep, _) = Self::unpack_state(current);
+
+            // Only update if this vector was the entry point
+            if current_ep != vector_id {
+                break;
+            }
+
             // Find new entry point from remaining vectors
-            let mut max_layer = 0;
-            let mut new_entry_point = None;
+            let mut new_max_layer: u32 = 0;
+            let mut new_entry_point: u32 = u32::MAX;
 
             for entry in self.layers.iter() {
-                let layer = *entry.value();
-                if layer >= max_layer {
-                    max_layer = layer;
-                    new_entry_point = Some(*entry.key());
+                let layer = *entry.value() as u32;
+                if layer >= new_max_layer {
+                    new_max_layer = layer;
+                    new_entry_point = *entry.key();
                 }
             }
 
-            if let Some(new_ep) = new_entry_point {
-                self.set_entry_point(new_ep);
-                self.max_layer.store(max_layer, Ordering::Relaxed);
-            } else {
-                self.entry_point.store(u32::MAX, Ordering::Relaxed);
-                self.max_layer.store(0, Ordering::Relaxed);
+            let new_state = Self::pack_state(new_entry_point, new_max_layer);
+
+            match self.entry_state.compare_exchange(
+                current,
+                new_state,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(_) => continue, // CAS failed, another thread modified - retry
             }
         }
     }
@@ -688,7 +792,10 @@ impl LockFreeVectorDB {
         };
 
         // Product Quantization encoding if enabled
-        let pq_codes = self.pq_codebook.as_ref().map(|codebook| codebook.encode(&vector));
+        let pq_codes = self
+            .pq_codebook
+            .as_ref()
+            .map(|codebook| codebook.encode(&vector));
 
         // Create stored vector
         let stored_vector = LockFreeStoredVector::new(id, vector, quantized, pq_codes);
@@ -762,12 +869,10 @@ impl LockFreeVectorDB {
             SearchMode::Approximate | SearchMode::Balanced => {
                 // Use HNSW if available, otherwise fall back to linear
                 if self.config.enable_hnsw_index && !self.hnsw_index.is_empty() {
-                    let ef_search = ef_search_override.unwrap_or_else(|| {
-                        match mode {
-                            SearchMode::Approximate => SearchQualityPreset::Fast.ef_search(),
-                            SearchMode::Balanced => SearchQualityPreset::Balanced.ef_search(),
-                            _ => self.config.ef_search,
-                        }
+                    let ef_search = ef_search_override.unwrap_or_else(|| match mode {
+                        SearchMode::Approximate => SearchQualityPreset::Fast.ef_search(),
+                        SearchMode::Balanced => SearchQualityPreset::Balanced.ef_search(),
+                        _ => self.config.ef_search,
                     });
                     debug!("Using HNSW search with ef_search={}", ef_search);
                     self.hnsw_search_with_ef(query_vector, k, ef_search)?
@@ -799,7 +904,9 @@ impl LockFreeVectorDB {
 
         debug!(
             "Search completed in {}μs with mode {:?}, found {} matches",
-            duration_us, mode, matches.len()
+            duration_us,
+            mode,
+            matches.len()
         );
         Ok(matches)
     }
@@ -831,6 +938,8 @@ impl LockFreeVectorDB {
 
     /// HNSW search with configurable ef_search parameter (lock-free implementation)
     ///
+    /// Uses BinaryHeap for O(log n) candidate management instead of O(n log n) Vec+sort.
+    ///
     /// # Arguments
     /// * `query_vector` - Query vector to search for
     /// * `k` - Number of results to return
@@ -841,65 +950,79 @@ impl LockFreeVectorDB {
         k: usize,
         ef_search: usize,
     ) -> Result<Vec<SearchResult>> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+
         // Get entry point
         let entry_point = self
             .hnsw_index
             .get_entry_point()
             .ok_or_else(|| anyhow::anyhow!("HNSW index is empty"))?;
 
-        // Multi-layer search (simplified implementation)
-        let mut candidates = Vec::new();
+        // Max-heap for candidates (best similarity first via Ord impl)
+        let mut candidates: BinaryHeap<SearchResult> = BinaryHeap::new();
+        // Min-heap for results (worst similarity first, to efficiently drop worst)
+        let mut results: BinaryHeap<Reverse<SearchResult>> = BinaryHeap::new();
         let mut visited = std::collections::HashSet::new();
 
         // Start from entry point
+        let initial_similarity = self.get_vector_similarity(query_vector, entry_point)?;
         candidates.push(SearchResult {
             id: entry_point,
-            similarity: self.get_vector_similarity(query_vector, entry_point)?,
+            similarity: initial_similarity,
         });
+        results.push(Reverse(SearchResult {
+            id: entry_point,
+            similarity: initial_similarity,
+        }));
         visited.insert(entry_point);
 
-        // Expand search through connections
-        let mut results = Vec::new();
-        let max_candidates = ef_search.max(k * 2);
-
-        while !candidates.is_empty() && results.len() < max_candidates {
-            // Get best candidate
-            candidates.sort_by(|a, b| {
-                b.similarity
-                    .partial_cmp(&a.similarity)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-
-            let current = candidates.remove(0);
-            results.push(current.clone());
+        // Expand search through connections using heap
+        while let Some(current) = candidates.pop() {
+            // Early termination: if current candidate is worse than worst result, stop
+            if results.len() >= ef_search {
+                if let Some(Reverse(worst)) = results.peek() {
+                    if current.similarity < worst.similarity {
+                        break;
+                    }
+                }
+            }
 
             // Explore connections
             if let Some(connections) = self.hnsw_index.get_connections(current.id) {
                 for &connected_id in &connections {
-                    if !visited.contains(&connected_id) {
-                        visited.insert(connected_id);
+                    if visited.insert(connected_id) {
                         let similarity = self.get_vector_similarity(query_vector, connected_id)?;
-
-                        // PHASE 6: Removed distance_threshold filtering from search loop
-                        // This improves recall by not filtering candidates early
-                        candidates.push(SearchResult {
+                        let result = SearchResult {
                             id: connected_id,
                             similarity,
-                        });
+                        };
+
+                        // Add to candidates heap
+                        candidates.push(result.clone());
+
+                        // Add to results min-heap
+                        results.push(Reverse(result));
+
+                        // Keep only top ef_search results
+                        while results.len() > ef_search {
+                            results.pop(); // Removes worst (smallest similarity)
+                        }
                     }
                 }
             }
         }
 
-        // Sort final results and take top k
-        results.sort_by(|a, b| {
+        // Extract top k from results and sort by similarity (descending)
+        let mut final_results: Vec<SearchResult> = results.into_iter().map(|r| r.0).collect();
+        final_results.sort_by(|a, b| {
             b.similarity
                 .partial_cmp(&a.similarity)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        results.truncate(k);
+        final_results.truncate(k);
 
-        Ok(results)
+        Ok(final_results)
     }
 
     /// Get vector similarity (helper for HNSW search)
@@ -943,14 +1066,15 @@ impl LockFreeVectorDB {
                     let min_val = min_vals[i];
                     let max_val = max_vals[i];
 
-                    if max_val > min_val {
+                    let bucket = if max_val > min_val {
                         let normalized = (value - min_val) / (max_val - min_val);
-                        let bucket =
-                            (normalized * (self.config.quantization_buckets - 1) as f32) as u8;
-                        quantized.push(bucket.min(self.config.quantization_buckets as u8 - 1));
+                        (normalized * (self.config.quantization_buckets - 1) as f32) as u8
                     } else {
-                        quantized.push(0);
-                    }
+                        // Edge case: all values are identical - map to middle bucket
+                        // This is more semantically meaningful than mapping to 0
+                        (self.config.quantization_buckets / 2) as u8
+                    };
+                    quantized.push(bucket.min(self.config.quantization_buckets as u8 - 1));
                 } else {
                     quantized.push(0);
                 }
@@ -966,38 +1090,173 @@ impl LockFreeVectorDB {
         }
     }
 
-    /// Build HNSW index for a single vector (simplified implementation)
-    fn build_hnsw_index_for_vector(&self, vector_id: u32) -> Result<()> {
-        // For simplicity, connect to a few random existing vectors
-        let mut connections = Vec::new();
-        let max_connections = self.config.max_connections.min(10); // Limit for simplicity
+    /// Assign a random layer to a new vector using exponential distribution
+    /// Higher layers are exponentially rarer, creating the hierarchical structure
+    fn random_layer(&self) -> usize {
+        // ml = 1 / ln(M) where M is max_connections
+        // This gives the optimal layer distribution for HNSW
+        let ml = 1.0 / (self.config.max_connections as f64).ln();
+        let r: f64 = rand::random::<f64>().max(1e-10); // Avoid log(0)
+        let layer = (-r.ln() * ml).floor() as usize;
+        // Cap at num_layers to prevent unbounded growth
+        layer.min(self.config.num_layers.saturating_sub(1))
+    }
 
-        // Get existing vectors (excluding current)
-        let existing_vectors: Vec<u32> = self
-            .vectors
-            .iter()
-            .map(|entry| *entry.key())
-            .filter(|&id| id != vector_id)
-            .take(max_connections * 2) // Take more for random selection
-            .collect();
+    /// Find k nearest neighbors to a query vector from existing vectors
+    fn find_nearest_neighbors(
+        &self,
+        query_vector: &[f32],
+        k: usize,
+        exclude_id: Option<u32>,
+    ) -> Vec<SearchResult> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
 
-        // Select random connections
-        use std::collections::HashSet;
-        let mut selected = HashSet::new();
+        // Min-heap to keep track of k best (worst at top for easy removal)
+        let mut heap: BinaryHeap<Reverse<SearchResult>> = BinaryHeap::new();
 
-        for &existing_id in &existing_vectors {
-            if connections.len() < max_connections && selected.insert(existing_id) {
-                connections.push(existing_id);
+        for entry in self.vectors.iter() {
+            let id = *entry.key();
+
+            // Skip excluded vector (self)
+            if Some(id) == exclude_id {
+                continue;
+            }
+
+            let stored = entry.value();
+            let similarity = Self::calculate_cosine_similarity(query_vector, &stored.vector);
+            let result = SearchResult { id, similarity };
+
+            if heap.len() < k {
+                heap.push(Reverse(result));
+            } else if let Some(Reverse(worst)) = heap.peek() {
+                if similarity > worst.similarity {
+                    heap.pop();
+                    heap.push(Reverse(result));
+                }
             }
         }
 
-        // Assign to layer 0 for simplicity
-        let num_connections = connections.len();
-        self.hnsw_index.add_vector(vector_id, 0, connections);
+        // Extract results sorted by similarity (descending)
+        let mut results: Vec<_> = heap.into_iter().map(|r| r.0).collect();
+        results.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results
+    }
+
+    /// Add bidirectional connection between two vectors in the HNSW index
+    fn add_bidirectional_connection(&self, from_id: u32, to_id: u32) {
+        // Add connection from -> to
+        self.hnsw_index
+            .connections
+            .entry(from_id)
+            .or_default()
+            .push(to_id);
+
+        // Add connection to -> from
+        self.hnsw_index
+            .connections
+            .entry(to_id)
+            .or_default()
+            .push(from_id);
+    }
+
+    /// Prune connections to keep only the best max_connections neighbors
+    fn prune_connections(&self, vector_id: u32, max_connections: usize) {
+        if let Some(mut entry) = self.hnsw_index.connections.get_mut(&vector_id) {
+            let connections = entry.value_mut();
+            if connections.len() <= max_connections {
+                return;
+            }
+
+            // Get the vector we're pruning connections for
+            let query = match self.vectors.get(&vector_id) {
+                Some(v) => v.vector.clone(),
+                None => return,
+            };
+
+            // Calculate similarities and keep only the best connections
+            let mut scored: Vec<_> = connections
+                .iter()
+                .filter_map(|&neighbor_id| {
+                    self.vectors.get(&neighbor_id).map(|v| {
+                        let sim = Self::calculate_cosine_similarity(&query, &v.vector);
+                        (neighbor_id, sim)
+                    })
+                })
+                .collect();
+
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            *connections = scored
+                .into_iter()
+                .take(max_connections)
+                .map(|(id, _)| id)
+                .collect();
+        }
+    }
+
+    /// Build HNSW index for a single vector using proper nearest neighbor selection
+    ///
+    /// This implements a simplified but correct HNSW insertion:
+    /// 1. Assigns a random layer using exponential distribution
+    /// 2. Finds actual nearest neighbors (not random vectors)
+    /// 3. Creates bidirectional connections
+    /// 4. Prunes connections to maintain graph sparsity
+    fn build_hnsw_index_for_vector(&self, vector_id: u32) -> Result<()> {
+        let max_connections = self.config.max_connections;
+
+        // Get the vector being indexed
+        let query_vector = self
+            .vectors
+            .get(&vector_id)
+            .map(|v| v.vector.clone())
+            .ok_or_else(|| anyhow::anyhow!("Vector {} not found", vector_id))?;
+
+        // Assign random layer (exponential distribution)
+        let layer = self.random_layer();
+
+        // First vector - just add it with no connections
+        if self.hnsw_index.is_empty() {
+            self.hnsw_index.add_vector(vector_id, layer, Vec::new());
+            debug!(
+                "Built HNSW index for first vector {} at layer {}",
+                vector_id, layer
+            );
+            return Ok(());
+        }
+
+        // Find nearest neighbors using actual distance calculation
+        let ef_construction = self.config.ef_construction.max(max_connections * 2);
+        let neighbors =
+            self.find_nearest_neighbors(&query_vector, ef_construction, Some(vector_id));
+
+        // Select best neighbors (up to max_connections)
+        let selected_neighbors: Vec<u32> = neighbors
+            .iter()
+            .take(max_connections)
+            .map(|r| r.id)
+            .collect();
+
+        // Add bidirectional connections
+        for &neighbor_id in &selected_neighbors {
+            self.add_bidirectional_connection(vector_id, neighbor_id);
+            // Prune neighbor's connections if they have too many
+            self.prune_connections(neighbor_id, max_connections);
+        }
+
+        // Add vector to index
+        self.hnsw_index
+            .add_vector(vector_id, layer, selected_neighbors.clone());
 
         debug!(
-            "Built HNSW index for vector {} with {} connections",
-            vector_id, num_connections
+            "Built HNSW index for vector {} at layer {} with {} neighbors (nearest similarity: {:.3})",
+            vector_id,
+            layer,
+            selected_neighbors.len(),
+            neighbors.first().map(|r| r.similarity).unwrap_or(0.0)
         );
         Ok(())
     }
@@ -1016,9 +1275,11 @@ impl LockFreeVectorDB {
         self.metadata.remove(&vector_id);
 
         if let Some(removed) = removed_vector {
-            // Update statistics (lock-free)
+            // Update statistics (lock-free) - match size calculation from add_vector
             let vector_size_bytes = std::mem::size_of::<LockFreeStoredVector>()
-                + removed.1.vector.len() * std::mem::size_of::<f32>();
+                + removed.1.vector.len() * std::mem::size_of::<f32>()
+                + removed.1.quantized.as_ref().map(|q| q.len()).unwrap_or(0)
+                + removed.1.pq_codes.as_ref().map(|pq| pq.len()).unwrap_or(0);
             self.stats.record_vector_removed(vector_size_bytes);
 
             // Remove from HNSW index (lock-free)
@@ -1053,27 +1314,33 @@ impl LockFreeVectorDB {
 
     /// Check if session has update embeddings (not just entities) - lock-free
     pub fn has_session_update_embeddings(&self, session_id: &str) -> bool {
-        self.metadata
-            .iter()
-            .any(|entry| {
-                entry.value().source == session_id
-                    && entry.value().content_type != "EntityDescription"
-            })
+        self.metadata.iter().any(|entry| {
+            entry.value().source == session_id && entry.value().content_type != "EntityDescription"
+        })
     }
 
     /// Build HNSW index for all vectors (lock-free)
     pub fn build_index(&self) -> Result<()> {
         info!("Building HNSW index for {} vectors", self.vectors.len());
 
-        // Clear existing index
-        for entry in self.hnsw_index.connections.iter() {
-            let vector_id = *entry.key();
+        // Collect keys first to avoid modifying during iteration
+        let existing_vector_ids: Vec<u32> = self
+            .hnsw_index
+            .connections
+            .iter()
+            .map(|entry| *entry.key())
+            .collect();
+
+        // Now safely remove
+        for vector_id in existing_vector_ids {
             self.hnsw_index.remove_vector(vector_id);
         }
 
+        // Collect vector IDs to build index for
+        let vector_ids: Vec<u32> = self.vectors.iter().map(|entry| *entry.key()).collect();
+
         // Build index for each vector
-        for entry in self.vectors.iter() {
-            let vector_id = *entry.key();
+        for vector_id in vector_ids {
             self.build_hnsw_index_for_vector(vector_id)?;
         }
 
@@ -1092,9 +1359,16 @@ impl LockFreeVectorDB {
         self.vectors.clear();
         self.metadata.clear();
 
-        // Clear HNSW index
-        for entry in self.hnsw_index.connections.iter() {
-            let vector_id = *entry.key();
+        // Collect keys first to avoid modifying during iteration
+        let hnsw_vector_ids: Vec<u32> = self
+            .hnsw_index
+            .connections
+            .iter()
+            .map(|entry| *entry.key())
+            .collect();
+
+        // Clear HNSW index safely
+        for vector_id in hnsw_vector_ids {
             self.hnsw_index.remove_vector(vector_id);
         }
 
