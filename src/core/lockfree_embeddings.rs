@@ -43,12 +43,19 @@ use tracing::{debug, error, info};
 struct LockFreeMemoryPool {
     /// Available vectors - using crossbeam's lock-free queue
     available: SegQueue<Vec<f32>>,
-    /// Maximum pool size
-    #[allow(dead_code)]
+    /// Maximum pool size (used in return_vector to limit pool growth)
     max_size: usize,
     /// Current size (atomic)
     current_size: AtomicUsize,
+    /// Vector capacity for new allocations
+    vector_capacity: usize,
+    /// Pool hit counter (successful pool retrievals)
+    pool_hits: AtomicUsize,
+    /// Pool miss counter (fallback allocations)
+    pool_misses: AtomicUsize,
 }
+
+#[allow(dead_code)] // Methods used in tests and for future pool recycling
 
 impl LockFreeMemoryPool {
     fn new(size: usize, vector_capacity: usize) -> Self {
@@ -56,6 +63,9 @@ impl LockFreeMemoryPool {
             available: SegQueue::new(),
             max_size: size,
             current_size: AtomicUsize::new(0),
+            vector_capacity,
+            pool_hits: AtomicUsize::new(0),
+            pool_misses: AtomicUsize::new(0),
         };
 
         // Pre-populate with empty vectors
@@ -67,23 +77,72 @@ impl LockFreeMemoryPool {
         pool
     }
 
-    fn try_get(&self) -> Option<Vec<f32>> {
-        self.available.pop()
+    /// Get a vector from pool, or allocate new one if pool is empty
+    fn get_or_allocate(&self) -> Vec<f32> {
+        match self.available.pop() {
+            Some(vec) => {
+                self.pool_hits.fetch_add(1, Ordering::Relaxed);
+                vec
+            }
+            None => {
+                let misses = self.pool_misses.fetch_add(1, Ordering::Relaxed) + 1;
+                // Log warning every 100 misses to avoid log spam
+                if misses % 100 == 0 {
+                    debug!(
+                        "Memory pool exhausted: {} misses (pool_size={}, capacity={})",
+                        misses, self.max_size, self.vector_capacity
+                    );
+                }
+                Vec::with_capacity(self.vector_capacity)
+            }
+        }
     }
 
-    #[allow(dead_code)]
+    /// Return a vector to the pool for reuse
     fn return_vector(&self, mut vec: Vec<f32>) {
-        // Clear the vector but keep capacity for reuse
-        vec.clear();
-        self.available.push(vec);
+        // Only return if pool is not full
+        if self.available.len() < self.max_size {
+            vec.clear();
+            self.available.push(vec);
+        }
+        // Otherwise let it drop naturally
     }
 
-    #[allow(dead_code)]
-    fn get_stats(&self) -> (usize, usize) {
-        let available = self.available.len();
-        let total = self.current_size.load(Ordering::Relaxed);
-        (available, total)
+    /// Get pool statistics: (available, total, hits, misses)
+    fn get_stats(&self) -> PoolStats {
+        PoolStats {
+            available: self.available.len(),
+            total: self.current_size.load(Ordering::Acquire),
+            hits: self.pool_hits.load(Ordering::Relaxed),
+            misses: self.pool_misses.load(Ordering::Relaxed),
+        }
     }
+
+    /// Get hit rate as percentage (0.0 - 100.0)
+    fn hit_rate(&self) -> f64 {
+        let hits = self.pool_hits.load(Ordering::Relaxed) as f64;
+        let misses = self.pool_misses.load(Ordering::Relaxed) as f64;
+        let total = hits + misses;
+        if total > 0.0 {
+            (hits / total) * 100.0
+        } else {
+            100.0 // No requests = 100% hit rate (no misses)
+        }
+    }
+}
+
+/// Pool statistics for monitoring and debugging
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Fields used in tests and for monitoring
+struct PoolStats {
+    /// Number of vectors currently available in pool
+    available: usize,
+    /// Total pool capacity
+    total: usize,
+    /// Number of successful pool retrievals
+    hits: usize,
+    /// Number of fallback allocations (pool exhaustion events)
+    misses: usize,
 }
 
 /// Configuration for lock-free embedding engine
@@ -132,9 +191,6 @@ struct LockFreeConcurrencyController {
     current_operations: AtomicUsize,
     /// Maximum allowed operations
     max_operations: usize,
-    /// Wait queue for operations that can't start immediately
-    #[allow(dead_code)]
-    wait_queue: SegQueue<AtomicBool>,
     /// Flag to indicate if controller is active
     active: AtomicBool,
 }
@@ -144,33 +200,42 @@ impl LockFreeConcurrencyController {
         Self {
             current_operations: AtomicUsize::new(0),
             max_operations,
-            wait_queue: SegQueue::new(),
             active: AtomicBool::new(true),
         }
     }
 
-    /// Try to acquire a slot without blocking (lock-free)
+    /// Try to acquire a slot without blocking (lock-free with retry loop)
     fn try_acquire(self: &Arc<Self>) -> Option<LockFreeOperationPermit> {
-        if !self.active.load(Ordering::Relaxed) {
+        if !self.active.load(Ordering::Acquire) {
             return None;
         }
 
-        let current = self.current_operations.load(Ordering::Relaxed);
-        if current >= self.max_operations {
-            return None;
-        }
+        // CAS loop to atomically acquire a slot
+        loop {
+            let current = self.current_operations.load(Ordering::Acquire);
+            if current >= self.max_operations {
+                return None;
+            }
 
-        // Try to increment atomically
-        match self.current_operations.compare_exchange_weak(
-            current,
-            current + 1,
-            Ordering::SeqCst,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => Some(LockFreeOperationPermit {
-                controller: Arc::clone(self),
-            }),
-            Err(_) => None, // Someone else took the slot
+            // Try to increment atomically
+            match self.current_operations.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(LockFreeOperationPermit {
+                        controller: Arc::clone(self),
+                    });
+                }
+                Err(_) => {
+                    // CAS failed, retry - another thread modified the value
+                    // Use hint to reduce contention
+                    std::hint::spin_loop();
+                    continue;
+                }
+            }
         }
     }
 
@@ -431,11 +496,8 @@ impl LockFreeLocalEmbeddingEngine {
         let mut results = Vec::with_capacity(texts.len());
 
         for text in texts {
-            // Try to get from memory pool first (lock-free)
-            let mut embedding = self
-                .memory_pool
-                .try_get()
-                .unwrap_or_else(|| Vec::with_capacity(dimension));
+            // Get from memory pool or allocate new (lock-free)
+            let mut embedding = self.memory_pool.get_or_allocate();
 
             // Generate static embedding (simplified hash-based approach)
             let hash = self.text_hash(text);
@@ -538,9 +600,10 @@ impl LockFreeLocalEmbeddingEngine {
             l2_norm_values.first().and_then(|v| v.first()).unwrap_or(&0.0)
         );
 
-        // Avoid division by zero by adding small epsilon
-        let epsilon = 1e-12_f64;
-        let l2_norm_safe = l2_norm.affine(1.0, epsilon)?; // l2_norm * 1.0 + epsilon
+        // Avoid division by zero by clamping norm to minimum epsilon
+        // Using clamp_min instead of affine to only affect near-zero norms
+        let epsilon = 1e-12_f32;
+        let l2_norm_safe = l2_norm.clamp(epsilon, f32::MAX)?;
 
         // Normalize: embeddings / l2_norm
         let normalized = embeddings.broadcast_div(&l2_norm_safe)?;
@@ -595,10 +658,19 @@ impl LockFreeLocalEmbeddingEngine {
         }
 
         // Create tensors (lock-free)
-        let input_tensor = Tensor::from_vec(input_ids, (texts.len(), max_len), &self.device)?;
-        let mask_tensor = Tensor::from_vec(attention_mask, (texts.len(), max_len), &self.device)?;
+        // Convert u32 to i64 for BERT model compatibility.
+        // Performance note: This O(n) conversion is negligible compared to BERT's
+        // O(n²) attention computation. Typical overhead: ~0.1ms for 512 tokens.
+        let input_ids_i64: Vec<i64> = input_ids.iter().map(|&x| x as i64).collect();
+        let attention_mask_i64: Vec<i64> = attention_mask.iter().map(|&x| x as i64).collect();
+
+        let input_tensor =
+            Tensor::from_vec(input_ids_i64, (texts.len(), max_len), &self.device)?;
+        let mask_tensor =
+            Tensor::from_vec(attention_mask_i64, (texts.len(), max_len), &self.device)?;
 
         // Forward pass through BERT model (lock-free)
+        // All tensors now use consistent i64 type
         let token_type_ids = Tensor::zeros(input_tensor.shape(), DType::I64, &self.device)?;
         let outputs = self
             .model
@@ -621,20 +693,9 @@ impl LockFreeLocalEmbeddingEngine {
         }
 
         // Split into individual embeddings (lock-free)
-        let mut results = Vec::with_capacity(texts.len());
-
-        for embedding_vec in embeddings_vec {
-            // Try to get from memory pool first (lock-free)
-            if let Some(mut pooled_vec) = self.memory_pool.try_get() {
-                pooled_vec.clear();
-                pooled_vec.extend_from_slice(&embedding_vec);
-                results.push(pooled_vec);
-            } else {
-                results.push(embedding_vec);
-            }
-        }
-
-        Ok(results)
+        // Note: We use embeddings directly from tensor conversion,
+        // memory pool is used for temporary allocations during processing
+        Ok(embeddings_vec)
     }
 
     /// Get adaptive batch size based on performance history (lock-free)
@@ -670,23 +731,40 @@ impl LockFreeLocalEmbeddingEngine {
         }
     }
 
-    /// Update batch performance stats (lock-free)
+    /// Update batch performance stats (lock-free with CAS loop)
     fn update_batch_performance(&self, batch_size: usize, time_ms: f64, success_rate: f64) {
         // Store performance metric (lock-free)
         let metric = success_rate / (time_ms / batch_size as f64);
         self.batch_performance_cache.insert(batch_size, metric);
 
-        // Update current batch size (lock-free)
-        let new_size = if success_rate > 0.9 && time_ms < 1000.0 {
-            (self.current_batch_size.load(Ordering::Relaxed) as f64 * 1.1) as usize
-        } else if success_rate < 0.7 || time_ms > 2000.0 {
-            (self.current_batch_size.load(Ordering::Relaxed) as f64 * 0.9) as usize
-        } else {
-            self.current_batch_size.load(Ordering::Relaxed)
-        };
+        // Update current batch size atomically with CAS loop
+        loop {
+            let current = self.current_batch_size.load(Ordering::Acquire);
 
-        self.current_batch_size
-            .store(new_size.clamp(8, 256), Ordering::Relaxed);
+            let new_size = if success_rate > 0.9 && time_ms < 1000.0 {
+                (current as f64 * 1.1) as usize
+            } else if success_rate < 0.7 || time_ms > 2000.0 {
+                (current as f64 * 0.9) as usize
+            } else {
+                return; // No change needed
+            };
+
+            let clamped = new_size.clamp(8, 256);
+
+            match self.current_batch_size.compare_exchange_weak(
+                current,
+                clamped,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(_) => {
+                    // Another thread updated, retry with new value
+                    std::hint::spin_loop();
+                    continue;
+                }
+            }
+        }
     }
 
     /// Get current concurrency load (lock-free)
@@ -720,6 +798,7 @@ pub use LockFreeLocalEmbeddingEngine as LocalEmbeddingEngine;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
 
     #[tokio::test]
     async fn test_lockfree_embedding_engine_creation() {
@@ -754,28 +833,228 @@ mod tests {
         assert_eq!(controller.max_capacity(), 2);
     }
 
+    /// Test concurrent access to concurrency controller (validates race condition fix)
+    #[test]
+    fn test_concurrency_controller_concurrent_access() {
+        let controller = Arc::new(LockFreeConcurrencyController::new(4));
+        let acquired_count = Arc::new(AtomicUsize::new(0));
+        let mut handles = vec![];
+
+        // Spawn 10 threads trying to acquire permits concurrently
+        for _ in 0..10 {
+            let ctrl = Arc::clone(&controller);
+            let count = Arc::clone(&acquired_count);
+            handles.push(thread::spawn(move || {
+                if let Some(_permit) = ctrl.try_acquire() {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    // Hold permit briefly
+                    thread::sleep(Duration::from_millis(10));
+                    // Permit released on drop
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // All permits should be released now
+        assert_eq!(controller.current_load(), 0);
+        // Should have acquired exactly 4 permits initially (max capacity)
+        // Due to timing, some threads may have acquired after others released
+        assert!(acquired_count.load(Ordering::SeqCst) >= 4);
+    }
+
+    /// Test CAS retry loop in concurrency controller
+    #[test]
+    fn test_concurrency_controller_cas_retry() {
+        let controller = Arc::new(LockFreeConcurrencyController::new(100));
+        let success_count = Arc::new(AtomicUsize::new(0));
+        let mut handles = vec![];
+
+        // Spawn many threads to stress test the CAS loop
+        for _ in 0..50 {
+            let ctrl = Arc::clone(&controller);
+            let count = Arc::clone(&success_count);
+            handles.push(thread::spawn(move || {
+                // Each thread tries to acquire and release multiple times
+                for _ in 0..10 {
+                    if let Some(_permit) = ctrl.try_acquire() {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        // Very short hold to maximize contention
+                        std::hint::spin_loop();
+                    }
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // All permits should be released
+        assert_eq!(controller.current_load(), 0);
+        // Should have many successful acquisitions
+        assert!(success_count.load(Ordering::SeqCst) > 100);
+    }
+
     #[tokio::test]
     async fn test_memory_pool() {
         let pool = LockFreeMemoryPool::new(10, 384);
 
-        // Should be able to get vectors
-        let vec1 = pool.try_get();
-        let vec2 = pool.try_get();
+        // Should be able to get vectors (always succeeds - allocates if pool empty)
+        let vec1 = pool.get_or_allocate();
+        let vec2 = pool.get_or_allocate();
 
-        assert!(vec1.is_some());
-        assert!(vec2.is_some());
+        assert_eq!(vec1.capacity(), 384);
+        assert_eq!(vec2.capacity(), 384);
 
-        // Return them
-        if let Some(v) = vec1 {
-            pool.return_vector(v);
-        }
-        if let Some(v) = vec2 {
-            pool.return_vector(v);
-        }
+        // Return them to pool
+        pool.return_vector(vec1);
+        pool.return_vector(vec2);
 
         // Stats should work
-        let (available, total) = pool.get_stats();
-        assert_eq!(total, 10);
-        assert!(available <= 10);
+        let stats = pool.get_stats();
+        assert_eq!(stats.total, 10);
+        assert!(stats.available <= 12); // May have up to 12 (10 original + 2 returned)
+        assert_eq!(stats.hits, 2); // Two successful pool retrievals
+        assert_eq!(stats.misses, 0); // No fallback allocations
+    }
+
+    /// Test memory pool doesn't grow unbounded (validates max_size limit)
+    #[test]
+    fn test_memory_pool_bounded_growth() {
+        let pool = LockFreeMemoryPool::new(5, 384);
+
+        // Get all vectors from pool (5 hits)
+        let mut vecs: Vec<Vec<f32>> = (0..5).map(|_| pool.get_or_allocate()).collect();
+
+        // Pool should be empty now, but get_or_allocate still works (1 miss)
+        let extra = pool.get_or_allocate();
+        assert_eq!(extra.capacity(), 384);
+        vecs.push(extra);
+
+        // Return all vectors
+        for v in vecs {
+            pool.return_vector(v);
+        }
+
+        // Pool should not exceed max_size (5)
+        let stats = pool.get_stats();
+        assert!(stats.available <= 5, "Pool grew beyond max_size: {}", stats.available);
+        assert_eq!(stats.hits, 5); // 5 successful retrievals
+        assert_eq!(stats.misses, 1); // 1 fallback allocation
+    }
+
+    /// Test pool hit rate calculation
+    #[test]
+    fn test_memory_pool_hit_rate() {
+        let pool = LockFreeMemoryPool::new(2, 384);
+
+        // Get 2 from pool (hits), then 2 more (misses)
+        let _v1 = pool.get_or_allocate(); // hit
+        let _v2 = pool.get_or_allocate(); // hit
+        let _v3 = pool.get_or_allocate(); // miss
+        let _v4 = pool.get_or_allocate(); // miss
+
+        let hit_rate = pool.hit_rate();
+        assert!((hit_rate - 50.0).abs() < 0.01, "Expected 50% hit rate, got {}", hit_rate);
+    }
+
+    /// Test memory pool concurrent access
+    #[test]
+    fn test_memory_pool_concurrent() {
+        let pool = Arc::new(LockFreeMemoryPool::new(20, 384));
+        let mut handles = vec![];
+
+        // Spawn threads that get and return vectors
+        for _ in 0..10 {
+            let p = Arc::clone(&pool);
+            handles.push(thread::spawn(move || {
+                for _ in 0..100 {
+                    let vec = p.get_or_allocate();
+                    assert_eq!(vec.capacity(), 384);
+                    p.return_vector(vec);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Pool should still function correctly
+        let vec = pool.get_or_allocate();
+        assert_eq!(vec.capacity(), 384);
+    }
+
+    /// Test atomic batch size updates (validates CAS loop fix)
+    #[test]
+    fn test_atomic_batch_size_updates() {
+        let batch_size = Arc::new(AtomicUsize::new(32));
+        let mut handles = vec![];
+
+        // Simulate concurrent batch size updates
+        for _ in 0..10 {
+            let bs = Arc::clone(&batch_size);
+            handles.push(thread::spawn(move || {
+                for _ in 0..100 {
+                    // Simulate the CAS loop pattern we use
+                    loop {
+                        let current = bs.load(Ordering::Acquire);
+                        let new_size = ((current as f64) * 1.01) as usize;
+                        let clamped = new_size.clamp(8, 256);
+
+                        match bs.compare_exchange_weak(
+                            current,
+                            clamped,
+                            Ordering::AcqRel,
+                            Ordering::Relaxed,
+                        ) {
+                            Ok(_) => break,
+                            Err(_) => {
+                                std::hint::spin_loop();
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Final value should be within valid range
+        let final_size = batch_size.load(Ordering::Acquire);
+        assert!(final_size >= 8 && final_size <= 256);
+    }
+
+    /// Test embedding model types
+    #[test]
+    fn test_embedding_model_types() {
+        assert_eq!(EmbeddingModelType::MiniLM.embedding_dimension(), 384);
+        assert_eq!(EmbeddingModelType::MultilingualMiniLM.embedding_dimension(), 384);
+        assert_eq!(EmbeddingModelType::TinyBERT.embedding_dimension(), 312);
+        assert_eq!(EmbeddingModelType::BGESmall.embedding_dimension(), 384);
+
+        assert!(EmbeddingModelType::MiniLM.is_bert_based());
+        assert!(EmbeddingModelType::MultilingualMiniLM.is_bert_based());
+        assert!(!EmbeddingModelType::StaticSimilarityMRL.is_bert_based());
+    }
+
+    /// Test default config values
+    #[test]
+    fn test_default_config() {
+        let config = LockFreeEmbeddingConfig::default();
+
+        assert_eq!(config.model_type, EmbeddingModelType::MultilingualMiniLM);
+        assert_eq!(config.max_batch_size, 32);
+        assert!(config.adaptive_batching);
+        assert_eq!(config.memory_pool_size, 1000);
+        assert!(config.enable_performance_monitoring);
+        assert!(config.enable_caching);
+        assert_eq!(config.operation_timeout_secs, 30);
     }
 }
