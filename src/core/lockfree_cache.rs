@@ -106,41 +106,35 @@ pub struct LockFreeCacheStats {
 }
 
 impl<V> CacheEntry<V> {
-    fn new(value: V) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
+    /// Creates a new cache entry with the given logical timestamp
+    fn new_with_logical_time(value: V, logical_time: u64) -> Self {
         Self {
             value,
             access_count: AtomicU64::new(1),
-            last_accessed: AtomicU64::new(now),
-            created_at: AtomicU64::new(now),
+            last_accessed: AtomicU64::new(logical_time),
+            created_at: AtomicU64::new(logical_time),
         }
     }
 
-    fn touch(&self, _global_counter: &AtomicU64) -> u64 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        self.last_accessed.store(now, Ordering::Relaxed);
+    /// Updates access tracking using logical timestamp (no syscall)
+    fn touch(&self, global_counter: &AtomicU64) -> u64 {
+        // Use global counter as logical timestamp (Lamport clock)
+        // This eliminates SystemTime syscall overhead (~20-100ns per call)
+        let logical_time = global_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        self.last_accessed.store(logical_time, Ordering::Relaxed);
         self.access_count.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    fn priority_score(&self) -> u64 {
-        // Lower score = higher eviction priority
-        // Combine recency and frequency for LFU-like behavior
+    /// Calculates eviction priority using logical timestamps (no syscall)
+    /// Higher score = higher eviction priority (should be evicted first)
+    fn priority_score(&self, current_logical_time: u64) -> u64 {
         let access_count = self.access_count.load(Ordering::Relaxed);
         let last_accessed = self.last_accessed.load(Ordering::Relaxed);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
 
-        let recency_factor = now.saturating_sub(last_accessed);
+        // Recency: how many logical ticks since last access
+        let recency_factor = current_logical_time.saturating_sub(last_accessed);
+
+        // Frequency: inverse of access count (less accessed = higher priority)
         let frequency_factor = if access_count > 0 {
             1000 / access_count
         } else {
@@ -249,7 +243,8 @@ where
     /// Put value in cache - lock-free with atomic eviction
     pub fn put(&self, key: K, value: V) -> Option<V> {
         let capacity = self.capacity.load(Ordering::Relaxed);
-        let entry = CacheEntry::new(value);
+        let logical_time = self.global_access_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let entry = CacheEntry::new_with_logical_time(value, logical_time);
 
         // Check if we need to evict
         let current_size = self.current_size.load(Ordering::Relaxed);
@@ -280,6 +275,9 @@ where
             return; // Race condition - size decreased, no need to evict
         }
 
+        // Get current logical time for priority calculation (no syscall)
+        let current_logical_time = self.global_access_counter.load(Ordering::Relaxed);
+
         // Find candidate for eviction by scanning entries
         // This is O(n) but only happens on capacity overflow
         let mut eviction_candidate: Option<(K, u64)> = None;
@@ -292,7 +290,7 @@ where
                 break;
             }
 
-            let priority = entry_ref.value().priority_score();
+            let priority = entry_ref.value().priority_score(current_logical_time);
             if priority > highest_eviction_priority {
                 highest_eviction_priority = priority;
                 eviction_candidate = Some((entry_ref.key().clone(), priority));
@@ -341,10 +339,7 @@ where
         self.current_size.store(0, Ordering::Relaxed);
 
         if old_size > 0 {
-            info!(
-                "{} LockFree Cache: Cleared {} entries",
-                self.name, old_size
-            );
+            info!("{} LockFree Cache: Cleared {} entries", self.name, old_size);
         }
     }
 
