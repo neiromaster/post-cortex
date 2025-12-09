@@ -90,6 +90,10 @@ pub struct RecognizedEntity {
 }
 
 #[cfg(feature = "embeddings")]
+/// Maximum cache entries before eviction
+const NER_CACHE_MAX_SIZE: usize = 1000;
+
+#[cfg(feature = "embeddings")]
 /// Lock-free NER engine using DistilBERT
 pub struct LockFreeNEREngine {
     /// DistilBERT model (loaded lazily)
@@ -104,8 +108,8 @@ pub struct LockFreeNEREngine {
     device: Device,
     /// Model loaded flag
     is_loaded: Arc<AtomicBool>,
-    /// Cache for recent extractions (text hash -> entities)
-    cache: Arc<DashMap<u64, Vec<RecognizedEntity>>>,
+    /// Cache for recent extractions (full text -> entities to avoid hash collisions)
+    cache: Arc<DashMap<String, Vec<RecognizedEntity>>>,
     /// BIO tag labels
     labels: Arc<Vec<String>>,
 }
@@ -138,7 +142,9 @@ impl LockFreeNEREngine {
 
     /// Load DistilBERT-NER model from HuggingFace Hub
     pub async fn load_model(&mut self) -> Result<()> {
-        if self.is_loaded.load(Ordering::Relaxed) {
+        // Use Acquire ordering to synchronize with Release store below
+        // This ensures we see all writes to model/tokenizer if is_loaded is true
+        if self.is_loaded.load(Ordering::Acquire) {
             debug!("NER model already loaded");
             return Ok(());
         }
@@ -205,10 +211,9 @@ impl LockFreeNEREngine {
         let classifier_weights = self.classifier_weights.as_ref().ok_or_else(|| anyhow::anyhow!("Classifier weights not loaded"))?;
         let classifier_bias = self.classifier_bias.as_ref().ok_or_else(|| anyhow::anyhow!("Classifier bias not loaded"))?;
 
-        // Check cache
-        let text_hash = Self::hash_text(text);
-        if let Some(cached) = self.cache.get(&text_hash) {
-            debug!("NER cache hit for text hash {}", text_hash);
+        // Check cache (use full text as key to avoid hash collisions)
+        if let Some(cached) = self.cache.get(text) {
+            debug!("NER cache hit for text: {}...", &text[..text.len().min(50)]);
             return Ok(cached.clone());
         }
 
@@ -276,8 +281,20 @@ impl LockFreeNEREngine {
         // Filter low-confidence and very short entities
         entities.retain(|e| e.confidence >= 0.7 && e.text.len() >= 2);
 
-        // Cache results
-        self.cache.insert(text_hash, entities.clone());
+        // Cache results with bounded size (simple eviction when full)
+        if self.cache.len() >= NER_CACHE_MAX_SIZE {
+            // Clear half the cache when limit reached (simple but lock-free)
+            let keys_to_remove: Vec<String> = self.cache
+                .iter()
+                .take(NER_CACHE_MAX_SIZE / 2)
+                .map(|entry| entry.key().clone())
+                .collect();
+            for key in keys_to_remove {
+                self.cache.remove(&key);
+            }
+            debug!("NER cache evicted {} entries", NER_CACHE_MAX_SIZE / 2);
+        }
+        self.cache.insert(text.to_string(), entities.clone());
 
         Ok(entities)
     }
@@ -295,14 +312,32 @@ impl LockFreeNEREngine {
 
         for (idx, &pred_id) in predictions.iter().enumerate() {
             // Skip special tokens ([CLS], [SEP], [PAD])
-            let (char_start, char_end) = encoding.get_offsets()[idx];
+            let offsets = encoding.get_offsets();
+            if idx >= offsets.len() {
+                continue; // Safety: skip if index out of bounds
+            }
+            let (char_start, char_end) = offsets[idx];
             if char_start == char_end {
                 // Special token - skip it
                 continue;
             }
 
-            let label = &self.labels[pred_id as usize];
-            let confidence = confidences[idx][pred_id as usize];
+            // Bounds check for label index to prevent panic
+            let pred_idx = pred_id as usize;
+            let label = match self.labels.get(pred_idx) {
+                Some(l) => l,
+                None => {
+                    debug!("Unexpected prediction index {}, skipping token", pred_idx);
+                    continue;
+                }
+            };
+
+            // Bounds check for confidence scores
+            let confidence = confidences
+                .get(idx)
+                .and_then(|row| row.get(pred_idx))
+                .copied()
+                .unwrap_or(0.0);
 
             if label.starts_with("B-") {
                 // Begin new entity
@@ -317,23 +352,27 @@ impl LockFreeNEREngine {
                 }
 
                 if let Some(entity_type) = EntityType::from_bio_tag(label) {
-                    current_entity = Some((
-                        original_text[char_start..char_end].to_string(),
-                        entity_type,
-                        confidence,
-                        char_start,
-                        char_end,
-                    ));
+                    if let Some(text) = Self::safe_slice(original_text, char_start, char_end) {
+                        current_entity = Some((
+                            text,
+                            entity_type,
+                            confidence,
+                            char_start,
+                            char_end,
+                        ));
+                    }
                 }
             } else if label.starts_with("I-") {
                 // Continue current entity
                 if let Some((ref mut text, ref etype, ref mut conf, start, ref mut end)) = current_entity
                     && let Some(entity_type) = EntityType::from_bio_tag(label)
                         && entity_type == *etype {
-                            *text = original_text[start..char_end].to_string();
-                            *end = char_end;
-                            // Update confidence to minimum across all tokens (conservative)
-                            *conf = conf.min(confidence);
+                            if let Some(new_text) = Self::safe_slice(original_text, start, char_end) {
+                                *text = new_text;
+                                *end = char_end;
+                                // Update confidence to minimum across all tokens (conservative)
+                                *conf = conf.min(confidence);
+                            }
                         }
             } else {
                 // "O" tag - outside entity
@@ -384,8 +423,11 @@ impl LockFreeNEREngine {
                 Some(prev) => {
                     // Merge if same type and adjacent (end == start)
                     if prev.entity_type == entity.entity_type && prev.end == entity.start {
+                        // Use safe slicing to handle UTF-8 boundaries
+                        let merged_text = Self::safe_slice(original_text, prev.start, entity.end)
+                            .unwrap_or_else(|| format!("{}{}", prev.text, entity.text));
                         current = Some(RecognizedEntity {
-                            text: original_text[prev.start..entity.end].to_string(),
+                            text: merged_text,
                             entity_type: prev.entity_type,
                             confidence: prev.confidence.min(entity.confidence),
                             start: prev.start,
@@ -408,14 +450,29 @@ impl LockFreeNEREngine {
         merged
     }
 
-    /// Hash text for caching
-    fn hash_text(text: &str) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        text.hash(&mut hasher);
-        hasher.finish()
+    /// Safe string slicing that handles UTF-8 boundaries
+    /// Returns None if the slice boundaries are invalid
+    fn safe_slice(text: &str, start: usize, end: usize) -> Option<String> {
+        if start > end || end > text.len() {
+            return None;
+        }
+        // Check if boundaries are valid UTF-8 char boundaries
+        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            // Find nearest valid boundaries
+            let safe_start = text.char_indices()
+                .find(|(i, _)| *i >= start)
+                .map(|(i, _)| i)
+                .unwrap_or(start);
+            let safe_end = text.char_indices()
+                .find(|(i, _)| *i >= end)
+                .map(|(i, _)| i)
+                .unwrap_or(text.len());
+            if safe_start <= safe_end && safe_end <= text.len() {
+                return Some(text[safe_start..safe_end].to_string());
+            }
+            return None;
+        }
+        Some(text[start..end].to_string())
     }
 
     /// Clear cache
