@@ -5,6 +5,34 @@ All notable changes to Post-Cortex will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2025-12-09
+
+### Added
+
+- **Lock-free memory pool statistics**: Added hit/miss counters and pool monitoring for performance diagnostics
+- **Session-specific cache invalidation**: New method to invalidate cache entries for a single session instead of clearing entire cache
+- **Text similarity computation**: Implemented `compute_text_similarity` in ContentVectorizer for accurate cosine similarity calculations between text embeddings
+
+### Changed
+
+- **Copy-on-Write semantics for ActiveSession**: Wrapped large session fields in `Arc` to enable cheap cloning with `Arc::make_mut()` for efficient updates
+- **Logical timestamps in cache**: Replaced `SystemTime` calls with Lamport clock to eliminate syscall overhead (~20-100ns per call) in hot paths
+- **Memory pool concurrency**: Implemented proper compare-and-swap loops for atomic operations in memory pool and batch size updates
+
+### Fixed
+
+- **Concurrent entry point race conditions**: Fixed race conditions in search mode with proper ordering traits for `SearchResult`
+- **Statistics underflow**: Added saturating subtraction to prevent underflow on double-remove operations
+- **NER engine safety**: Changed cache key from hash to full text to avoid collisions, added bounded cache with eviction, proper memory ordering for thread synchronization, and safe UTF-8 slicing
+- **Stale vectorized_update_ids after daemon restart**: Added verification to clear stale IDs when vector embeddings are missing in-memory after restart
+- **Semantic search similarity filtering**: Applied similarity threshold filtering consistently across all search functions with improved Unicode support in content truncation
+
+### Improved
+
+- **Pool size limits**: Added limits to prevent unbounded memory pool growth
+- **Tensor type conversions**: Optimized for BERT compatibility
+- **StructuredContext validation**: Enhanced with better documentation and field name handling in MCP tools
+
 ## [0.1.7] - 2025-11-25
 
 ### Added
