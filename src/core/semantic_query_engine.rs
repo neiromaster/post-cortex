@@ -164,7 +164,19 @@ impl SemanticQueryEngine {
             .await
             .context("Failed to perform session semantic search")?;
 
-        Ok(results)
+        // Filter by similarity threshold (consistent with global search)
+        let filtered_results: Vec<_> = results
+            .into_iter()
+            .filter(|r| r.similarity_score >= self.config.similarity_threshold)
+            .collect();
+
+        debug!(
+            "Session semantic search returned {} results (filtered from threshold {})",
+            filtered_results.len(),
+            self.config.similarity_threshold
+        );
+
+        Ok(filtered_results)
     }
 
     /// Search within a specific set of sessions
@@ -189,7 +201,19 @@ impl SemanticQueryEngine {
             .await
             .context("Failed to perform multisession semantic search")?;
 
-        Ok(results)
+        // Filter by similarity threshold (consistent with global/session search)
+        let filtered_results: Vec<_> = results
+            .into_iter()
+            .filter(|r| r.similarity_score >= self.config.similarity_threshold)
+            .collect();
+
+        debug!(
+            "Multisession semantic search returned {} results (filtered from threshold {})",
+            filtered_results.len(),
+            self.config.similarity_threshold
+        );
+
+        Ok(filtered_results)
     }
 
     /// Find related experiences from other sessions
@@ -356,18 +380,12 @@ impl SemanticQueryEngine {
     }
 
     /// Get semantic similarity between two pieces of content
+    /// Uses the embedding engine to compute cosine similarity between text embeddings
     pub async fn calculate_semantic_similarity(&self, text1: &str, text2: &str) -> Result<f32> {
-        // This would use the embedding engine to calculate similarity
-        // For now, we'll implement a basic version
-        let results1 = self.semantic_search_global(text1, Some(1), None).await?;
-        let results2 = self.semantic_search_global(text2, Some(1), None).await?;
-
-        if results1.is_empty() || results2.is_empty() {
-            return Ok(0.0);
-        }
-
-        // Simple similarity based on search result overlap
-        Ok(0.5) // Placeholder implementation
+        self.vectorizer
+            .compute_text_similarity(text1, text2)
+            .await
+            .context("Failed to compute text similarity")
     }
 
     /// Find sessions with similar themes
@@ -378,17 +396,36 @@ impl SemanticQueryEngine {
     ) -> Result<Vec<(Uuid, f32)>> {
         debug!("Finding sessions similar to {}", reference_session_id);
 
-        // Get content from reference session
-        let reference_content = self
-            .semantic_search_session(reference_session_id, "*", Some(20), None)
-            .await?;
+        // Use multiple semantic queries to get diverse content from the reference session
+        // This replaces the meaningless "*" wildcard with actual semantic queries
+        let semantic_queries = [
+            "important decisions architecture implementation",
+            "problems solutions issues fixes",
+            "questions answers explanations",
+            "code changes modifications updates",
+        ];
 
-        if reference_content.is_empty() {
+        let mut all_reference_content = Vec::new();
+        for query in &semantic_queries {
+            let results = self
+                .vectorizer
+                .semantic_search(query, 5, Some(reference_session_id), None)
+                .await
+                .unwrap_or_default();
+            all_reference_content.extend(results);
+        }
+
+        if all_reference_content.is_empty() {
+            debug!("No content found in reference session {}", reference_session_id);
             return Ok(Vec::new());
         }
 
+        // Deduplicate by content ID
+        all_reference_content.sort_by(|a, b| a.content_id.cmp(&b.content_id));
+        all_reference_content.dedup_by(|a, b| a.content_id == b.content_id);
+
         // Extract key topics from reference session
-        let reference_themes = self.extract_themes_from_results(&reference_content);
+        let reference_themes = self.extract_themes_from_results(&all_reference_content);
 
         // Search for similar content in other sessions
         let mut session_similarities: HashMap<Uuid, Vec<f32>> = HashMap::new();
@@ -435,11 +472,13 @@ impl SemanticQueryEngine {
         ))
     }
 
-    fn truncate_content(&self, content: &str, max_length: usize) -> String {
-        if content.len() <= max_length {
+    fn truncate_content(&self, content: &str, max_chars: usize) -> String {
+        let char_count = content.chars().count();
+        if char_count <= max_chars {
             content.to_string()
         } else {
-            format!("{}...", &content[..max_length])
+            let truncated: String = content.chars().take(max_chars).collect();
+            format!("{}...", truncated)
         }
     }
 
@@ -608,18 +647,35 @@ mod tests {
 
     #[test]
     fn test_truncate_content() {
-        // This would require a SemanticQueryEngine instance to test properly
-        // For now, we'll test the logic conceptually
+        // Test the character-based truncation logic
+        // Helper function mirroring the actual implementation
+        fn truncate(content: &str, max_chars: usize) -> String {
+            let char_count = content.chars().count();
+            if char_count <= max_chars {
+                content.to_string()
+            } else {
+                let truncated: String = content.chars().take(max_chars).collect();
+                format!("{}...", truncated)
+            }
+        }
+
+        // Test ASCII content
         let content = "This is a very long piece of content that should be truncated";
-        let max_length = 20;
+        assert_eq!(truncate(content, 20), "This is a very long ...");
 
-        let truncated = if content.len() <= max_length {
-            content.to_string()
-        } else {
-            format!("{}...", &content[..max_length])
-        };
+        // Test content shorter than max
+        assert_eq!(truncate("short", 20), "short");
 
-        assert_eq!(truncated, "This is a very long ...");
+        // Test Unicode content (Cyrillic) - this would panic with byte indexing
+        let unicode_content = "Привет мир! Это тестовое сообщение.";
+        let truncated_unicode = truncate(unicode_content, 10);
+        assert_eq!(truncated_unicode, "Привет мир...");
+        assert_eq!(truncated_unicode.chars().count(), 13); // 10 chars + "..."
+
+        // Test emoji content - multi-byte UTF-8
+        let emoji_content = "Hello 🌍🌎🌏 World!";
+        let truncated_emoji = truncate(emoji_content, 10);
+        assert_eq!(truncated_emoji, "Hello 🌍🌎🌏 ...");
     }
 
     #[test]

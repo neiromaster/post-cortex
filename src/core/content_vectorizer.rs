@@ -790,6 +790,24 @@ impl ContentVectorizer {
             .count_session_embeddings(&session_id.to_string())
     }
 
+    /// Compute semantic similarity between two text strings
+    /// Returns a similarity score between 0.0 and 1.0
+    pub async fn compute_text_similarity(&self, text1: &str, text2: &str) -> Result<f32> {
+        let embedding1 = self.embedding_engine.encode_text(text1).await?;
+        let embedding2 = self.embedding_engine.encode_text(text2).await?;
+
+        // Calculate cosine similarity
+        let dot_product: f32 = embedding1.iter().zip(embedding2.iter()).map(|(a, b)| a * b).sum();
+        let norm1: f32 = embedding1.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm2: f32 = embedding2.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        if norm1 == 0.0 || norm2 == 0.0 {
+            return Ok(0.0);
+        }
+
+        Ok(dot_product / (norm1 * norm2))
+    }
+
     /// Collect updates sequentially (for small sessions)
     /// Uses incremental_updates to ensure ALL updates are vectorized (including evicted ones)
     fn collect_updates_sequential(
