@@ -303,6 +303,21 @@ impl ContentVectorizer {
 
     /// Vectorize context updates from a session
     async fn vectorize_context_updates(&self, session: &ActiveSession) -> Result<usize> {
+        // CRITICAL FIX: vectorized_update_ids is persisted to RocksDB but vector_db is in-memory.
+        // After daemon restart, vectorized_update_ids may contain IDs that are no longer in vector_db.
+        // We must verify that vector_db actually has update embeddings for this session.
+        let session_id_str = session.id().to_string();
+        if !self.vector_db.has_session_update_embeddings(&session_id_str) {
+            // Vector DB doesn't have update embeddings - clear stale vectorized_update_ids
+            if !session.vectorized_update_ids.is_empty() {
+                tracing::info!(
+                    "Clearing stale vectorized_update_ids for session {} (vector_db has no update embeddings)",
+                    session.id()
+                );
+                session.vectorized_update_ids.clear();
+            }
+        }
+
         // Count only non-vectorized updates for threshold decision
         let non_vectorized_count = session
             .incremental_updates

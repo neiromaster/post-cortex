@@ -875,11 +875,40 @@ pub async fn update_conversation_context(
             .collect()
     };
 
+    // Helper to get first matching field from multiple alternatives
+    let get_field = |keys: &[&str]| -> Option<String> {
+        for key in keys {
+            if let Some(val) = content.get(*key) {
+                if !val.is_empty() {
+                    return Some(val.clone());
+                }
+            }
+        }
+        None
+    };
+
+    // Helper to get field with fallback to first non-empty value from any field
+    let get_field_or_first = |primary_keys: &[&str], exclude_keys: &[&str]| -> String {
+        // Try primary keys first
+        if let Some(val) = get_field(primary_keys) {
+            return val;
+        }
+        // Fallback: get first non-empty value from any field not in exclude list
+        for (k, v) in content.iter() {
+            if !exclude_keys.contains(&k.as_str()) && !v.is_empty() {
+                return v.clone();
+            }
+        }
+        String::new()
+    };
+
     let interaction = match interaction_type.as_str() {
         "qa" => {
-            let question = content.get("question").cloned().unwrap_or_default();
-            let answer = content.get("answer").cloned().unwrap_or_default();
-            let extras = extract_extras(&["question", "answer"]);
+            // Accept: question/title, answer/response/explanation
+            let question = get_field(&["question", "title", "query"]).unwrap_or_default();
+            let answer = get_field(&["answer", "response", "explanation"]).unwrap_or_default();
+            let primary_keys = ["question", "title", "query", "answer", "response", "explanation"];
+            let extras = extract_extras(&primary_keys);
             Interaction::QA {
                 question,
                 answer,
@@ -887,19 +916,49 @@ pub async fn update_conversation_context(
             }
         }
         "code_change" => {
-            let description = content.get("description").cloned().unwrap_or_default();
-            let change_type = content.get("change_type").cloned().unwrap_or_default();
-            let extras = extract_extras(&["description", "change_type"]);
+            // Accept multiple field name variations for better UX
+            // file_path/title: file_path, file, path, description, change_description, title
+            // diff/changes: diff, changes, change_type, changes_made, details
+            let file_path_keys = [
+                "file_path",
+                "file",
+                "path",
+                "description",
+                "change_description",
+                "title",
+                "file_references",
+            ];
+            let diff_keys = [
+                "diff",
+                "changes",
+                "change_type",
+                "changes_made",
+                "details",
+                "technical_details",
+            ];
+
+            let file_path = get_field_or_first(&file_path_keys, &diff_keys);
+            let diff = get_field_or_first(&diff_keys, &file_path_keys);
+
+            // Build exclude list for extras
+            let mut exclude: Vec<&str> = file_path_keys.to_vec();
+            exclude.extend(diff_keys.to_vec());
+            let extras = extract_extras(&exclude);
+
             Interaction::CodeChange {
-                file_path: description,
-                diff: change_type,
+                file_path,
+                diff,
                 details: extras,
             }
         }
         "problem_solved" => {
-            let problem = content.get("problem").cloned().unwrap_or_default();
-            let solution = content.get("solution").cloned().unwrap_or_default();
-            let extras = extract_extras(&["problem", "solution"]);
+            // Accept: problem/issue/bug, solution/fix/resolution
+            let problem = get_field(&["problem", "issue", "bug", "error", "title"]).unwrap_or_default();
+            let solution = get_field(&["solution", "fix", "resolution", "answer"]).unwrap_or_default();
+            let primary_keys = [
+                "problem", "issue", "bug", "error", "title", "solution", "fix", "resolution", "answer",
+            ];
+            let extras = extract_extras(&primary_keys);
             Interaction::ProblemSolved {
                 problem,
                 solution,
@@ -907,9 +966,13 @@ pub async fn update_conversation_context(
             }
         }
         "decision_made" => {
-            let decision = content.get("decision").cloned().unwrap_or_default();
-            let rationale = content.get("rationale").cloned().unwrap_or_default();
-            let extras = extract_extras(&["decision", "rationale"]);
+            // Accept: decision/choice/title, rationale/reason/why/justification
+            let decision = get_field(&["decision", "choice", "title"]).unwrap_or_default();
+            let rationale = get_field(&["rationale", "reason", "why", "justification"]).unwrap_or_default();
+            let primary_keys = [
+                "decision", "choice", "title", "rationale", "reason", "why", "justification",
+            ];
+            let extras = extract_extras(&primary_keys);
             Interaction::DecisionMade {
                 decision,
                 rationale,
@@ -2963,13 +3026,16 @@ pub fn get_all_tool_schemas() -> Vec<serde_json::Value> {
         // Context Operations (3 tools)
         json!({
             "name": "update_conversation_context",
-            "description": "Add new knowledge to the conversation: QA, decisions, problems solved, or code changes",
+            "description": "Add new knowledge to the conversation: QA, decisions, problems solved, or code changes. Content fields vary by interaction_type: qa={question,answer}, decision_made={decision,rationale}, problem_solved={problem,solution}, code_change={file_path|description,changes|diff}. Extra fields become details.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "session_id": {"type": "string", "description": "UUID of the session"},
                     "interaction_type": {"type": "string", "description": "Type: qa, decision_made, problem_solved, code_change"},
-                    "content": {"type": "object", "description": "Content object with interaction data"},
+                    "content": {
+                        "type": "object",
+                        "description": "Content object. Expected fields by type: qa={question,answer}, decision_made={decision,rationale}, problem_solved={problem,solution}, code_change={file_path,changes}. Accepts variations: question/title/query, answer/response, problem/issue/bug, solution/fix, decision/choice, rationale/reason/why, file_path/file/description, changes/diff/changes_made. Extra fields become details array."
+                    },
                     "code_reference": {"type": "object", "description": "Optional code reference with file paths and line numbers"}
                 },
                 "required": ["session_id", "interaction_type", "content"]
