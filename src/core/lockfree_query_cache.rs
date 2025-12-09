@@ -100,7 +100,7 @@ impl LockFreeCachedQuery {
     ) -> Self {
         let now = Utc::now();
         let now_timestamp = now.timestamp() as u64;
-        
+
         Self {
             id: Uuid::new_v4(),
             query_text,
@@ -133,7 +133,8 @@ impl LockFreeCachedQuery {
         let frequency_factor = (count as f32).ln().max(1.0);
 
         let score = recency_factor * frequency_factor;
-        self.efficiency_score_bits.store(score.to_bits() as u64, Ordering::Relaxed);
+        self.efficiency_score_bits
+            .store(score.to_bits() as u64, Ordering::Relaxed);
     }
 
     /// Get efficiency score (lock-free)
@@ -216,12 +217,13 @@ impl LockFreeQueryCacheStats {
     /// Record a cache hit (lock-free)
     pub fn record_hit(&self, similarity: f32) {
         let hits = self.cache_hits.fetch_add(1, Ordering::Relaxed) + 1;
-        
+
         // Update average hit similarity
         let current_avg_bits = self.avg_hit_similarity_bits.load(Ordering::Relaxed);
         let current_avg = f32::from_bits(current_avg_bits as u32);
         let new_avg = ((current_avg * (hits as f32 - 1.0)) + similarity) / hits as f32;
-        self.avg_hit_similarity_bits.store(new_avg.to_bits() as u64, Ordering::Relaxed);
+        self.avg_hit_similarity_bits
+            .store(new_avg.to_bits() as u64, Ordering::Relaxed);
     }
 
     /// Record a cache miss (lock-free)
@@ -238,7 +240,7 @@ impl LockFreeQueryCacheStats {
     pub fn snapshot(&self) -> QueryCacheStatsSnapshot {
         let total = self.total_queries.load(Ordering::Relaxed);
         let hits = self.cache_hits.load(Ordering::Relaxed);
-        
+
         let hit_rate = if total > 0 {
             (hits as f32 / total as f32) * 100.0
         } else {
@@ -286,16 +288,16 @@ struct QueryPattern {
 pub struct LockFreeQueryCache {
     /// Cache storage - completely lock-free using DashMap
     cache: Arc<DashMap<Uuid, LockFreeCachedQuery>>,
-    
+
     /// Cache configuration - immutable after creation
     config: LockFreeQueryCacheConfig,
-    
+
     /// Performance statistics - lock-free using atomics
     stats: Arc<LockFreeQueryCacheStats>,
-    
+
     /// Query patterns for prefetching - lock-free using DashMap
     patterns: Arc<DashMap<String, QueryPattern>>,
-    
+
     /// Recent queries for pattern detection - lock-free using DashMap
     recent_queries: Arc<DashMap<String, AtomicU64>>,
 }
@@ -383,8 +385,12 @@ impl LockFreeQueryCache {
         self.cache.insert(query_id, cached_query);
 
         // Update statistics (lock-free)
-        self.stats.current_cache_size.store(self.cache.len(), Ordering::Relaxed);
-        self.stats.estimated_memory_bytes.store(self.estimate_memory_usage(), Ordering::Relaxed);
+        self.stats
+            .current_cache_size
+            .store(self.cache.len(), Ordering::Relaxed);
+        self.stats
+            .estimated_memory_bytes
+            .store(self.estimate_memory_usage(), Ordering::Relaxed);
 
         debug!("Cached query results for: {}", query_text);
         Ok(())
@@ -394,7 +400,9 @@ impl LockFreeQueryCache {
     fn find_exact_match(&self, params_hash: u64) -> Option<Vec<SemanticSearchResult>> {
         for entry in self.cache.iter() {
             let cached_query = entry.value();
-            if cached_query.params_hash == params_hash && !cached_query.is_expired(self.config.ttl_minutes) {
+            if cached_query.params_hash == params_hash
+                && !cached_query.is_expired(self.config.ttl_minutes)
+            {
                 // Update access statistics
                 cached_query.mark_accessed();
                 return Some(cached_query.results.clone());
@@ -407,7 +415,11 @@ impl LockFreeQueryCache {
     ///
     /// CRITICAL: This method now checks params_hash to ensure cached results
     /// match the current query parameters (session filter, date range, etc.)
-    fn find_similar_query(&self, query_vector: &[f32], params_hash: u64) -> Option<(Vec<SemanticSearchResult>, f32)> {
+    fn find_similar_query(
+        &self,
+        query_vector: &[f32],
+        params_hash: u64,
+    ) -> Option<(Vec<SemanticSearchResult>, f32)> {
         let mut best_match: Option<(Vec<SemanticSearchResult>, f32, Uuid)> = None;
         let mut best_similarity = 0.0f32;
 
@@ -448,7 +460,7 @@ impl LockFreeQueryCache {
     /// Clean up expired cache entries (lock-free)
     fn cleanup_expired(&self) -> Result<()> {
         let mut removed_count = 0;
-        
+
         self.cache.retain(|_, cached_query| {
             let expired = cached_query.is_expired(self.config.ttl_minutes);
             if expired {
@@ -458,9 +470,15 @@ impl LockFreeQueryCache {
         });
 
         if removed_count > 0 {
-            self.stats.expired_removed.fetch_add(removed_count as u64, Ordering::Relaxed);
-            self.stats.current_cache_size.store(self.cache.len(), Ordering::Relaxed);
-            self.stats.estimated_memory_bytes.store(self.estimate_memory_usage(), Ordering::Relaxed);
+            self.stats
+                .expired_removed
+                .fetch_add(removed_count as u64, Ordering::Relaxed);
+            self.stats
+                .current_cache_size
+                .store(self.cache.len(), Ordering::Relaxed);
+            self.stats
+                .estimated_memory_bytes
+                .store(self.estimate_memory_usage(), Ordering::Relaxed);
 
             debug!("Removed {} expired cache entries", removed_count);
         }
@@ -503,16 +521,20 @@ impl LockFreeQueryCache {
         let query_lower = query_text.to_lowercase();
 
         // Update recent queries
-        self.recent_queries.insert(query_lower.clone(), AtomicU64::new(now));
+        self.recent_queries
+            .insert(query_lower.clone(), AtomicU64::new(now));
 
         // Update or create pattern
-        self.patterns.entry(query_lower.clone()).and_modify(|pattern| {
-            pattern.frequency.fetch_add(1, Ordering::Relaxed);
-            pattern.last_seen.store(now, Ordering::Relaxed);
-        }).or_insert_with(|| QueryPattern {
-            frequency: AtomicU64::new(1),
-            last_seen: AtomicU64::new(now),
-        });
+        self.patterns
+            .entry(query_lower.clone())
+            .and_modify(|pattern| {
+                pattern.frequency.fetch_add(1, Ordering::Relaxed);
+                pattern.last_seen.store(now, Ordering::Relaxed);
+            })
+            .or_insert_with(|| QueryPattern {
+                frequency: AtomicU64::new(1),
+                last_seen: AtomicU64::new(now),
+            });
 
         // Clean up old patterns (simple implementation)
         // In production, this could be done by a background task
@@ -529,7 +551,9 @@ impl LockFreeQueryCache {
         self.cache.clear();
 
         self.stats.current_cache_size.store(0, Ordering::Relaxed);
-        self.stats.estimated_memory_bytes.store(0, Ordering::Relaxed);
+        self.stats
+            .estimated_memory_bytes
+            .store(0, Ordering::Relaxed);
 
         info!("Query cache cleared ({} entries)", old_size);
         Ok(())
@@ -557,11 +581,12 @@ impl LockFreeQueryCache {
 
         // Update cache size
         let new_size = self.cache.len();
-        self.stats.current_cache_size.store(new_size, Ordering::Relaxed);
-        self.stats.estimated_memory_bytes.store(
-            self.estimate_memory_usage(),
-            Ordering::Relaxed,
-        );
+        self.stats
+            .current_cache_size
+            .store(new_size, Ordering::Relaxed);
+        self.stats
+            .estimated_memory_bytes
+            .store(self.estimate_memory_usage(), Ordering::Relaxed);
 
         if invalidated_count > 0 {
             debug!(
@@ -575,7 +600,8 @@ impl LockFreeQueryCache {
 
     /// Estimate memory usage of the cache (lock-free)
     fn estimate_memory_usage(&self) -> usize {
-        self.cache.iter()
+        self.cache
+            .iter()
             .map(|entry| {
                 let query = entry.value();
                 let text_size = query.query_text.len();
@@ -660,7 +686,13 @@ mod tests {
 
         // Cache first query
         cache
-            .cache_results("query1".to_string(), query_vector1, results, params_hash, None)
+            .cache_results(
+                "query1".to_string(),
+                query_vector1,
+                results,
+                params_hash,
+                None,
+            )
             .unwrap();
 
         // Search with similar vector and SAME params_hash
@@ -670,8 +702,10 @@ mod tests {
 
         // Search with different params_hash should NOT return cached results
         let different_params = cache.search("query2", &query_vector2, 456);
-        assert!(different_params.is_none(),
-            "Bug fix verification: different params_hash should not return cached results");
+        assert!(
+            different_params.is_none(),
+            "Bug fix verification: different params_hash should not return cached results"
+        );
     }
 
     #[test]

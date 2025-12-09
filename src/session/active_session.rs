@@ -79,6 +79,14 @@ async fn get_ner_engine() -> Option<Arc<LockFreeNEREngine>> {
 
 /// ActiveSession with lock-free granular components
 /// Uses Arc-wrapped lock-free structures for concurrent access and cheap cloning
+///
+/// **Copy-on-Write (CoW) Semantics:**
+/// Heavy fields are wrapped in Arc for efficient cloning. When the session needs
+/// to be modified, use `Arc::make_mut()` which will:
+/// - Return a mutable reference if this is the only owner
+/// - Clone the data only if there are other owners
+///
+/// This dramatically reduces cloning overhead when sessions are frequently updated.
 #[derive(Clone, Debug)]
 pub struct ActiveSession {
     // Metadata (immutable or rare updates)
@@ -87,26 +95,26 @@ pub struct ActiveSession {
 
     // Lock-free tiered context storage
     pub hot_context: Arc<HotContext>, // Lock-free hot updates (DashMap-based)
-    pub warm_context: Vec<CompressedUpdate>,  // Compressed updates (storage)
-    pub cold_context: Vec<StructuredSummary>, // Periodic summaries (storage)
+    pub warm_context: Arc<Vec<CompressedUpdate>>,  // CoW: Compressed updates (storage)
+    pub cold_context: Arc<Vec<StructuredSummary>>, // CoW: Periodic summaries (storage)
 
-    // Structured context
-    pub current_state: StructuredContext, // Current queryable state
-    pub incremental_updates: Vec<ContextUpdate>, // All incremental updates
+    // Structured context - CoW wrapped for efficient updates
+    pub current_state: Arc<StructuredContext>, // CoW: Current queryable state
+    pub incremental_updates: Arc<Vec<ContextUpdate>>, // CoW: All incremental updates (biggest!)
 
-    // Code integration
-    pub code_references: HashMap<String, Vec<CodeReference>>, // By file path
-    pub change_history: Vec<ChangeRecord>,                    // Change history
+    // Code integration - CoW wrapped
+    pub code_references: Arc<HashMap<String, Vec<CodeReference>>>, // CoW: By file path
+    pub change_history: Arc<Vec<ChangeRecord>>,                    // CoW: Change history
 
-    // Entity graph (TODO: Make lock-free in Phase 3.2)
-    pub entity_graph: SimpleEntityGraph,
+    // Entity graph - CoW wrapped for efficient graph updates
+    pub entity_graph: Arc<SimpleEntityGraph>,
 
-    // Entity extraction configuration
+    // Entity extraction configuration (small, cheap to clone)
     pub max_extracted_entities: usize,
     pub max_referenced_entities: usize,
     pub enable_smart_entity_ranking: bool,
 
-    // Entity extraction metrics
+    // Entity extraction metrics (small, cheap to clone)
     pub total_entity_truncations: usize,
     pub total_entities_truncated: usize,
 
@@ -208,6 +216,7 @@ impl Serialize for ActiveSession {
     where
         S: serde::Serializer,
     {
+        // Dereference Arc before cloning for serialization
         let data = ActiveSessionData {
             id: self.metadata.id,
             name: self.metadata.name.clone(),
@@ -216,13 +225,13 @@ impl Serialize for ActiveSession {
             last_updated: self.last_updated,
             user_preferences: self.metadata.user_preferences.clone(),
             hot_context: VecDeque::from(self.hot_context.snapshot()),
-            warm_context: self.warm_context.clone(),
-            cold_context: self.cold_context.clone(),
-            current_state: self.current_state.clone(),
-            incremental_updates: self.incremental_updates.clone(),
-            code_references: self.code_references.clone(),
-            change_history: self.change_history.clone(),
-            entity_graph: self.entity_graph.clone(),
+            warm_context: (*self.warm_context).clone(),
+            cold_context: (*self.cold_context).clone(),
+            current_state: (*self.current_state).clone(),
+            incremental_updates: (*self.incremental_updates).clone(),
+            code_references: (*self.code_references).clone(),
+            change_history: (*self.change_history).clone(),
+            entity_graph: (*self.entity_graph).clone(),
             max_extracted_entities: self.max_extracted_entities,
             max_referenced_entities: self.max_referenced_entities,
             enable_smart_entity_ranking: self.enable_smart_entity_ranking,
@@ -259,17 +268,18 @@ impl<'de> Deserialize<'de> for ActiveSession {
             vectorized_ids.insert(id);
         }
 
+        // Wrap deserialized data in Arc for CoW semantics
         Ok(ActiveSession {
             metadata,
             last_updated: data.last_updated,
             hot_context,
-            warm_context: data.warm_context,
-            cold_context: data.cold_context,
-            current_state: data.current_state,
-            incremental_updates: data.incremental_updates,
-            code_references: data.code_references,
-            change_history: data.change_history,
-            entity_graph: data.entity_graph,
+            warm_context: Arc::new(data.warm_context),
+            cold_context: Arc::new(data.cold_context),
+            current_state: Arc::new(data.current_state),
+            incremental_updates: Arc::new(data.incremental_updates),
+            code_references: Arc::new(data.code_references),
+            change_history: Arc::new(data.change_history),
+            entity_graph: Arc::new(data.entity_graph),
             max_extracted_entities: data.max_extracted_entities,
             max_referenced_entities: data.max_referenced_entities,
             enable_smart_entity_ranking: data.enable_smart_entity_ranking,
@@ -307,13 +317,13 @@ impl ActiveSession {
             metadata,
             last_updated: Utc::now(),
             hot_context: Arc::new(HotContext::new(50)),
-            warm_context: Vec::new(),
-            cold_context: Vec::new(),
-            current_state: StructuredContext::new(),
-            incremental_updates: Vec::new(),
-            code_references: HashMap::new(),
-            change_history: Vec::new(),
-            entity_graph: SimpleEntityGraph::new(),
+            warm_context: Arc::new(Vec::new()),
+            cold_context: Arc::new(Vec::new()),
+            current_state: Arc::new(StructuredContext::new()),
+            incremental_updates: Arc::new(Vec::new()),
+            code_references: Arc::new(HashMap::new()),
+            change_history: Arc::new(Vec::new()),
+            entity_graph: Arc::new(SimpleEntityGraph::new()),
             max_extracted_entities: 15,
             max_referenced_entities: 15,
             enable_smart_entity_ranking: true,
@@ -455,7 +465,8 @@ impl ActiveSession {
         self.last_updated = Utc::now();
 
         // Add to incremental updates (use original update for storage)
-        self.incremental_updates.push(limited_update.clone());
+        // Use Arc::make_mut for CoW semantics - only clones if there are other owners
+        Arc::make_mut(&mut self.incremental_updates).push(limited_update.clone());
 
         info!("ActiveSession: add_incremental_update completed successfully");
 
@@ -463,11 +474,15 @@ impl ActiveSession {
     }
 
     async fn update_current_state(&mut self, update: &ContextUpdate) -> anyhow::Result<()> {
+        // Use Arc::make_mut for CoW semantics on current_state
+        // This will only clone if there are other Arc references
+        let current_state = Arc::make_mut(&mut self.current_state);
+
         // Update structured context based on update type
         match &update.update_type {
             UpdateType::QuestionAnswered => {
                 // Add question to open questions (since Q&A implies there was a question)
-                self.current_state.open_questions.push(
+                current_state.open_questions.push(
                     crate::core::structured_context::QuestionItem {
                         question: update.content.title.clone(),
                         context: update.content.description.clone(),
@@ -478,7 +493,8 @@ impl ActiveSession {
                 );
 
                 // Extract key concepts from Q&A content
-                self.extract_and_add_concepts(
+                Self::extract_and_add_concepts_to_state(
+                    current_state,
                     &update.content.title,
                     &update.content.description,
                     &update.content.details,
@@ -486,7 +502,7 @@ impl ActiveSession {
                 );
 
                 // Add to conversation flow
-                self.current_state.conversation_flow.push(
+                current_state.conversation_flow.push(
                     crate::core::structured_context::FlowItem {
                         step_description: format!("Q&A: {}", update.content.title),
                         timestamp: update.timestamp,
@@ -497,7 +513,8 @@ impl ActiveSession {
             }
             UpdateType::ProblemSolved => {
                 // Extract key concepts from problem/solution content
-                self.extract_and_add_concepts(
+                Self::extract_and_add_concepts_to_state(
+                    current_state,
                     &update.content.title,
                     &update.content.description,
                     &update.content.details,
@@ -505,7 +522,7 @@ impl ActiveSession {
                 );
 
                 // Add to conversation flow
-                self.current_state.conversation_flow.push(
+                current_state.conversation_flow.push(
                     crate::core::structured_context::FlowItem {
                         step_description: format!("Problem Solved: {}", update.content.title),
                         timestamp: update.timestamp,
@@ -516,7 +533,8 @@ impl ActiveSession {
             }
             UpdateType::CodeChanged => {
                 // Extract key concepts from code change content
-                self.extract_and_add_concepts(
+                Self::extract_and_add_concepts_to_state(
+                    current_state,
                     &update.content.title,
                     &update.content.description,
                     &update.content.details,
@@ -524,7 +542,7 @@ impl ActiveSession {
                 );
 
                 // Add to conversation flow
-                self.current_state.conversation_flow.push(
+                current_state.conversation_flow.push(
                     crate::core::structured_context::FlowItem {
                         step_description: format!("Code Change: {}", update.content.title),
                         timestamp: update.timestamp,
@@ -535,7 +553,7 @@ impl ActiveSession {
             }
             UpdateType::DecisionMade => {
                 // Add to key decisions
-                self.current_state.key_decisions.push(
+                current_state.key_decisions.push(
                     crate::core::structured_context::DecisionItem {
                         description: update.content.title.clone(),
                         context: update.content.description.clone(),
@@ -546,7 +564,7 @@ impl ActiveSession {
                 );
 
                 // Add to conversation flow
-                self.current_state.conversation_flow.push(
+                current_state.conversation_flow.push(
                     crate::core::structured_context::FlowItem {
                         step_description: format!("Decision Made: {}", update.content.title),
                         timestamp: update.timestamp,
@@ -557,7 +575,7 @@ impl ActiveSession {
             }
             UpdateType::ConceptDefined => {
                 // Add to key concepts
-                self.current_state.key_concepts.push(
+                current_state.key_concepts.push(
                     crate::core::structured_context::ConceptItem {
                         name: update.content.title.clone(),
                         definition: update.content.description.clone(),
@@ -568,7 +586,7 @@ impl ActiveSession {
                 );
 
                 // Add to conversation flow
-                self.current_state.conversation_flow.push(
+                current_state.conversation_flow.push(
                     crate::core::structured_context::FlowItem {
                         step_description: format!("Concept Defined: {}", update.content.title),
                         timestamp: update.timestamp,
@@ -579,7 +597,7 @@ impl ActiveSession {
             }
             UpdateType::RequirementAdded => {
                 // Add to technical specifications
-                self.current_state.technical_specifications.push(
+                current_state.technical_specifications.push(
                     crate::core::structured_context::SpecItem {
                         title: update.content.title.clone(),
                         description: update.content.description.clone(),
@@ -590,7 +608,7 @@ impl ActiveSession {
                 );
 
                 // Add to conversation flow
-                self.current_state.conversation_flow.push(
+                current_state.conversation_flow.push(
                     crate::core::structured_context::FlowItem {
                         step_description: format!("Requirement Added: {}", update.content.title),
                         timestamp: update.timestamp,
@@ -604,9 +622,10 @@ impl ActiveSession {
         Ok(())
     }
 
-    /// Extract key concepts from content and add them to key_concepts
-    fn extract_and_add_concepts(
-        &mut self,
+    /// Extract key concepts from content and add them to key_concepts (static version for CoW)
+    /// Takes a mutable reference to StructuredContext to avoid borrowing issues with Arc::make_mut
+    fn extract_and_add_concepts_to_state(
+        current_state: &mut StructuredContext,
         title: &str,
         description: &str,
         details: &[String],
@@ -617,12 +636,12 @@ impl ActiveSession {
         let mut concept_entities = HashSet::new();
         let full_text = format!("{} {} {}", title, description, details.join(" "));
 
-        // Extract entities as potential concepts
-        let extracted_entities = self.extract_entities_from_text(&full_text);
+        // Extract entities as potential concepts using static helper
+        let extracted_entities = Self::extract_entities_from_text_static(&full_text);
 
         // Filter for concept-worthy entities (score threshold)
         for entity in extracted_entities {
-            let score = self.calculate_entity_score(&entity, &full_text);
+            let score = Self::calculate_entity_score_static(&entity, &full_text);
             // Lower threshold to include more concepts (was 2.5, now 1.5)
             if score >= 1.5 && entity.len() >= 3 && entity.len() <= 25 {
                 concept_entities.insert(entity);
@@ -630,13 +649,12 @@ impl ActiveSession {
         }
 
         // Also extract explicit concept indicators
-        self.extract_explicit_concepts(&full_text, &mut concept_entities);
+        Self::extract_explicit_concepts_static(&full_text, &mut concept_entities);
 
         // Convert to ConceptItem structures and add to key_concepts
         for concept_name in concept_entities {
             // Skip if this concept already exists (avoid duplicates)
-            if self
-                .current_state
+            if current_state
                 .key_concepts
                 .iter()
                 .any(|c| c.name.to_lowercase() == concept_name.to_lowercase())
@@ -644,7 +662,7 @@ impl ActiveSession {
                 continue;
             }
 
-            self.current_state
+            current_state
                 .key_concepts
                 .push(crate::core::structured_context::ConceptItem {
                     name: concept_name.clone(),
@@ -655,87 +673,8 @@ impl ActiveSession {
                 });
 
             // Limit the number of concepts to prevent overflow
-            if self.current_state.key_concepts.len() >= 50 {
-                self.current_state.key_concepts.remove(0); // Remove oldest
-            }
-        }
-    }
-
-    /// Extract explicit concept indicators from text
-    fn extract_explicit_concepts(
-        &self,
-        text: &str,
-        concepts: &mut std::collections::HashSet<String>,
-    ) {
-        let text_lower = text.to_lowercase();
-
-        // Look for concept indicators
-        let concept_indicators = [
-            "concept",
-            "principle",
-            "pattern",
-            "approach",
-            "methodology",
-            "framework",
-            "architecture",
-            "design",
-            "strategy",
-            "technique",
-            "algorithm",
-            "model",
-            "abstraction",
-            "paradigm",
-        ];
-
-        // Extract terms following concept indicators
-        for indicator in &concept_indicators {
-            let pattern = format!(
-                r"{}\s+(is|are|was|were|involves|uses|implements|provides)\s+([a-zA-Z][a-zA-Z\s]{{2,30}})",
-                indicator
-            );
-            if let Ok(regex) = regex::Regex::new(&pattern) {
-                for cap in regex.captures_iter(text) {
-                    if let Some(concept_match) = cap.get(2) {
-                        let concept = concept_match.as_str().trim();
-                        if concept.len() >= 3 && concept.len() <= 25 {
-                            concepts.insert(concept.to_lowercase());
-                        }
-                    }
-                }
-            }
-        }
-
-        // Extract quoted definitions (often indicate concepts)
-        let quoted_patterns = [
-            r#"concept\s+of\s+[""']([^""']{2,25})[""']"#,
-            r#"definition\s+[""']([^""']{2,25})[""']"#,
-            r#"principle\s+[""']([^""']{2,25})[""']"#,
-        ];
-
-        for pattern in quoted_patterns {
-            if let Ok(regex) = regex::Regex::new(pattern) {
-                for cap in regex.captures_iter(&text_lower) {
-                    if let Some(concept_match) = cap.get(1) {
-                        let concept = concept_match.as_str().trim();
-                        if concept.len() >= 3 && concept.len() <= 25 {
-                            concepts.insert(concept.to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        // Extract CamelCase terms (often classes, concepts, frameworks)
-        let camelcase_regex = regex::Regex::new(r"\b[A-Z][a-zA-Z]*[A-Z][a-zA-Z]*\b")
-            .expect("CamelCase regex should compile");
-        for cap in camelcase_regex.find_iter(text) {
-            let camelcase_term = cap.as_str();
-            if camelcase_term.len() >= 4 && camelcase_term.len() <= 20 {
-                // Filter out common words that happen to be CamelCase
-                let common_camelcase = ["This", "That", "These", "Those", "When", "Where", "What"];
-                if !common_camelcase.contains(&camelcase_term) {
-                    concepts.insert(camelcase_term.to_lowercase());
-                }
+            if current_state.key_concepts.len() >= 50 {
+                current_state.key_concepts.remove(0); // Remove oldest
             }
         }
     }
@@ -830,13 +769,24 @@ impl ActiveSession {
             self.total_entities_truncated
         );
 
+        // Pre-compute entity types before taking mutable borrow of entity_graph
+        // This avoids borrowing self while entity_graph is mutably borrowed
+        let entity_types: Vec<_> = extracted_entities
+            .iter()
+            .map(|name| self.infer_entity_type(&update.update_type, name))
+            .collect();
+
+        // Use Arc::make_mut for CoW semantics on entity_graph
+        // This will only clone if there are other Arc references
+        let entity_graph = Arc::make_mut(&mut self.entity_graph);
+
         // Create new entities (batch operation)
         info!("DEBUG: About to start entity loop");
-        for entity_name in &extracted_entities {
+        for (entity_name, entity_type) in extracted_entities.iter().zip(entity_types.iter()) {
             info!("Adding entity: '{}'", entity_name);
-            self.entity_graph.add_or_update_entity(
+            entity_graph.add_or_update_entity(
                 entity_name.clone(),
-                self.infer_entity_type(&update.update_type, entity_name),
+                entity_type.clone(),
                 update.timestamp,
                 &update.content.description,
             );
@@ -844,7 +794,7 @@ impl ActiveSession {
 
         info!(
             "Entity graph now has {} total entities",
-            self.entity_graph.entities.len()
+            entity_graph.entities.len()
         );
 
         // Add entity references (batch operation)
@@ -853,7 +803,7 @@ impl ActiveSession {
             referenced_entities.len()
         );
         for entity_name in &referenced_entities {
-            self.entity_graph
+            entity_graph
                 .mention_entity(entity_name, update.id, update.timestamp);
         }
         info!("DEBUG: Entity references added successfully");
@@ -864,7 +814,7 @@ impl ActiveSession {
             update.creates_relationships.len()
         );
         for relationship in &update.creates_relationships {
-            self.entity_graph.add_relationship(relationship.clone());
+            entity_graph.add_relationship(relationship.clone());
         }
         info!("DEBUG: Explicit relationships created successfully");
 
@@ -1890,6 +1840,185 @@ impl ActiveSession {
         score
     }
 
+    /// Static version of calculate_entity_score for use with CoW patterns
+    fn calculate_entity_score_static(entity: &str, text: &str) -> f64 {
+        let mut score = 0.0;
+
+        // Base score from length (sweet spot is 4-12 characters)
+        let length_score = match entity.len() {
+            1..=2 => 0.1,
+            3 => 0.3,
+            4..=8 => 1.0,
+            9..=12 => 0.8,
+            13..=20 => 0.5,
+            _ => 0.2,
+        };
+        score += length_score;
+
+        // Frequency score (more mentions = more important) - case insensitive
+        let freq_count = text.to_lowercase().matches(&entity.to_lowercase()).count() as f64;
+        score += freq_count * 0.3;
+
+        // Pattern bonuses
+        if entity.contains('-') || entity.contains('_') {
+            score += 0.4;
+        }
+        if entity.chars().any(|c| c.is_uppercase()) {
+            score += 0.3;
+        }
+
+        // Technical term indicators
+        let tech_suffixes = ["api", "db", "sql", "json", "xml", "http", "tcp", "udp"];
+        if tech_suffixes.iter().any(|&suffix| entity.ends_with(suffix)) {
+            score += 0.5;
+        }
+
+        let tech_prefixes = ["micro", "multi", "auto", "async", "sync"];
+        if tech_prefixes.iter().any(|&prefix| entity.starts_with(prefix)) {
+            score += 0.4;
+        }
+
+        // Architecture/process terms
+        let important_patterns = [
+            "system", "service", "protocol", "framework", "library",
+            "engine", "platform", "server", "client", "cache",
+            "storage", "database", "memory", "thread", "process",
+        ];
+        if important_patterns.iter().any(|&pattern| entity.contains(pattern)) {
+            score += 0.6;
+        }
+
+        // Penalize very common words
+        let somewhat_common = ["thing", "stuff", "something", "anything", "everything"];
+        if somewhat_common.contains(&entity) {
+            score *= 0.1;
+        }
+
+        score
+    }
+
+    /// Static version of extract_explicit_concepts for use with CoW patterns
+    fn extract_explicit_concepts_static(
+        text: &str,
+        concepts: &mut std::collections::HashSet<String>,
+    ) {
+        let text_lower = text.to_lowercase();
+
+        // Look for concept indicators
+        let concept_indicators = [
+            "concept", "principle", "pattern", "approach", "methodology",
+            "framework", "architecture", "design", "strategy", "technique",
+            "algorithm", "model", "abstraction", "paradigm",
+        ];
+
+        // Extract terms following concept indicators
+        for indicator in &concept_indicators {
+            let pattern = format!(
+                r"{}\s+(is|are|was|were|involves|uses|implements|provides)\s+([a-zA-Z][a-zA-Z\s]{{2,30}})",
+                indicator
+            );
+            if let Ok(regex) = regex::Regex::new(&pattern) {
+                for cap in regex.captures_iter(text) {
+                    if let Some(concept_match) = cap.get(2) {
+                        let concept = concept_match.as_str().trim();
+                        if concept.len() >= 3 && concept.len() <= 25 {
+                            concepts.insert(concept.to_lowercase());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract quoted definitions
+        let quoted_patterns = [
+            r#"concept\s+of\s+[""']([^""']{2,25})[""']"#,
+            r#"definition\s+[""']([^""']{2,25})[""']"#,
+            r#"principle\s+[""']([^""']{2,25})[""']"#,
+        ];
+
+        for pattern in quoted_patterns {
+            if let Ok(regex) = regex::Regex::new(pattern) {
+                for cap in regex.captures_iter(&text_lower) {
+                    if let Some(concept_match) = cap.get(1) {
+                        let concept = concept_match.as_str().trim();
+                        if concept.len() >= 3 && concept.len() <= 25 {
+                            concepts.insert(concept.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract CamelCase terms
+        if let Ok(camelcase_regex) = regex::Regex::new(r"\b[A-Z][a-zA-Z]*[A-Z][a-zA-Z]*\b") {
+            for cap in camelcase_regex.find_iter(text) {
+                let camelcase_term = cap.as_str();
+                if camelcase_term.len() >= 4 && camelcase_term.len() <= 20 {
+                    let common_camelcase = ["This", "That", "These", "Those", "When", "Where", "What"];
+                    if !common_camelcase.contains(&camelcase_term) {
+                        concepts.insert(camelcase_term.to_lowercase());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Static version of extract_entities_from_text for use with CoW patterns
+    /// Simplified version that uses pattern-based extraction only
+    fn extract_entities_from_text_static(text: &str) -> Vec<String> {
+        use std::collections::HashSet;
+
+        let mut entities = HashSet::new();
+        let text_lower = text.to_lowercase();
+
+        // Extract capitalized terms (proper nouns)
+        if let Ok(capitalized_regex) = regex::Regex::new(r"\b[A-Z][a-zA-Z-]{2,}\b") {
+            let common_words = [
+                "The", "This", "That", "These", "Those", "When", "Where", "What", "Why", "How", "Who",
+                "Which", "Will", "Would", "Could", "Should", "Must", "Can", "May", "Might", "And",
+                "But", "Or", "Not", "So", "Yet", "For", "Nor", "Because", "Although", "Since", "While",
+            ];
+            for cap in capitalized_regex.find_iter(text) {
+                let original = cap.as_str();
+                let term = original.to_lowercase();
+                if term.len() >= 3 && term.len() <= 20 && !common_words.contains(&original) {
+                    entities.insert(term);
+                }
+            }
+        }
+
+        // Extract compound terms (hyphenated, underscored, CamelCase)
+        if let Ok(compound_regex) = regex::Regex::new(r"\b[a-zA-Z]+-[a-zA-Z]+(?:-[a-zA-Z]+)*\b") {
+            for cap in compound_regex.find_iter(text) {
+                let term = cap.as_str().to_lowercase();
+                if term.len() >= 4 && term.len() <= 25 {
+                    entities.insert(term);
+                }
+            }
+        }
+
+        if let Ok(camel_regex) = regex::Regex::new(r"\b[A-Z][a-z]*[A-Z][a-zA-Z]*\b") {
+            for cap in camel_regex.find_iter(text) {
+                let term = cap.as_str().to_lowercase();
+                if term.len() >= 4 && term.len() <= 25 {
+                    entities.insert(term);
+                }
+            }
+        }
+
+        // Score and filter
+        let mut scored: Vec<(String, f64)> = entities
+            .iter()
+            .map(|entity| {
+                let score = Self::calculate_entity_score_static(entity, &text_lower);
+                (entity.clone(), score)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().take(20).map(|(e, _)| e).collect()
+    }
+
     /// Rank entities by importance and truncate to specified limit
     /// Uses frequency scoring to keep the most relevant entities
     fn rank_and_truncate_entities(
@@ -1953,6 +2082,13 @@ impl ActiveSession {
         let limited_created: Vec<_> = created_entities.iter().take(max_entities).collect();
         let _limited_referenced: Vec<_> = referenced_entities.iter().take(max_entities).collect();
 
+        // Pre-compute relationship type before taking mutable borrow
+        let relation_type = self.infer_relationship_type(&update.update_type);
+        let context = format!("Co-mentioned in: {}", update.content.title);
+
+        // Use Arc::make_mut for CoW semantics on entity_graph
+        let entity_graph = Arc::make_mut(&mut self.entity_graph);
+
         // Create relationships between entities in the same update (limit pairs)
         let mut relationship_count = 0;
         let max_relationships = 15;
@@ -1973,10 +2109,10 @@ impl ActiveSession {
                 let relationship = EntityRelationship {
                     from_entity: entity1.to_string(),
                     to_entity: entity2.to_string(),
-                    relation_type: self.infer_relationship_type(&update.update_type),
-                    context: format!("Co-mentioned in: {}", update.content.title),
+                    relation_type: relation_type.clone(),
+                    context: context.clone(),
                 };
-                self.entity_graph.add_relationship(relationship);
+                entity_graph.add_relationship(relationship);
                 relationship_count += 1;
             }
         }
@@ -1995,8 +2131,9 @@ impl ActiveSession {
     }
 
     async fn add_code_reference(&mut self, code_ref: &CodeReference) -> anyhow::Result<()> {
-        let code_refs = self
-            .code_references
+        // Use Arc::make_mut for CoW semantics on code_references
+        let code_references = Arc::make_mut(&mut self.code_references);
+        let code_refs = code_references
             .entry(code_ref.file_path.clone())
             .or_default();
         code_refs.push(code_ref.clone());
@@ -2004,7 +2141,8 @@ impl ActiveSession {
     }
 
     fn record_change(&mut self, update: &ContextUpdate) -> anyhow::Result<()> {
-        self.change_history.push(ChangeRecord {
+        // Use Arc::make_mut for CoW semantics on change_history
+        Arc::make_mut(&mut self.change_history).push(ChangeRecord {
             id: Uuid::new_v4(),
             timestamp: update.timestamp,
             change_type: format!("{:?}", update.update_type),
@@ -2033,15 +2171,17 @@ impl ActiveSession {
 
     fn create_periodic_summary(&mut self) -> anyhow::Result<()> {
         // Create a summary from current state
+        // Note: Arc clone is cheap (just ref count increment), and we need immutable access
         let summary = StructuredSummary {
             summary_id: Uuid::new_v4(),
             created_at: Utc::now(),
-            context_snapshot: self.current_state.clone(),
+            context_snapshot: (*self.current_state).clone(),
             referenced_updates: self.incremental_updates.iter().map(|u| u.id).collect(),
             summary_quality: 1.0, // Placeholder - would calculate actual quality
         };
 
-        self.cold_context.push(summary);
+        // Use Arc::make_mut for CoW semantics on cold_context
+        Arc::make_mut(&mut self.cold_context).push(summary);
         Ok(())
     }
 

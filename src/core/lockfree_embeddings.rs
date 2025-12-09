@@ -343,7 +343,9 @@ impl EmbeddingModelType {
         match self {
             Self::StaticSimilarityMRL => "sentence-transformers/all-MiniLM-L6-v2",
             Self::MiniLM => "sentence-transformers/all-MiniLM-L6-v2",
-            Self::MultilingualMiniLM => "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+            Self::MultilingualMiniLM => {
+                "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+            }
             Self::TinyBERT => "huawei-noah/TinyBERT_General_6L_312D",
             Self::BGESmall => "BAAI/bge-small-en-v1.5",
         }
@@ -351,7 +353,10 @@ impl EmbeddingModelType {
 
     /// Check if this is a BERT-based model
     pub fn is_bert_based(&self) -> bool {
-        matches!(self, Self::MiniLM | Self::MultilingualMiniLM | Self::TinyBERT | Self::BGESmall)
+        matches!(
+            self,
+            Self::MiniLM | Self::MultilingualMiniLM | Self::TinyBERT | Self::BGESmall
+        )
     }
 }
 
@@ -597,7 +602,10 @@ impl LockFreeLocalEmbeddingEngine {
         debug!(
             "L2 normalization - batch size: {}, first norm: {:.6}",
             l2_norm_values.len(),
-            l2_norm_values.first().and_then(|v| v.first()).unwrap_or(&0.0)
+            l2_norm_values
+                .first()
+                .and_then(|v| v.first())
+                .unwrap_or(&0.0)
         );
 
         // Avoid division by zero by clamping norm to minimum epsilon
@@ -664,8 +672,7 @@ impl LockFreeLocalEmbeddingEngine {
         let input_ids_i64: Vec<i64> = input_ids.iter().map(|&x| x as i64).collect();
         let attention_mask_i64: Vec<i64> = attention_mask.iter().map(|&x| x as i64).collect();
 
-        let input_tensor =
-            Tensor::from_vec(input_ids_i64, (texts.len(), max_len), &self.device)?;
+        let input_tensor = Tensor::from_vec(input_ids_i64, (texts.len(), max_len), &self.device)?;
         let mask_tensor =
             Tensor::from_vec(attention_mask_i64, (texts.len(), max_len), &self.device)?;
 
@@ -941,7 +948,11 @@ mod tests {
 
         // Pool should not exceed max_size (5)
         let stats = pool.get_stats();
-        assert!(stats.available <= 5, "Pool grew beyond max_size: {}", stats.available);
+        assert!(
+            stats.available <= 5,
+            "Pool grew beyond max_size: {}",
+            stats.available
+        );
         assert_eq!(stats.hits, 5); // 5 successful retrievals
         assert_eq!(stats.misses, 1); // 1 fallback allocation
     }
@@ -958,7 +969,11 @@ mod tests {
         let _v4 = pool.get_or_allocate(); // miss
 
         let hit_rate = pool.hit_rate();
-        assert!((hit_rate - 50.0).abs() < 0.01, "Expected 50% hit rate, got {}", hit_rate);
+        assert!(
+            (hit_rate - 50.0).abs() < 0.01,
+            "Expected 50% hit rate, got {}",
+            hit_rate
+        );
     }
 
     /// Test memory pool concurrent access
@@ -1035,7 +1050,10 @@ mod tests {
     #[test]
     fn test_embedding_model_types() {
         assert_eq!(EmbeddingModelType::MiniLM.embedding_dimension(), 384);
-        assert_eq!(EmbeddingModelType::MultilingualMiniLM.embedding_dimension(), 384);
+        assert_eq!(
+            EmbeddingModelType::MultilingualMiniLM.embedding_dimension(),
+            384
+        );
         assert_eq!(EmbeddingModelType::TinyBERT.embedding_dimension(), 312);
         assert_eq!(EmbeddingModelType::BGESmall.embedding_dimension(), 384);
 

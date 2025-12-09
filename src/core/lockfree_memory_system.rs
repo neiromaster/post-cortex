@@ -443,7 +443,10 @@ impl LockFreeConversationMemorySystem {
             }
             Err(e) => {
                 // Just log error, don't fail startup as this is optional functionality or might fail on fresh install
-                tracing::warn!("Failed to hydrate workspaces (this is expected on first run): {}", e);
+                tracing::warn!(
+                    "Failed to hydrate workspaces (this is expected on first run): {}",
+                    e
+                );
             }
         }
 
@@ -1053,7 +1056,8 @@ impl LockFreeConversationMemorySystem {
         let current_size = self.session_manager.active_sessions.len();
         if current_size > MAX_ACTIVE_SESSIONS {
             let to_evict = current_size - MAX_ACTIVE_SESSIONS + SESSION_CLEANUP_BATCH_SIZE;
-            self.evict_oldest_sessions(to_evict.min(SESSION_CLEANUP_BATCH_SIZE)).await;
+            self.evict_oldest_sessions(to_evict.min(SESSION_CLEANUP_BATCH_SIZE))
+                .await;
         }
     }
 
@@ -1158,10 +1162,7 @@ impl LockFreeSessionManager {
                     || error_lower.contains("no such")
                 {
                     // This is a "not found" error, treat as Ok(None)
-                    debug!(
-                        "Session {} not found in storage: {}",
-                        session_id, e
-                    );
+                    debug!("Session {} not found in storage: {}", session_id, e);
                     Ok(None)
                 } else if error_lower.contains("timeout") {
                     // Timeout - could be transient, log warning and propagate error
@@ -1951,8 +1952,7 @@ impl LockFreeConversationMemorySystem {
 
         // Check if we've exceeded max retries
         if attempt > MAX_VECTORIZER_INIT_RETRIES as u64 + 1 {
-            if let Some(last_error) = self.embedding_config_holder.last_init_error.read().as_ref()
-            {
+            if let Some(last_error) = self.embedding_config_holder.last_init_error.read().as_ref() {
                 return Err(format!(
                     "Vectorizer initialization failed after {} attempts. Last error: {}",
                     attempt - 1,
@@ -2005,7 +2005,10 @@ impl LockFreeConversationMemorySystem {
 
         match result {
             Ok(vectorizer) => {
-                info!("Content vectorizer initialized successfully on attempt {}", attempt);
+                info!(
+                    "Content vectorizer initialized successfully on attempt {}",
+                    attempt
+                );
                 // Clear any previous error
                 *self.embedding_config_holder.last_init_error.write() = None;
                 Ok(Arc::clone(vectorizer))
@@ -2039,7 +2042,9 @@ impl LockFreeConversationMemorySystem {
             .get_or_try_init(|| async {
                 info!("Lazy-initializing semantic query engine...");
 
-                use crate::core::semantic_query_engine::{SemanticQueryConfig, SemanticQueryEngine};
+                use crate::core::semantic_query_engine::{
+                    SemanticQueryConfig, SemanticQueryEngine,
+                };
 
                 let config = SemanticQueryConfig {
                     cross_session_enabled: self

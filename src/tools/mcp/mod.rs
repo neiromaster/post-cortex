@@ -567,16 +567,16 @@ pub async fn load_session_checkpoint_with_system(
     let mut session = ActiveSession::new(session_id, None, None);
 
     eprintln!("Loading checkpoint - step 5: Restoring current state");
-    session.current_state = checkpoint.structured_context;
+    session.current_state = Arc::new(checkpoint.structured_context);
 
     eprintln!("Loading checkpoint - step 6: Restoring incremental updates");
-    session.incremental_updates = checkpoint.recent_updates;
+    session.incremental_updates = Arc::new(checkpoint.recent_updates);
 
     eprintln!("Loading checkpoint - step 10: Restoring code references");
-    session.code_references = checkpoint.code_references;
+    session.code_references = Arc::new(checkpoint.code_references);
 
     eprintln!("Loading checkpoint - step 11: Restoring change history");
-    session.change_history = checkpoint.change_history;
+    session.change_history = Arc::new(checkpoint.change_history);
 
     eprintln!("Loading checkpoint - step 12: Entity graph restored");
 
@@ -1118,10 +1118,10 @@ pub async fn load_session_checkpoint(
 
         // Restore session from checkpoint
         let mut session = ActiveSession::new(session_id, None, None);
-        session.current_state = checkpoint.structured_context;
-        session.incremental_updates = checkpoint.recent_updates;
-        session.code_references = checkpoint.code_references;
-        session.change_history = checkpoint.change_history;
+        session.current_state = Arc::new(checkpoint.structured_context);
+        session.incremental_updates = Arc::new(checkpoint.recent_updates);
+        session.code_references = Arc::new(checkpoint.code_references);
+        session.change_history = Arc::new(checkpoint.change_history);
         // Entity graph will be rebuilt from incremental updates
 
         // Add session to session manager
@@ -1164,7 +1164,9 @@ pub async fn mark_important(session_id: Uuid, update_id: String) -> Result<MCPTo
     let mut found = false;
     session_arc.rcu(|current| {
         let mut updated = (**current).clone();
-        for update in &mut updated.incremental_updates {
+        // Use Arc::make_mut for CoW semantics on incremental_updates
+        let updates = Arc::make_mut(&mut updated.incremental_updates);
+        for update in updates.iter_mut() {
             if update.id == update_id {
                 update.user_marked_important = true;
                 found = true;
@@ -1651,7 +1653,7 @@ async fn query_context(session: &ActiveSession, query: ContextQuery) -> Result<C
             Ok(ContextResponse::CodeReferences(converted_refs))
         }
         ContextQuery::GetStructuredSummary => Ok(ContextResponse::StructuredSummary(
-            session.current_state.clone(),
+            (*session.current_state).clone(),
         )),
         ContextQuery::FindRelatedEntities { entity_name } => {
             let related = session.entity_graph.find_related_entities(&entity_name);
@@ -1772,14 +1774,15 @@ async fn query_context(session: &ActiveSession, query: ContextQuery) -> Result<C
 }
 
 async fn create_comprehensive_checkpoint(session: &ActiveSession) -> Result<SessionCheckpoint> {
+    // Dereference Arc-wrapped fields to get underlying data for checkpoint
     Ok(SessionCheckpoint {
         id: Uuid::new_v4(),
         session_id: session.id(),
         created_at: chrono::Utc::now(),
-        structured_context: session.current_state.clone(),
-        recent_updates: session.incremental_updates.clone(),
-        code_references: session.code_references.clone(),
-        change_history: session.change_history.clone(),
+        structured_context: (*session.current_state).clone(),
+        recent_updates: (*session.incremental_updates).clone(),
+        code_references: (*session.code_references).clone(),
+        change_history: (*session.change_history).clone(),
         total_updates: session.incremental_updates.len(),
         context_quality_score: 1.0,
         compression_ratio: 1.0,

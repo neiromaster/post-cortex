@@ -801,7 +801,7 @@ impl ContentVectorizer {
 
         // Process ALL incremental updates (hot + warm + cold tier)
         // Skip already vectorized updates for efficiency
-        for update in &session.incremental_updates {
+        for update in session.incremental_updates.iter() {
             // Skip if already vectorized
             if session.vectorized_update_ids.contains(&update.id) {
                 continue;
