@@ -134,6 +134,13 @@ impl QueryCache {
         self.inner.clear()
     }
 
+    /// Invalidate all cache entries for a specific session
+    /// More efficient than clearing the entire cache when only one session changed
+    pub async fn invalidate_session(&self, session_id: Uuid) -> Result<()> {
+        // The lock-free implementation is synchronous, but we maintain async interface for compatibility
+        self.inner.invalidate_session(session_id)
+    }
+
     /// Get cache efficiency metrics (async for compatibility)
     pub async fn get_efficiency_metrics(&self) -> std::collections::HashMap<String, f32> {
         // The lock-free implementation is synchronous, but we maintain async interface for compatibility

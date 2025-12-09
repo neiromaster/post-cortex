@@ -527,11 +527,49 @@ impl LockFreeQueryCache {
     pub fn clear(&self) -> Result<()> {
         let old_size = self.cache.len();
         self.cache.clear();
-        
+
         self.stats.current_cache_size.store(0, Ordering::Relaxed);
         self.stats.estimated_memory_bytes.store(0, Ordering::Relaxed);
 
         info!("Query cache cleared ({} entries)", old_size);
+        Ok(())
+    }
+
+    /// Invalidate all cache entries for a specific session (lock-free)
+    /// More efficient than clearing the entire cache when only one session changed
+    pub fn invalidate_session(&self, session_id: Uuid) -> Result<()> {
+        let mut invalidated_count = 0;
+        let mut keys_to_remove = Vec::new();
+
+        // Collect keys to remove (entries associated with this session)
+        for entry in self.cache.iter() {
+            if entry.value().session_id == Some(session_id) {
+                keys_to_remove.push(entry.key().clone());
+            }
+        }
+
+        // Remove the collected keys
+        for key in keys_to_remove {
+            if self.cache.remove(&key).is_some() {
+                invalidated_count += 1;
+            }
+        }
+
+        // Update cache size
+        let new_size = self.cache.len();
+        self.stats.current_cache_size.store(new_size, Ordering::Relaxed);
+        self.stats.estimated_memory_bytes.store(
+            self.estimate_memory_usage(),
+            Ordering::Relaxed,
+        );
+
+        if invalidated_count > 0 {
+            debug!(
+                "Invalidated {} cache entries for session {} (remaining: {})",
+                invalidated_count, session_id, new_size
+            );
+        }
+
         Ok(())
     }
 

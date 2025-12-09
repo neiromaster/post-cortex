@@ -709,6 +709,20 @@ impl ContentVectorizer {
         Ok(())
     }
 
+    /// Invalidate cache entries for a specific session
+    /// This is more efficient than clearing the entire cache
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cache invalidation operation fails
+    pub async fn invalidate_session_cache(&self, session_id: Uuid) -> Result<()> {
+        if let Some(ref cache) = self.query_cache {
+            cache.invalidate_session(session_id).await?;
+            debug!("Invalidated cache entries for session {}", session_id);
+        }
+        Ok(())
+    }
+
     /// Check if query caching is enabled
     pub const fn is_query_caching_enabled(&self) -> bool {
         self.query_cache.is_some()

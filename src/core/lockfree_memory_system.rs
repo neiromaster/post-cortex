@@ -30,10 +30,28 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender, channel, unbounded_channel};
-use tokio::sync::{OnceCell, oneshot};
+use tokio::sync::{OnceCell, Semaphore, oneshot};
 
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
+
+// Retry configuration constants
+const MAX_VECTORIZATION_RETRIES: u32 = 3;
+const VECTORIZATION_RETRY_DELAY_MS: u64 = 100;
+const MAX_VECTORIZER_INIT_RETRIES: u32 = 2;
+
+// Timeout constants for different operation types
+const TIMEOUT_FAST_MS: u64 = 5_000; // 5 seconds for simple operations
+const TIMEOUT_MEDIUM_MS: u64 = 30_000; // 30 seconds for normal operations
+const TIMEOUT_SLOW_MS: u64 = 120_000; // 2 minutes for bulk operations
+const TIMEOUT_VECTORIZATION_MS: u64 = 300_000; // 5 minutes for vectorization
+
+// Memory management constants
+const MAX_ACTIVE_SESSIONS: usize = 500; // Maximum sessions in active_sessions DashMap
+const SESSION_CLEANUP_BATCH_SIZE: usize = 50; // Sessions to clean per batch
+
+// Parallel processing constants
+const MAX_PARALLEL_VECTORIZATION: usize = 4; // Maximum concurrent vectorization tasks
 
 // Conditional imports for embeddings feature
 #[cfg(feature = "embeddings")]
@@ -51,6 +69,10 @@ pub struct EmbeddingConfigHolder {
     pub max_vectors_per_session: usize,
     pub data_directory: String,
     pub cross_session_search_enabled: bool,
+    /// Tracks initialization attempts for retry mechanism
+    pub init_attempt_count: AtomicU64,
+    /// Last initialization error (for diagnostics)
+    pub last_init_error: parking_lot::RwLock<Option<String>>,
 }
 
 /// Completely lock-free conversation memory system using actors and channels
@@ -180,11 +202,36 @@ pub struct StorageActor {
     operation_count: AtomicU64,
 }
 
+/// Operation types for dynamic timeout configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationType {
+    /// Fast operations: get, simple reads (5s)
+    Fast,
+    /// Medium operations: save, update (30s)
+    Medium,
+    /// Slow operations: bulk saves, list all (2min)
+    Slow,
+    /// Vectorization operations: embedding generation (5min)
+    Vectorization,
+}
+
+impl OperationType {
+    /// Get the timeout duration for this operation type
+    #[must_use]
+    pub const fn timeout(&self) -> Duration {
+        match self {
+            Self::Fast => Duration::from_millis(TIMEOUT_FAST_MS),
+            Self::Medium => Duration::from_millis(TIMEOUT_MEDIUM_MS),
+            Self::Slow => Duration::from_millis(TIMEOUT_SLOW_MS),
+            Self::Vectorization => Duration::from_millis(TIMEOUT_VECTORIZATION_MS),
+        }
+    }
+}
+
 /// Handle for communicating with storage actor
 #[derive(Clone)]
 pub struct StorageActorHandle {
     sender: UnboundedSender<StorageMessage>,
-    operation_timeout: Duration,
 }
 
 /// Messages for storage actor
@@ -429,6 +476,8 @@ impl LockFreeConversationMemorySystem {
                     max_vectors_per_session: config.max_vectors_per_session,
                     data_directory: config.data_directory.clone(),
                     cross_session_search_enabled: config.cross_session_search_enabled,
+                    init_attempt_count: AtomicU64::new(0),
+                    last_init_error: parking_lot::RwLock::new(None),
                 });
 
                 (
@@ -447,6 +496,8 @@ impl LockFreeConversationMemorySystem {
                         max_vectors_per_session: 10000,
                         data_directory: config.data_directory.clone(),
                         cross_session_search_enabled: false,
+                        init_attempt_count: AtomicU64::new(0),
+                        last_init_error: parking_lot::RwLock::new(None),
                     }),
                 )
             };
@@ -965,6 +1016,7 @@ impl LockFreeConversationMemorySystem {
     }
 
     /// Cleanup expired sessions - background task
+    /// Also enforces memory limits on active_sessions DashMap
     pub async fn cleanup_expired_sessions(&self) {
         let _timer = self
             .performance_monitor
@@ -995,6 +1047,63 @@ impl LockFreeConversationMemorySystem {
 
         if expired_count > 0 {
             info!("Cleaned up {} expired sessions", expired_count);
+        }
+
+        // Enforce memory limits - evict oldest sessions if over MAX_ACTIVE_SESSIONS
+        let current_size = self.session_manager.active_sessions.len();
+        if current_size > MAX_ACTIVE_SESSIONS {
+            let to_evict = current_size - MAX_ACTIVE_SESSIONS + SESSION_CLEANUP_BATCH_SIZE;
+            self.evict_oldest_sessions(to_evict.min(SESSION_CLEANUP_BATCH_SIZE)).await;
+        }
+    }
+
+    /// Evict oldest sessions from cache to prevent unbounded memory growth
+    /// Sessions are NOT deleted from storage, only removed from memory cache
+    async fn evict_oldest_sessions(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
+
+        // Collect sessions with their last access times
+        let mut session_times: Vec<(Uuid, u64)> = self
+            .session_manager
+            .active_sessions
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().load(Ordering::Relaxed)))
+            .collect();
+
+        // Sort by last access time (oldest first)
+        session_times.sort_by_key(|(_, time)| *time);
+
+        // Evict the oldest sessions
+        let evicted_count = session_times.iter().take(count).count();
+        for (session_id, _) in session_times.iter().take(count) {
+            self.session_manager.active_sessions.remove(session_id);
+            self.session_manager.sessions.remove(session_id);
+            debug!("Evicted session {} from cache (memory limit)", session_id);
+        }
+
+        if evicted_count > 0 {
+            info!(
+                "Evicted {} oldest sessions from cache to enforce memory limit ({}/{})",
+                evicted_count,
+                self.session_manager.active_sessions.len(),
+                MAX_ACTIVE_SESSIONS
+            );
+        }
+    }
+
+    /// Force cleanup to reduce memory usage immediately
+    /// Useful when the system is under memory pressure
+    pub async fn force_memory_cleanup(&self, target_size: usize) {
+        let current_size = self.session_manager.active_sessions.len();
+        if current_size > target_size {
+            let to_evict = current_size - target_size;
+            info!(
+                "Force cleanup: evicting {} sessions (current: {}, target: {})",
+                to_evict, current_size, target_size
+            );
+            self.evict_oldest_sessions(to_evict).await;
         }
     }
 }
@@ -1032,20 +1141,45 @@ impl LockFreeSessionManager {
         self.session_cache_misses.fetch_add(1, Ordering::Relaxed);
 
         // Try loading from storage via actor
+        // IMPORTANT: We now differentiate between "not found" and actual storage errors
+        // to prevent data loss from temporary storage issues
         let storage_result: Result<Option<ActiveSession>, String> = match self
             .storage_actor
             .load_session(session_id)
             .await
         {
             Ok(Some(session)) => Ok(Some(session)),
-            Ok(None) => Ok(None), // Session not found is OK
+            Ok(None) => Ok(None), // Session genuinely not found
             Err(e) => {
-                tracing::error!(
-                    "Storage error loading session {}: {}. Treating as not found and creating new session.",
-                    session_id,
-                    e
-                );
-                Ok(None) // Treat storage errors as session not found
+                // Check if this is a transient error or a permanent "not found"
+                let error_lower = e.to_lowercase();
+                if error_lower.contains("not found")
+                    || error_lower.contains("does not exist")
+                    || error_lower.contains("no such")
+                {
+                    // This is a "not found" error, treat as Ok(None)
+                    debug!(
+                        "Session {} not found in storage: {}",
+                        session_id, e
+                    );
+                    Ok(None)
+                } else if error_lower.contains("timeout") {
+                    // Timeout - could be transient, log warning and propagate error
+                    warn!(
+                        "Timeout loading session {} from storage: {}. Will create new session.",
+                        session_id, e
+                    );
+                    // For get_or_create, we create a new session on timeout
+                    // The old session data is preserved in storage and can be recovered
+                    Ok(None)
+                } else {
+                    // Actual storage error - propagate it to prevent silent data loss
+                    error!(
+                        "Storage error loading session {}: {}. Propagating error instead of masking.",
+                        session_id, e
+                    );
+                    Err(format!("Storage error: {}", e))
+                }
             }
         };
 
@@ -1216,11 +1350,31 @@ impl LockFreeSystemMetrics {
 }
 
 impl StorageActorHandle {
-    pub async fn load_session(&self, session_id: Uuid) -> Result<Option<ActiveSession>, String> {
-        tracing::info!(
-            "StorageHandle: Sending LoadSession message for {}",
-            session_id
+    /// Execute an operation with the specified timeout type
+    async fn execute_with_timeout<T, F>(
+        &self,
+        op_type: OperationType,
+        op_name: &str,
+        future: F,
+    ) -> Result<T, String>
+    where
+        F: std::future::Future<Output = Option<Result<T, String>>>,
+    {
+        let timeout = op_type.timeout();
+        debug!(
+            "StorageHandle: {} with {:?} timeout ({}s)",
+            op_name,
+            op_type,
+            timeout.as_secs()
         );
+
+        tokio::time::timeout(timeout, future)
+            .await
+            .map_err(|_| format!("{} timed out after {}s", op_name, timeout.as_secs()))?
+            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+    }
+
+    pub async fn load_session(&self, session_id: Uuid) -> Result<Option<ActiveSession>, String> {
         let (response_tx, mut response_rx) = channel::<Result<Option<ActiveSession>, String>>(1);
 
         self.sender
@@ -1230,18 +1384,17 @@ impl StorageActorHandle {
             })
             .map_err(|_| "Storage actor unavailable".to_string())?;
 
-        tracing::info!(
-            "StorageHandle: Waiting for response with {}s timeout...",
-            self.operation_timeout.as_secs()
-        );
-        tokio::time::timeout(self.operation_timeout, response_rx.recv())
-            .await
-            .map_err(|_| "Storage operation timed out".to_string())?
-            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+        self.execute_with_timeout(
+            OperationType::Fast,
+            &format!("LoadSession {}", session_id),
+            response_rx.recv(),
+        )
+        .await
     }
 
     pub async fn save_session(&self, session: ActiveSession) -> Result<(), String> {
         let (response_tx, mut response_rx) = channel::<Result<(), String>>(1);
+        let session_id = session.id();
 
         self.sender
             .send(StorageMessage::SaveSession {
@@ -1250,10 +1403,12 @@ impl StorageActorHandle {
             })
             .map_err(|_| "Storage actor unavailable".to_string())?;
 
-        tokio::time::timeout(self.operation_timeout, response_rx.recv())
-            .await
-            .map_err(|_| "Storage operation timed out".to_string())?
-            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+        self.execute_with_timeout(
+            OperationType::Medium,
+            &format!("SaveSession {}", session_id),
+            response_rx.recv(),
+        )
+        .await
     }
 
     pub async fn delete_session(&self, session_id: Uuid) -> Result<bool, String> {
@@ -1266,10 +1421,12 @@ impl StorageActorHandle {
             })
             .map_err(|_| "Storage actor unavailable".to_string())?;
 
-        tokio::time::timeout(self.operation_timeout, response_rx.recv())
-            .await
-            .map_err(|_| "Storage operation timed out".to_string())?
-            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+        self.execute_with_timeout(
+            OperationType::Medium,
+            &format!("DeleteSession {}", session_id),
+            response_rx.recv(),
+        )
+        .await
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<Uuid>, String> {
@@ -1279,10 +1436,8 @@ impl StorageActorHandle {
             .send(StorageMessage::ListSessions { response_tx })
             .map_err(|_| "Storage actor unavailable".to_string())?;
 
-        tokio::time::timeout(self.operation_timeout, response_rx.recv())
+        self.execute_with_timeout(OperationType::Slow, "ListSessions", response_rx.recv())
             .await
-            .map_err(|_| "Storage operation timed out".to_string())?
-            .ok_or_else(|| "Storage actor response channel closed".to_string())?
     }
 
     pub async fn save_checkpoint(
@@ -1298,10 +1453,8 @@ impl StorageActorHandle {
             })
             .map_err(|_| "Storage actor unavailable".to_string())?;
 
-        tokio::time::timeout(self.operation_timeout, response_rx.recv())
+        self.execute_with_timeout(OperationType::Medium, "SaveCheckpoint", response_rx.recv())
             .await
-            .map_err(|_| "Storage operation timed out".to_string())?
-            .ok_or_else(|| "Storage actor response channel closed".to_string())?
     }
 
     pub async fn load_checkpoint(
@@ -1318,10 +1471,12 @@ impl StorageActorHandle {
             })
             .map_err(|_| "Storage actor unavailable".to_string())?;
 
-        tokio::time::timeout(self.operation_timeout, response_rx.recv())
-            .await
-            .map_err(|_| "Storage operation timed out".to_string())?
-            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+        self.execute_with_timeout(
+            OperationType::Fast,
+            &format!("LoadCheckpoint {}", checkpoint_id),
+            response_rx.recv(),
+        )
+        .await
     }
 
     pub async fn save_workspace_metadata(
@@ -1343,10 +1498,12 @@ impl StorageActorHandle {
             })
             .map_err(|_| "Storage actor unavailable".to_string())?;
 
-        tokio::time::timeout(self.operation_timeout, response_rx.recv())
-            .await
-            .map_err(|_| "Storage operation timed out".to_string())?
-            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+        self.execute_with_timeout(
+            OperationType::Medium,
+            "SaveWorkspaceMetadata",
+            response_rx.recv(),
+        )
+        .await
     }
 
     pub async fn list_all_workspaces(
@@ -1359,10 +1516,8 @@ impl StorageActorHandle {
             .send(StorageMessage::ListAllWorkspaces { response_tx })
             .map_err(|_| "Storage actor unavailable".to_string())?;
 
-        tokio::time::timeout(self.operation_timeout, response_rx.recv())
+        self.execute_with_timeout(OperationType::Slow, "ListAllWorkspaces", response_rx.recv())
             .await
-            .map_err(|_| "Storage operation timed out".to_string())?
-            .ok_or_else(|| "Storage actor response channel closed".to_string())?
     }
 
     pub async fn delete_workspace(&self, workspace_id: Uuid) -> Result<(), String> {
@@ -1375,10 +1530,12 @@ impl StorageActorHandle {
             })
             .map_err(|_| "Storage actor unavailable".to_string())?;
 
-        tokio::time::timeout(self.operation_timeout, response_rx.recv())
-            .await
-            .map_err(|_| "Storage operation timed out".to_string())?
-            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+        self.execute_with_timeout(
+            OperationType::Medium,
+            &format!("DeleteWorkspace {}", workspace_id),
+            response_rx.recv(),
+        )
+        .await
     }
 
     pub async fn add_session_to_workspace(
@@ -1398,10 +1555,12 @@ impl StorageActorHandle {
             })
             .map_err(|_| "Storage actor unavailable".to_string())?;
 
-        tokio::time::timeout(self.operation_timeout, response_rx.recv())
-            .await
-            .map_err(|_| "Storage operation timed out".to_string())?
-            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+        self.execute_with_timeout(
+            OperationType::Fast,
+            "AddSessionToWorkspace",
+            response_rx.recv(),
+        )
+        .await
     }
 
     pub async fn remove_session_from_workspace(
@@ -1419,10 +1578,12 @@ impl StorageActorHandle {
             })
             .map_err(|_| "Storage actor unavailable".to_string())?;
 
-        tokio::time::timeout(self.operation_timeout, response_rx.recv())
-            .await
-            .map_err(|_| "Storage operation timed out".to_string())?
-            .ok_or_else(|| "Storage actor response channel closed".to_string())?
+        self.execute_with_timeout(
+            OperationType::Fast,
+            "RemoveSessionFromWorkspace",
+            response_rx.recv(),
+        )
+        .await
     }
 }
 
@@ -1455,10 +1616,7 @@ impl StorageActor {
             .await
             .map_err(|_| "Storage actor failed to start".to_string())?;
 
-        Ok(StorageActorHandle {
-            sender,
-            operation_timeout: Duration::from_secs(60),
-        })
+        Ok(StorageActorHandle { sender })
     }
 
     async fn run_async(mut self) {
@@ -1776,13 +1934,47 @@ impl LockFreeConversationMemorySystem {
 
     // Embeddings and Semantic Search Methods
 
-    /// Lazy-initialize content vectorizer on first use
+    /// Lazy-initialize content vectorizer on first use with retry mechanism
     #[cfg(feature = "embeddings")]
     async fn ensure_vectorizer_initialized(&self) -> Result<Arc<ContentVectorizer>, String> {
-        self.content_vectorizer
-            .get_or_try_init(|| async {
-                info!("Lazy-initializing content vectorizer...");
+        // Check if already initialized
+        if let Some(vectorizer) = self.content_vectorizer.get() {
+            return Ok(Arc::clone(vectorizer));
+        }
 
+        // Track initialization attempts for diagnostics
+        let attempt = self
+            .embedding_config_holder
+            .init_attempt_count
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+
+        // Check if we've exceeded max retries
+        if attempt > MAX_VECTORIZER_INIT_RETRIES as u64 + 1 {
+            if let Some(last_error) = self.embedding_config_holder.last_init_error.read().as_ref()
+            {
+                return Err(format!(
+                    "Vectorizer initialization failed after {} attempts. Last error: {}",
+                    attempt - 1,
+                    last_error
+                ));
+            }
+            return Err(format!(
+                "Vectorizer initialization failed after {} attempts",
+                attempt - 1
+            ));
+        }
+
+        info!(
+            "Lazy-initializing content vectorizer (attempt {}/{})...",
+            attempt,
+            MAX_VECTORIZER_INIT_RETRIES + 1
+        );
+
+        // Try to initialize with retry logic
+        let result = self
+            .content_vectorizer
+            .get_or_try_init(|| async {
                 let embedding_config = EmbeddingConfig {
                     model_type: self.embedding_config_holder.model_type,
                     max_batch_size: 32,
@@ -1809,8 +2001,25 @@ impl LockFreeConversationMemorySystem {
                     .map(Arc::new)
                     .map_err(|e| format!("Failed to initialize content vectorizer: {}", e))
             })
-            .await
-            .map(Arc::clone)
+            .await;
+
+        match result {
+            Ok(vectorizer) => {
+                info!("Content vectorizer initialized successfully on attempt {}", attempt);
+                // Clear any previous error
+                *self.embedding_config_holder.last_init_error.write() = None;
+                Ok(Arc::clone(vectorizer))
+            }
+            Err(e) => {
+                // Store the error for diagnostics
+                *self.embedding_config_holder.last_init_error.write() = Some(e.clone());
+                error!(
+                    "Vectorizer initialization failed on attempt {}: {}",
+                    attempt, e
+                );
+                Err(e)
+            }
+        }
     }
 
     /// Lazy-initialize semantic query engine on first use
@@ -1875,67 +2084,92 @@ impl LockFreeConversationMemorySystem {
 
     /// Auto-vectorize only the latest update (incremental vectorization)
     /// This is much more efficient than re-vectorizing the entire session
+    /// Includes retry mechanism for transient failures
     #[cfg(feature = "embeddings")]
     pub async fn auto_vectorize_if_enabled(&self, session_id: Uuid) -> Result<(), String> {
-        if self.config.enable_embeddings && self.config.auto_vectorize_on_update {
-            // Lazy-initialize vectorizer if needed
-            match self.ensure_vectorizer_initialized().await {
-                Ok(vectorizer) => {
-                    // Load session
-                    match self.get_session_internal(session_id).await {
-                        Ok(session_arc) => {
-                            let session = session_arc.load();
+        if !self.config.enable_embeddings || !self.config.auto_vectorize_on_update {
+            return Ok(());
+        }
 
-                            // Vectorize only the latest update (incremental)
-                            match vectorizer.vectorize_latest_update(&session).await {
-                                Ok(count) => {
-                                    info!(
-                                        "Incrementally vectorized {} update(s) for session {}",
-                                        count, session_id
-                                    );
+        // Lazy-initialize vectorizer if needed
+        let vectorizer = match self.ensure_vectorizer_initialized().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("Failed to initialize vectorizer: {}", e);
+                return Ok(()); // Don't fail the main operation
+            }
+        };
 
-                                    // Clear query cache to invalidate stale search results
-                                    if let Err(e) = vectorizer.clear_query_cache().await {
-                                        warn!(
-                                            "Failed to clear query cache after vectorization: {}",
-                                            e
-                                        );
-                                    } else {
-                                        debug!(
-                                            "Query cache cleared after incremental vectorization"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    // Don't fail the main operation if auto-vectorization fails
-                                    warn!(
-                                        "Incremental vectorization failed for session {}: {}",
-                                        session_id, e
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Failed to load session {} for vectorization: {}",
+        // Load session
+        let session_arc = match self.get_session_internal(session_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(
+                    "Failed to load session {} for vectorization: {}",
+                    session_id, e
+                );
+                return Ok(()); // Don't fail the main operation
+            }
+        };
+
+        let session = session_arc.load();
+
+        // Retry loop for vectorization with exponential backoff
+        let mut last_error = None;
+        for attempt in 1..=MAX_VECTORIZATION_RETRIES {
+            match vectorizer.vectorize_latest_update(&session).await {
+                Ok(count) => {
+                    info!(
+                        "Incrementally vectorized {} update(s) for session {} (attempt {})",
+                        count, session_id, attempt
+                    );
+
+                    // Invalidate only this session's cache entries instead of clearing all
+                    // This is handled by the vectorizer internally now
+                    if count > 0 {
+                        if let Err(e) = vectorizer.invalidate_session_cache(session_id).await {
+                            debug!(
+                                "Cache invalidation for session {} (non-critical): {}",
                                 session_id, e
                             );
                         }
                     }
+
+                    return Ok(());
                 }
                 Err(e) => {
-                    warn!("Failed to initialize vectorizer: {}", e);
+                    last_error = Some(e.to_string());
+
+                    if attempt < MAX_VECTORIZATION_RETRIES {
+                        // Calculate exponential backoff delay
+                        let delay_ms = VECTORIZATION_RETRY_DELAY_MS * (1 << (attempt - 1));
+                        debug!(
+                            "Vectorization attempt {} failed for session {}, retrying in {}ms: {}",
+                            attempt, session_id, delay_ms, e
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    }
                 }
             }
         }
-        Ok(())
+
+        // All retries exhausted
+        if let Some(error) = last_error {
+            warn!(
+                "Incremental vectorization failed for session {} after {} retries: {}",
+                session_id, MAX_VECTORIZATION_RETRIES, error
+            );
+        }
+
+        Ok(()) // Don't fail the main operation even after retries exhausted
     }
 
-    /// Vectorize all sessions in the system
+    /// Vectorize all sessions in the system with parallel processing
     /// Returns total number of vectorized items across all sessions and statistics
+    /// Uses a semaphore to limit concurrent vectorization tasks
     #[cfg(feature = "embeddings")]
     pub async fn vectorize_all_sessions(&self) -> Result<(usize, usize, usize), String> {
-        info!("Starting full vectorization of all sessions");
+        info!("Starting full vectorization of all sessions (parallel mode)");
         let start_time = std::time::Instant::now();
 
         // Lazy-initialize vectorizer if needed
@@ -1950,31 +2184,55 @@ impl LockFreeConversationMemorySystem {
             return Ok((0, 0, 0));
         }
 
-        info!("Found {} sessions to vectorize", total_sessions);
+        info!(
+            "Found {} sessions to vectorize (max {} parallel tasks)",
+            total_sessions, MAX_PARALLEL_VECTORIZATION
+        );
 
-        let mut total_vectorized = 0;
-        let mut successful_sessions = 0;
-        let mut failed_sessions = 0;
+        // Shared counters for parallel processing
+        let total_vectorized = Arc::new(AtomicUsize::new(0));
+        let successful_sessions = Arc::new(AtomicUsize::new(0));
+        let failed_sessions = Arc::new(AtomicUsize::new(0));
+        let processed_count = Arc::new(AtomicUsize::new(0));
 
-        // Process each session
-        for (index, session_id) in session_ids.iter().enumerate() {
-            info!(
-                "Vectorizing session {}/{}: {}",
-                index + 1,
-                total_sessions,
-                session_id
-            );
+        // Semaphore to limit concurrency
+        let semaphore = Arc::new(Semaphore::new(MAX_PARALLEL_VECTORIZATION));
 
-            // Load session
-            match self.get_session_internal(*session_id).await {
-                Ok(session_arc) => {
-                    let session = session_arc.load();
+        // Process sessions in parallel with limited concurrency
+        let mut handles = Vec::with_capacity(total_sessions);
+
+        for session_id in session_ids {
+            let vectorizer = Arc::clone(&vectorizer);
+            let semaphore = Arc::clone(&semaphore);
+            let total_vectorized = Arc::clone(&total_vectorized);
+            let successful_sessions = Arc::clone(&successful_sessions);
+            let failed_sessions = Arc::clone(&failed_sessions);
+            let processed_count = Arc::clone(&processed_count);
+
+            // Clone session_arc data we need before spawning
+            let session_data = match self.get_session_internal(session_id).await {
+                Ok(arc) => Some(arc.load().as_ref().clone()),
+                Err(e) => {
+                    failed_sessions.fetch_add(1, Ordering::Relaxed);
+                    let count = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    warn!(
+                        "[{}/{}] Failed to load session {}: {}",
+                        count, total_sessions, session_id, e
+                    );
+                    None
+                }
+            };
+
+            if let Some(session) = session_data {
+                let handle = tokio::spawn(async move {
+                    // Acquire semaphore permit
+                    let _permit = semaphore.acquire().await.expect("Semaphore closed");
 
                     // Check if session already has embeddings
-                    let already_vectorized = vectorizer.is_session_vectorized(*session_id);
+                    let already_vectorized = vectorizer.is_session_vectorized(session_id);
                     if already_vectorized {
-                        let existing_count = vectorizer.count_session_embeddings(*session_id);
-                        info!(
+                        let existing_count = vectorizer.count_session_embeddings(session_id);
+                        debug!(
                             "Session {} already has {} embeddings, re-vectorizing...",
                             session_id, existing_count
                         );
@@ -1983,39 +2241,32 @@ impl LockFreeConversationMemorySystem {
                     // Vectorize the session
                     match vectorizer.vectorize_session(&session).await {
                         Ok(count) => {
-                            total_vectorized += count;
-                            successful_sessions += 1;
+                            total_vectorized.fetch_add(count, Ordering::Relaxed);
+                            successful_sessions.fetch_add(1, Ordering::Relaxed);
+                            let processed = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
                             info!(
-                                "Successfully vectorized {} items for session {} ({}/{} complete)",
-                                count,
-                                session_id,
-                                successful_sessions,
-                                total_sessions
+                                "[{}/{}] Vectorized {} items for session {}",
+                                processed, total_sessions, count, session_id
                             );
                         }
                         Err(e) => {
-                            failed_sessions += 1;
+                            failed_sessions.fetch_add(1, Ordering::Relaxed);
+                            let processed = processed_count.fetch_add(1, Ordering::Relaxed) + 1;
                             warn!(
-                                "Failed to vectorize session {} ({}/{}): {}",
-                                session_id,
-                                index + 1,
-                                total_sessions,
-                                e
+                                "[{}/{}] Failed to vectorize session {}: {}",
+                                processed, total_sessions, session_id, e
                             );
                         }
                     }
-                }
-                Err(e) => {
-                    failed_sessions += 1;
-                    warn!(
-                        "Failed to load session {} ({}/{}): {}",
-                        session_id,
-                        index + 1,
-                        total_sessions,
-                        e
-                    );
-                }
+                });
+
+                handles.push(handle);
             }
+        }
+
+        // Wait for all tasks to complete
+        for handle in handles {
+            let _ = handle.await;
         }
 
         // Clear query cache after bulk vectorization
@@ -2027,15 +2278,19 @@ impl LockFreeConversationMemorySystem {
         }
 
         let elapsed = start_time.elapsed();
+        let total = total_vectorized.load(Ordering::Relaxed);
+        let success = successful_sessions.load(Ordering::Relaxed);
+        let failed = failed_sessions.load(Ordering::Relaxed);
+
         info!(
             "Bulk vectorization complete in {:.2}s: {} total items across {} successful sessions ({} failed)",
             elapsed.as_secs_f64(),
-            total_vectorized,
-            successful_sessions,
-            failed_sessions
+            total,
+            success,
+            failed
         );
 
-        Ok((total_vectorized, successful_sessions, failed_sessions))
+        Ok((total, success, failed))
     }
 
     /// Perform semantic search across all sessions
