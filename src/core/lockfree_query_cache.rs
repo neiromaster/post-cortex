@@ -121,20 +121,37 @@ impl LockFreeCachedQuery {
         Utc::now() - self.cached_at > ttl_duration
     }
 
-    /// Update access statistics (lock-free)
+    /// Update access statistics (lock-free with CAS)
     pub fn mark_accessed(&self) {
-        let now = Utc::now().timestamp() as u64;
-        self.last_accessed.store(now, Ordering::Relaxed);
-        let count = self.access_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let now = Utc::now();
+        let now_timestamp = now.timestamp() as u64;
+        self.last_accessed.store(now_timestamp, Ordering::Relaxed);
+        self.access_count.fetch_add(1, Ordering::Relaxed);
 
-        // Update efficiency score based on recency and frequency
-        let hours_since_cached = (Utc::now() - self.cached_at).num_hours().max(1) as f32;
+        // Update efficiency score using CAS loop for atomicity
+        // Reuse `now` to avoid double syscall
+        let hours_since_cached = (now - self.cached_at).num_hours().max(1) as f32;
         let recency_factor = 1.0 / (1.0 + hours_since_cached / 24.0); // Decay over days
-        let frequency_factor = (count as f32).ln().max(1.0);
 
-        let score = recency_factor * frequency_factor;
-        self.efficiency_score_bits
-            .store(score.to_bits() as u64, Ordering::Relaxed);
+        loop {
+            let old_bits = self.efficiency_score_bits.load(Ordering::Relaxed);
+            let count = self.access_count.load(Ordering::Relaxed);
+            let frequency_factor = (count as f32).ln().max(1.0);
+            let score = recency_factor * frequency_factor;
+
+            if self
+                .efficiency_score_bits
+                .compare_exchange_weak(
+                    old_bits,
+                    score.to_bits() as u64,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                break;
+            }
+        }
     }
 
     /// Get efficiency score (lock-free)
@@ -214,16 +231,34 @@ impl LockFreeQueryCacheStats {
         }
     }
 
-    /// Record a cache hit (lock-free)
+    /// Record a cache hit (lock-free with CAS)
     pub fn record_hit(&self, similarity: f32) {
-        let hits = self.cache_hits.fetch_add(1, Ordering::Relaxed) + 1;
+        self.cache_hits.fetch_add(1, Ordering::Relaxed);
 
-        // Update average hit similarity
-        let current_avg_bits = self.avg_hit_similarity_bits.load(Ordering::Relaxed);
-        let current_avg = f32::from_bits(current_avg_bits as u32);
-        let new_avg = ((current_avg * (hits as f32 - 1.0)) + similarity) / hits as f32;
-        self.avg_hit_similarity_bits
-            .store(new_avg.to_bits() as u64, Ordering::Relaxed);
+        // Update average hit similarity using CAS loop for atomicity
+        loop {
+            let old_bits = self.avg_hit_similarity_bits.load(Ordering::Relaxed);
+            let hits = self.cache_hits.load(Ordering::Relaxed);
+            let current_avg = f32::from_bits(old_bits as u32);
+            let new_avg = if hits == 1 {
+                similarity
+            } else {
+                ((current_avg * (hits as f32 - 1.0)) + similarity) / hits as f32
+            };
+
+            if self
+                .avg_hit_similarity_bits
+                .compare_exchange_weak(
+                    old_bits,
+                    new_avg.to_bits() as u64,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                break;
+            }
+        }
     }
 
     /// Record a cache miss (lock-free)
@@ -505,13 +540,16 @@ impl LockFreeQueryCache {
         }
 
         if let Some(id) = worst_id {
-            self.cache.remove(&id);
-            self.stats.evicted_entries.fetch_add(1, Ordering::Relaxed);
+            // Only increment counter if we actually removed the entry
+            // (another thread may have already removed it)
+            if self.cache.remove(&id).is_some() {
+                self.stats.evicted_entries.fetch_add(1, Ordering::Relaxed);
 
-            debug!(
-                "Evicted cache entry with efficiency score: {:.3}",
-                worst_score
-            );
+                debug!(
+                    "Evicted cache entry with efficiency score: {:.3}",
+                    worst_score
+                );
+            }
         }
     }
 
