@@ -77,7 +77,7 @@ pub struct EntityRelationship {
     pub context: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RelationType {
     RequiredBy,    // A is required by B
     LeadsTo,       // A leads to B

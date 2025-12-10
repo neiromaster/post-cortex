@@ -23,16 +23,17 @@ use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::visit::EdgeRef;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use tracing::warn;
 
 /// Enhanced entity graph using petgraph for efficient relationship operations
 #[derive(Clone, Debug, Serialize)]
 pub struct SimpleEntityGraph {
-    /// Entity metadata storage - keeps original functionality
-    pub entities: HashMap<String, EntityData>,
+    /// Entity metadata storage - uses BTreeMap for deterministic JSON serialization
+    pub entities: BTreeMap<String, EntityData>,
 
-    /// Entity mentions tracking - keeps original functionality
-    pub entity_mentions: HashMap<String, Vec<uuid::Uuid>>,
+    /// Entity mentions tracking - uses BTreeMap for deterministic JSON serialization
+    pub entity_mentions: BTreeMap<String, Vec<uuid::Uuid>>,
 
     /// Petgraph directed graph for relationships
     #[serde(with = "petgraph_serde")]
@@ -84,10 +85,11 @@ mod petgraph_serde {
             .collect();
 
         // Sort edges for determinism (by source, then target, then relation type)
+        // RelationType now implements Ord, so we can compare directly
         edges.sort_by(|a, b| {
             a.0.cmp(&b.0)
                 .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| format!("{:?}", a.2).cmp(&format!("{:?}", b.2)))
+                .then_with(|| a.2.cmp(&b.2))
         });
 
         let data = SerializableGraphData { nodes, edges };
@@ -139,8 +141,8 @@ impl<'de> Deserialize<'de> for SimpleEntityGraph {
     {
         #[derive(Deserialize)]
         struct SimpleEntityGraphData {
-            entities: HashMap<String, EntityData>,
-            entity_mentions: HashMap<String, Vec<uuid::Uuid>>,
+            entities: BTreeMap<String, EntityData>,
+            entity_mentions: BTreeMap<String, Vec<uuid::Uuid>>,
             #[serde(with = "petgraph_serde")]
             graph: DiGraph<String, RelationType>,
         }
@@ -177,8 +179,8 @@ impl Default for SimpleEntityGraph {
 impl SimpleEntityGraph {
     pub fn new() -> Self {
         Self {
-            entities: HashMap::new(),
-            entity_mentions: HashMap::new(),
+            entities: BTreeMap::new(),
+            entity_mentions: BTreeMap::new(),
             graph: DiGraph::new(),
             entity_to_node: HashMap::new(),
             node_to_entity: HashMap::new(),
@@ -295,13 +297,17 @@ impl SimpleEntityGraph {
     }
 
     /// Find related entities - now O(degree) instead of O(n)!
+    /// Uses BTreeSet for automatic sorting, avoiding explicit sort() call
     pub fn find_related_entities(&self, entity_name: &str) -> Vec<String> {
+        use std::collections::BTreeSet;
+
         let node = match self.entity_to_node.get(entity_name) {
             Some(&node) => node,
             None => return Vec::new(),
         };
 
-        let mut related = HashSet::new();
+        // BTreeSet maintains sorted order automatically
+        let mut related = BTreeSet::new();
 
         // Get outgoing neighbors
         for edge in self.graph.edges_directed(node, Direction::Outgoing) {
@@ -317,23 +323,26 @@ impl SimpleEntityGraph {
             }
         }
 
-        let mut result: Vec<String> = related.into_iter().collect();
-        result.sort();
-        result
+        // BTreeSet iterator is already sorted
+        related.into_iter().collect()
     }
 
     /// Find related entities by specific relation type - also now O(degree) instead of O(n)
+    /// Uses BTreeSet for automatic sorting, avoiding explicit sort() call
     pub fn find_related_entities_by_type(
         &self,
         entity_name: &str,
         relation_type: &RelationType,
     ) -> Vec<String> {
+        use std::collections::BTreeSet;
+
         let node = match self.entity_to_node.get(entity_name) {
             Some(&node) => node,
             None => return Vec::new(),
         };
 
-        let mut related = HashSet::new();
+        // BTreeSet maintains sorted order automatically
+        let mut related = BTreeSet::new();
 
         // Check outgoing edges
         for edge in self.graph.edges_directed(node, Direction::Outgoing) {
@@ -353,9 +362,8 @@ impl SimpleEntityGraph {
             }
         }
 
-        let mut result: Vec<String> = related.into_iter().collect();
-        result.sort();
-        result
+        // BTreeSet iterator is already sorted
+        related.into_iter().collect()
     }
 
     /// Get entities by type - unchanged from original
@@ -476,9 +484,11 @@ impl SimpleEntityGraph {
             None => return Vec::new(),
         };
 
-        let mut visited = HashSet::new();
-        let mut trace = Vec::new();
-        let mut queue = VecDeque::new();
+        // Pre-allocate with reasonable capacity estimate
+        let estimated_capacity = self.graph.edge_count().min(max_depth * 10);
+        let mut visited = HashSet::with_capacity(estimated_capacity);
+        let mut trace = Vec::with_capacity(estimated_capacity);
+        let mut queue = VecDeque::with_capacity(estimated_capacity);
 
         queue.push_back((start_node, 0));
         visited.insert(start_node);
@@ -535,7 +545,7 @@ impl SimpleEntityGraph {
     pub fn get_entity_network(&self, center_entity: &str, max_depth: usize) -> EntityNetwork {
         let mut network = EntityNetwork {
             center: center_entity.to_string(),
-            entities: HashMap::new(),
+            entities: BTreeMap::new(),
             relationships: Vec::new(),
         };
 
@@ -546,6 +556,8 @@ impl SimpleEntityGraph {
 
         let mut visited = HashSet::new();
         let mut queue = VecDeque::new();
+        // O(1) duplicate check for relationships instead of O(n) iter().any()
+        let mut seen_relationships: HashSet<(String, String, RelationType)> = HashSet::new();
 
         // Add center entity
         if let Some(entity) = self.entities.get(center_entity) {
@@ -578,19 +590,22 @@ impl SimpleEntityGraph {
                     }
                 }
 
-                // Add relationship to network
+                // Add relationship to network (with O(1) duplicate check)
                 if let (Some(from_name), Some(to_name)) = (
                     self.node_to_entity.get(&current_node),
                     self.node_to_entity.get(&target_node),
                 ) && network.entities.contains_key(from_name)
                     && network.entities.contains_key(to_name)
                 {
-                    network.relationships.push(EntityRelationship {
-                        from_entity: from_name.clone(),
-                        to_entity: to_name.clone(),
-                        relation_type: edge.weight().clone(),
-                        context: "network_traversal".to_string(),
-                    });
+                    let rel_key = (from_name.clone(), to_name.clone(), edge.weight().clone());
+                    if seen_relationships.insert(rel_key) {
+                        network.relationships.push(EntityRelationship {
+                            from_entity: from_name.clone(),
+                            to_entity: to_name.clone(),
+                            relation_type: edge.weight().clone(),
+                            context: "network_traversal".to_string(),
+                        });
+                    }
                 }
             }
 
@@ -611,21 +626,15 @@ impl SimpleEntityGraph {
                     }
                 }
 
-                // Add relationship to network (avoid duplicates)
+                // Add relationship to network (with O(1) duplicate check)
                 if let (Some(from_name), Some(to_name)) = (
                     self.node_to_entity.get(&source_node),
                     self.node_to_entity.get(&current_node),
                 ) && network.entities.contains_key(from_name)
                     && network.entities.contains_key(to_name)
                 {
-                    // Check if relationship already exists to avoid duplicates
-                    let relationship_exists = network.relationships.iter().any(|rel| {
-                        rel.from_entity == *from_name
-                            && rel.to_entity == *to_name
-                            && rel.relation_type == *edge.weight()
-                    });
-
-                    if !relationship_exists {
+                    let rel_key = (from_name.clone(), to_name.clone(), edge.weight().clone());
+                    if seen_relationships.insert(rel_key) {
                         network.relationships.push(EntityRelationship {
                             from_entity: from_name.clone(),
                             to_entity: to_name.clone(),
@@ -642,16 +651,24 @@ impl SimpleEntityGraph {
 
     /// Analyze entity importance with graph metrics
     pub fn analyze_entity_importance(&self) -> Vec<EntityAnalysis> {
-        let mut analyses = Vec::new();
+        // Pre-allocate capacity to avoid reallocations
+        let mut analyses = Vec::with_capacity(self.entities.len());
 
         for (name, entity) in &self.entities {
             let node = self.entity_to_node.get(name);
-            let relationship_count = node
-                .map(|&n| {
+            let relationship_count = match node {
+                Some(&n) => {
                     self.graph.edges_directed(n, Direction::Outgoing).count()
                         + self.graph.edges_directed(n, Direction::Incoming).count()
-                })
-                .unwrap_or(0);
+                }
+                None => {
+                    warn!(
+                        "Entity '{}' exists in entities map but has no graph node - possible data inconsistency",
+                        name
+                    );
+                    0
+                }
+            };
 
             let mentions_in_updates = self
                 .entity_mentions
@@ -683,21 +700,28 @@ impl SimpleEntityGraph {
 
     /// New petgraph-specific methods
     ///
-    /// Find shortest path between two entities using Dijkstra
+    /// Find shortest path between two entities using A* algorithm
+    /// Returns the complete path including start and end nodes
     pub fn find_shortest_path(&self, from: &str, to: &str) -> Option<Vec<String>> {
-        use petgraph::algo::dijkstra;
+        use petgraph::algo::astar;
 
         let from_node = self.entity_to_node.get(from)?;
         let to_node = self.entity_to_node.get(to)?;
 
-        let path_map = dijkstra(&self.graph, *from_node, Some(*to_node), |_| 1);
+        // Use A* with uniform edge cost (1) and zero heuristic (becomes Dijkstra)
+        let result = astar(
+            &self.graph,
+            *from_node,
+            |node| node == *to_node,
+            |_| 1, // All edges have cost 1
+            |_| 0, // No heuristic (equivalent to Dijkstra)
+        );
 
-        if path_map.contains_key(to_node) {
-            // Reconstruct path (simplified - real implementation would track predecessors)
-            Some(vec![from.to_string(), to.to_string()])
-        } else {
-            None
-        }
+        result.map(|(_, path)| {
+            path.into_iter()
+                .filter_map(|node| self.node_to_entity.get(&node).cloned())
+                .collect()
+        })
     }
 
     /// Get graph statistics
@@ -733,11 +757,11 @@ impl SimpleEntityGraph {
     }
 }
 
-/// Entity network structure - unchanged for compatibility
+/// Entity network structure - uses BTreeMap for deterministic serialization
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EntityNetwork {
     pub center: String,
-    pub entities: HashMap<String, EntityData>,
+    pub entities: BTreeMap<String, EntityData>,
     pub relationships: Vec<EntityRelationship>,
 }
 
@@ -1201,5 +1225,313 @@ mod tests {
         // Verify connected entities maintain their relationship
         let connected1_related = deserialized.find_related_entities("connected1");
         assert!(connected1_related.contains(&"connected2".to_string()));
+    }
+
+    // ==================== NEW TESTS FOR RECENT FIXES ====================
+
+    #[test]
+    fn test_shortest_path_returns_full_path() {
+        // Create a longer chain: a -> b -> c -> d
+        let mut graph = SimpleEntityGraph::new();
+
+        for entity in ["a", "b", "c", "d"] {
+            graph.add_or_update_entity(entity.to_string(), EntityType::Concept, Utc::now(), "");
+        }
+
+        graph.add_relationship(EntityRelationship {
+            from_entity: "a".to_string(),
+            to_entity: "b".to_string(),
+            relation_type: RelationType::LeadsTo,
+            context: "".to_string(),
+        });
+        graph.add_relationship(EntityRelationship {
+            from_entity: "b".to_string(),
+            to_entity: "c".to_string(),
+            relation_type: RelationType::LeadsTo,
+            context: "".to_string(),
+        });
+        graph.add_relationship(EntityRelationship {
+            from_entity: "c".to_string(),
+            to_entity: "d".to_string(),
+            relation_type: RelationType::LeadsTo,
+            context: "".to_string(),
+        });
+
+        let path = graph.find_shortest_path("a", "d");
+        assert!(path.is_some(), "Path should exist from a to d");
+
+        let path = path.unwrap();
+        // Should return full path: [a, b, c, d], not just [a, d]
+        assert_eq!(path.len(), 4, "Path should have 4 nodes: a -> b -> c -> d");
+        assert_eq!(path[0], "a");
+        assert_eq!(path[1], "b");
+        assert_eq!(path[2], "c");
+        assert_eq!(path[3], "d");
+    }
+
+    #[test]
+    fn test_shortest_path_finds_shortest() {
+        // Create graph with two paths: a -> b -> d (length 2) and a -> c -> e -> d (length 3)
+        let mut graph = SimpleEntityGraph::new();
+
+        for entity in ["a", "b", "c", "d", "e"] {
+            graph.add_or_update_entity(entity.to_string(), EntityType::Concept, Utc::now(), "");
+        }
+
+        // Short path: a -> b -> d
+        graph.add_relationship(EntityRelationship {
+            from_entity: "a".to_string(),
+            to_entity: "b".to_string(),
+            relation_type: RelationType::LeadsTo,
+            context: "".to_string(),
+        });
+        graph.add_relationship(EntityRelationship {
+            from_entity: "b".to_string(),
+            to_entity: "d".to_string(),
+            relation_type: RelationType::LeadsTo,
+            context: "".to_string(),
+        });
+
+        // Long path: a -> c -> e -> d
+        graph.add_relationship(EntityRelationship {
+            from_entity: "a".to_string(),
+            to_entity: "c".to_string(),
+            relation_type: RelationType::LeadsTo,
+            context: "".to_string(),
+        });
+        graph.add_relationship(EntityRelationship {
+            from_entity: "c".to_string(),
+            to_entity: "e".to_string(),
+            relation_type: RelationType::LeadsTo,
+            context: "".to_string(),
+        });
+        graph.add_relationship(EntityRelationship {
+            from_entity: "e".to_string(),
+            to_entity: "d".to_string(),
+            relation_type: RelationType::LeadsTo,
+            context: "".to_string(),
+        });
+
+        let path = graph.find_shortest_path("a", "d").unwrap();
+        // Should find the shorter path (length 3: a, b, d)
+        assert_eq!(path.len(), 3, "Should find shortest path with 3 nodes");
+        assert_eq!(path[0], "a");
+        assert_eq!(path[2], "d");
+    }
+
+    #[test]
+    fn test_relation_type_ordering() {
+        // Verify RelationType implements Ord correctly
+        assert!(RelationType::RequiredBy < RelationType::LeadsTo);
+        assert!(RelationType::LeadsTo < RelationType::RelatedTo);
+        assert!(RelationType::RelatedTo < RelationType::ConflictsWith);
+        assert!(RelationType::ConflictsWith < RelationType::DependsOn);
+        assert!(RelationType::DependsOn < RelationType::Implements);
+        assert!(RelationType::Implements < RelationType::CausedBy);
+        assert!(RelationType::CausedBy < RelationType::Solves);
+
+        // Test that sorting works
+        let mut types = vec![
+            RelationType::Solves,
+            RelationType::RequiredBy,
+            RelationType::LeadsTo,
+        ];
+        types.sort();
+        assert_eq!(types[0], RelationType::RequiredBy);
+        assert_eq!(types[1], RelationType::LeadsTo);
+        assert_eq!(types[2], RelationType::Solves);
+    }
+
+    #[test]
+    fn test_serialization_determinism() {
+        // Verify that serializing the same graph twice produces identical JSON
+        // With BTreeMap, the entire JSON should be deterministic
+        let mut graph = SimpleEntityGraph::new();
+
+        // Add entities in non-alphabetical order
+        for entity in ["zebra", "apple", "mango", "banana"] {
+            graph.add_or_update_entity(entity.to_string(), EntityType::Concept, Utc::now(), "");
+        }
+
+        // Add relationships
+        graph.add_relationship(EntityRelationship {
+            from_entity: "zebra".to_string(),
+            to_entity: "apple".to_string(),
+            relation_type: RelationType::RelatedTo,
+            context: "".to_string(),
+        });
+        graph.add_relationship(EntityRelationship {
+            from_entity: "apple".to_string(),
+            to_entity: "mango".to_string(),
+            relation_type: RelationType::LeadsTo,
+            context: "".to_string(),
+        });
+
+        // Serialize twice - should be identical with BTreeMap
+        let json1 = serde_json::to_string(&graph).unwrap();
+        let json2 = serde_json::to_string(&graph).unwrap();
+        assert_eq!(json1, json2, "Serialization should be deterministic");
+
+        // Parse and verify structure
+        let parsed: serde_json::Value = serde_json::from_str(&json1).unwrap();
+
+        // Verify entities are sorted alphabetically (BTreeMap)
+        let entities_keys: Vec<&str> = parsed["entities"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        assert_eq!(entities_keys, vec!["apple", "banana", "mango", "zebra"]);
+
+        // Verify graph nodes are sorted alphabetically
+        let nodes = parsed["graph"]["nodes"].as_array().unwrap();
+        assert_eq!(nodes[0], "apple");
+        assert_eq!(nodes[1], "banana");
+        assert_eq!(nodes[2], "mango");
+        assert_eq!(nodes[3], "zebra");
+
+        // Verify edges are sorted (by from_entity, then to_entity)
+        let edges = parsed["graph"]["edges"].as_array().unwrap();
+        assert_eq!(edges[0][0], "apple"); // apple -> mango comes before zebra -> apple
+        assert_eq!(edges[1][0], "zebra");
+
+        // Deserialize and re-serialize - should produce identical JSON
+        let deserialized: SimpleEntityGraph = serde_json::from_str(&json1).unwrap();
+        let json3 = serde_json::to_string(&deserialized).unwrap();
+        assert_eq!(
+            json1, json3,
+            "Re-serialization should produce identical JSON"
+        );
+
+        // Verify functionality preserved
+        assert_eq!(deserialized.entities.len(), 4);
+        assert_eq!(deserialized.get_graph_stats().edge_count, 2);
+
+        // Verify relationships work after deserialization
+        let related = deserialized.find_related_entities("apple");
+        assert!(related.contains(&"zebra".to_string()));
+        assert!(related.contains(&"mango".to_string()));
+    }
+
+    #[test]
+    fn test_find_related_entities_returns_sorted() {
+        let mut graph = SimpleEntityGraph::new();
+
+        // Add entities
+        for entity in ["center", "zebra", "apple", "mango", "banana"] {
+            graph.add_or_update_entity(entity.to_string(), EntityType::Concept, Utc::now(), "");
+        }
+
+        // Connect all to center (in non-alphabetical order)
+        for entity in ["zebra", "apple", "mango", "banana"] {
+            graph.add_relationship(EntityRelationship {
+                from_entity: "center".to_string(),
+                to_entity: entity.to_string(),
+                relation_type: RelationType::RelatedTo,
+                context: "".to_string(),
+            });
+        }
+
+        let related = graph.find_related_entities("center");
+
+        // Verify results are sorted alphabetically
+        assert_eq!(related.len(), 4);
+        assert_eq!(related[0], "apple");
+        assert_eq!(related[1], "banana");
+        assert_eq!(related[2], "mango");
+        assert_eq!(related[3], "zebra");
+    }
+
+    #[test]
+    fn test_entity_network_no_duplicate_relationships() {
+        let mut graph = SimpleEntityGraph::new();
+
+        // Create a small network
+        for entity in ["a", "b", "c"] {
+            graph.add_or_update_entity(entity.to_string(), EntityType::Concept, Utc::now(), "");
+        }
+
+        // Create bidirectional relationships (could cause duplicates)
+        graph.add_relationship(EntityRelationship {
+            from_entity: "a".to_string(),
+            to_entity: "b".to_string(),
+            relation_type: RelationType::RelatedTo,
+            context: "".to_string(),
+        });
+        graph.add_relationship(EntityRelationship {
+            from_entity: "b".to_string(),
+            to_entity: "c".to_string(),
+            relation_type: RelationType::RelatedTo,
+            context: "".to_string(),
+        });
+        graph.add_relationship(EntityRelationship {
+            from_entity: "c".to_string(),
+            to_entity: "a".to_string(),
+            relation_type: RelationType::RelatedTo,
+            context: "".to_string(),
+        });
+
+        let network = graph.get_entity_network("a", 3);
+
+        // Count occurrences of each relationship
+        let mut rel_counts: std::collections::HashMap<(String, String, RelationType), usize> =
+            std::collections::HashMap::new();
+        for rel in &network.relationships {
+            let key = (
+                rel.from_entity.clone(),
+                rel.to_entity.clone(),
+                rel.relation_type.clone(),
+            );
+            *rel_counts.entry(key).or_insert(0) += 1;
+        }
+
+        // Verify no duplicates (all counts should be 1)
+        for ((from, to, _), count) in rel_counts {
+            assert_eq!(
+                count, 1,
+                "Relationship {}->{} should appear exactly once, found {}",
+                from, to, count
+            );
+        }
+    }
+
+    #[test]
+    fn test_analyze_entity_importance_capacity_preallocation() {
+        // Test that analyze_entity_importance works correctly with many entities
+        let mut graph = SimpleEntityGraph::new();
+
+        // Add many entities to test capacity pre-allocation
+        for i in 0..100 {
+            graph.add_or_update_entity(
+                format!("entity_{}", i),
+                EntityType::Concept,
+                Utc::now(),
+                "",
+            );
+        }
+
+        // Add some relationships
+        for i in 0..50 {
+            graph.add_relationship(EntityRelationship {
+                from_entity: format!("entity_{}", i),
+                to_entity: format!("entity_{}", i + 50),
+                relation_type: RelationType::RelatedTo,
+                context: "".to_string(),
+            });
+        }
+
+        let analysis = graph.analyze_entity_importance();
+
+        // Should have all 100 entities analyzed
+        assert_eq!(analysis.len(), 100);
+
+        // Verify it's sorted by importance (descending)
+        for i in 1..analysis.len() {
+            assert!(
+                analysis[i - 1].importance_score >= analysis[i].importance_score,
+                "Analysis should be sorted by importance descending"
+            );
+        }
     }
 }
