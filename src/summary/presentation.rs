@@ -382,7 +382,7 @@ mod tests {
         };
 
         let summary = DecisionSummary::from_decision_item(&decision);
-        matches!(summary.confidence_level, ConfidenceLevel::High);
+        assert!(matches!(summary.confidence_level, ConfidenceLevel::High));
     }
 
     #[test]
@@ -398,7 +398,7 @@ mod tests {
 
         let summary = QuestionSummary::from_question_item(&question);
         assert!(summary.days_open >= 10);
-        matches!(summary.urgency_level, UrgencyLevel::High);
+        assert!(matches!(summary.urgency_level, UrgencyLevel::High));
     }
 
     #[test]
@@ -412,6 +412,6 @@ mod tests {
             .with_references(2, 5, 1)
             .build();
 
-        matches!(stats.session_duration, SessionDuration::Medium);
+        assert!(matches!(stats.session_duration, SessionDuration::Medium));
     }
 }

@@ -1895,12 +1895,26 @@ pub async fn get_structured_summary(
         .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?;
 
     let session = session_arc.load();
-    let generator = SummaryGenerator::new();
 
     // Build summary options
     use crate::summary::SummaryOptions;
     let user_requested_compact = compact.unwrap_or(false);
-    let options = if user_requested_compact {
+    const MAX_TOKENS: usize = 50_000;
+
+    // Pre-estimate size to avoid double generation
+    let (estimated_tokens, should_compact) =
+        SummaryGenerator::estimate_summary_size(&session, MAX_TOKENS);
+    let auto_compacted = !user_requested_compact && should_compact;
+
+    if auto_compacted {
+        log::info!(
+            "Pre-estimated {} tokens > {} max. Using compact mode directly.",
+            estimated_tokens,
+            MAX_TOKENS
+        );
+    }
+
+    let options = if user_requested_compact || auto_compacted {
         SummaryOptions::compact()
     } else {
         SummaryOptions {
@@ -1913,40 +1927,7 @@ pub async fn get_structured_summary(
         }
     };
 
-    let mut summary = generator.generate_structured_summary_filtered(&session, &options);
-    let mut auto_compacted = false;
-
-    // Auto-compact detection: if summary > 25K tokens, enable compact mode
-    if !user_requested_compact {
-        // Create a test MCPToolResult to estimate full response size
-        let test_message = format!(
-            "Generated structured summary (decisions: {}, entities: {}, questions: {}, concepts: {})",
-            summary.key_decisions.len(),
-            summary.entity_summaries.len(),
-            summary.open_questions.len(),
-            summary.key_concepts.len()
-        );
-        let test_result =
-            MCPToolResult::success(test_message.clone(), Some(serde_json::to_value(&summary)?));
-        let full_json = serde_json::to_string(&test_result)?;
-
-        // Conservative estimate: 1 token ≈ 3 characters for JSON (includes wrapper overhead)
-        let estimated_tokens = full_json.len() / 3;
-        const MAX_TOKENS: usize = 50_000; // Increased from 25_000 to reduce auto-compaction
-
-        if estimated_tokens > MAX_TOKENS {
-            log::warn!(
-                "Summary too large ({} estimated tokens > {} max, {} chars). Auto-enabling compact mode.",
-                estimated_tokens,
-                MAX_TOKENS,
-                full_json.len()
-            );
-            // Re-generate with compact mode
-            let compact_options = SummaryOptions::compact();
-            summary = generator.generate_structured_summary_filtered(&session, &compact_options);
-            auto_compacted = true;
-        }
-    }
+    let summary = SummaryGenerator::generate_structured_summary_filtered(&session, &options);
 
     let message = if user_requested_compact {
         "Generated compact structured summary".to_string()
@@ -1986,8 +1967,7 @@ pub async fn get_key_decisions(session_id: String) -> Result<MCPToolResult> {
         .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?;
 
     let session = session_arc.load();
-    let generator = SummaryGenerator::new();
-    let decisions = generator.extract_decision_timeline(&session);
+    let decisions = SummaryGenerator::extract_decision_timeline(&session);
 
     Ok(MCPToolResult::success(
         format!("Found {} key decisions", decisions.len()),
@@ -2007,8 +1987,7 @@ pub async fn get_key_insights(session_id: String, limit: Option<usize>) -> Resul
         .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?;
 
     let session = session_arc.load();
-    let generator = SummaryGenerator::new();
-    let insights = generator.extract_key_insights(&session, limit.unwrap_or(5));
+    let insights = SummaryGenerator::extract_key_insights(&session, limit.unwrap_or(5));
 
     Ok(MCPToolResult::success(
         format!("Found {} key insights", insights.len()),
@@ -2181,12 +2160,12 @@ pub async fn get_session_statistics(session_id: String) -> Result<MCPToolResult>
         .map_err(|e| anyhow::anyhow!("Failed to load session: {}", e))?;
 
     let session = session_arc.load();
-    let generator = SummaryGenerator::new();
-    let summary = generator.generate_structured_summary(&session);
+    // Use lightweight stats calculation instead of full summary generation
+    let stats = SummaryGenerator::calculate_session_stats(&session);
 
     Ok(MCPToolResult::success(
         "Generated session statistics".to_string(),
-        Some(serde_json::to_value(summary.session_stats)?),
+        Some(serde_json::to_value(stats)?),
     ))
 }
 

@@ -72,45 +72,38 @@ impl SummaryOptions {
 }
 
 /// Main summary generator that uses existing structured data
+/// All methods are associated functions (no state needed)
 pub struct SummaryGenerator;
 
 impl SummaryGenerator {
-    pub fn new() -> Self {
-        Self
-    }
-
     /// Generate structured summary from existing ActiveSession data
-    pub fn generate_structured_summary(&self, session: &ActiveSession) -> StructuredSummaryView {
-        self.generate_structured_summary_filtered(session, &SummaryOptions::default())
+    pub fn generate_structured_summary(session: &ActiveSession) -> StructuredSummaryView {
+        Self::generate_structured_summary_filtered(session, &SummaryOptions::default())
     }
 
     /// Generate filtered/limited structured summary
     pub fn generate_structured_summary_filtered(
-        &self,
         session: &ActiveSession,
         options: &SummaryOptions,
     ) -> StructuredSummaryView {
-        let session_stats = self.calculate_session_stats(session);
+        let session_stats = Self::calculate_session_stats(session);
 
-        // Get entities with optional limit
+        // Get entity limit for both summaries and names
         let entity_limit = if options.compact {
             10
         } else {
             options.entities_limit.unwrap_or(20)
         };
-        let important_entities_data = session
-            .entity_graph
-            .get_most_important_entities(entity_limit);
-        let important_entities: Vec<String> = important_entities_data
-            .iter()
-            .map(|e| e.name.clone())
-            .collect();
 
-        // Get all entity analysis and filter/limit
+        // Single pass: get entity analysis, truncate, then derive names
         let mut entity_analysis = session.entity_graph.analyze_entity_importance();
-        if let Some(limit) = options.entities_limit {
-            entity_analysis.truncate(limit);
-        }
+        entity_analysis.truncate(entity_limit);
+
+        // Derive important_entities from entity_analysis (already sorted by importance)
+        let important_entities: Vec<String> = entity_analysis
+            .iter()
+            .map(|e| e.entity_name.clone())
+            .collect();
 
         // Filter and limit decisions
         let mut key_decisions: Vec<DecisionSummary> = session
@@ -191,7 +184,8 @@ impl SummaryGenerator {
     }
 
     /// Calculate session statistics from existing data
-    fn calculate_session_stats(&self, session: &ActiveSession) -> SessionStats {
+    /// This is a lightweight operation that doesn't require full summary generation
+    pub fn calculate_session_stats(session: &ActiveSession) -> SessionStats {
         use crate::summary::presentation::SessionStatsBuilder;
 
         SessionStatsBuilder::new(session.id(), session.created_at(), session.last_updated)
@@ -213,8 +207,32 @@ impl SummaryGenerator {
             .build()
     }
 
+    /// Estimate summary size in tokens without full generation
+    /// Returns (estimated_tokens, should_use_compact)
+    pub fn estimate_summary_size(session: &ActiveSession, max_tokens: usize) -> (usize, bool) {
+        // Average sizes per item (empirically determined from JSON serialization)
+        const DECISION_AVG_TOKENS: usize = 150;
+        const ENTITY_AVG_TOKENS: usize = 80;
+        const QUESTION_AVG_TOKENS: usize = 100;
+        const CONCEPT_AVG_TOKENS: usize = 120;
+        const BASE_OVERHEAD_TOKENS: usize = 500;
+
+        let decision_count = session.current_state.key_decisions.len();
+        let entity_count = session.entity_graph.entities.len();
+        let question_count = session.current_state.open_questions.len();
+        let concept_count = session.current_state.key_concepts.len();
+
+        let estimated_tokens = BASE_OVERHEAD_TOKENS
+            + (decision_count * DECISION_AVG_TOKENS)
+            + (entity_count * ENTITY_AVG_TOKENS)
+            + (question_count * QUESTION_AVG_TOKENS)
+            + (concept_count * CONCEPT_AVG_TOKENS);
+
+        (estimated_tokens, estimated_tokens > max_tokens)
+    }
+
     /// Extract key insights from existing data
-    pub fn extract_key_insights(&self, session: &ActiveSession, limit: usize) -> Vec<String> {
+    pub fn extract_key_insights(session: &ActiveSession, limit: usize) -> Vec<String> {
         let mut insights = Vec::new();
 
         // Insights from decisions
@@ -259,7 +277,7 @@ impl SummaryGenerator {
     }
 
     /// Extract decision timeline from existing data
-    pub fn extract_decision_timeline(&self, session: &ActiveSession) -> Vec<DecisionSummary> {
+    pub fn extract_decision_timeline(session: &ActiveSession) -> Vec<DecisionSummary> {
         let mut decisions: Vec<_> = session
             .current_state
             .key_decisions
@@ -273,11 +291,6 @@ impl SummaryGenerator {
     }
 }
 
-impl Default for SummaryGenerator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -293,8 +306,7 @@ mod tests {
             Some("Test session for summary generation".to_string()),
         );
 
-        let generator = SummaryGenerator::new();
-        let summary = generator.generate_structured_summary(&session);
+        let summary = SummaryGenerator::generate_structured_summary(&session);
 
         assert_eq!(summary.session_id, session.id());
         assert!(summary.generated_at <= Utc::now());
@@ -309,8 +321,7 @@ mod tests {
             Some("Test session for insights".to_string()),
         );
 
-        let generator = SummaryGenerator::new();
-        let insights = generator.extract_key_insights(&session, 5);
+        let insights = SummaryGenerator::extract_key_insights(&session, 5);
 
         // Empty session should have minimal insights
         assert!(insights.len() <= 5);
