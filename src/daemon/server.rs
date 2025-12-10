@@ -128,10 +128,10 @@ impl LockFreeDaemonServer {
             .route("/stats", get(get_stats))
             // REST API for CLI
             .route("/api/sessions", get(api_list_sessions).post(api_create_session))
-            .route("/api/sessions/:id", delete(api_delete_session))
+            .route("/api/sessions/{id}", delete(api_delete_session))
             .route("/api/workspaces", get(api_list_workspaces).post(api_create_workspace))
-            .route("/api/workspaces/:id", delete(api_delete_workspace))
-            .route("/api/workspaces/:workspace_id/sessions/:session_id", post(api_attach_session))
+            .route("/api/workspaces/{id}", delete(api_delete_workspace))
+            .route("/api/workspaces/{workspace_id}/sessions/{session_id}", post(api_attach_session))
             .layer(CorsLayer::permissive())
             .with_state(server)
     }

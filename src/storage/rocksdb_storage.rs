@@ -68,22 +68,31 @@ impl RealRocksDBStorage {
 
         let db_path = data_dir.join("rocksdb");
 
-        // Configure RocksDB options for optimal performance
+        // Configure RocksDB options for balanced performance and safety
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
-        // Performance optimizations
-        opts.set_max_open_files(10000);
-        opts.set_use_fsync(false);
-        opts.set_bytes_per_sync(0);
-        opts.set_max_write_buffer_number(32);
-        opts.set_write_buffer_size(536_870_912);
-        opts.set_target_file_size_base(1_073_741_824);
-        opts.set_min_write_buffer_number_to_merge(4);
-        opts.set_level_zero_stop_writes_trigger(2000);
-        opts.set_level_zero_slowdown_writes_trigger(0);
+        // Memory settings - balanced for daemon use (max ~512MB for write buffers)
+        opts.set_max_open_files(1000); // Reduced from 10000 - most systems have lower limits
+        opts.set_write_buffer_size(64 * 1024 * 1024); // 64MB per buffer (was 512MB)
+        opts.set_max_write_buffer_number(6); // Max 384MB for write buffers (was 32 = 16GB!)
+        opts.set_min_write_buffer_number_to_merge(2); // Merge sooner (was 4)
+        opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB SST files (was 1GB)
+
+        // Write throttling - prevent memory exhaustion
+        opts.set_level_zero_slowdown_writes_trigger(20); // Enable throttling (was 0 = disabled)
+        opts.set_level_zero_stop_writes_trigger(36); // Reduced from 2000
+
+        // Durability settings - balanced for daemon use
+        opts.set_use_fsync(false); // fdatasync is sufficient for most cases
+        opts.set_bytes_per_sync(1024 * 1024); // Sync every 1MB (was 0 = never)
+
+        // Compaction settings
         opts.set_compaction_style(rocksdb::DBCompactionStyle::Universal);
+
+        // Enable prefix bloom filter for efficient prefix_iterator operations
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(16)); // Extract first 16 bytes as prefix
 
         let db = DB::open(&opts, &db_path)?;
 
@@ -100,7 +109,10 @@ impl RealRocksDBStorage {
 
     /// Save session to RocksDB
     pub async fn save_session(&self, session: &ActiveSession) -> Result<()> {
-        info!("RealRocksDBStorage: Saving session with ID: {}", session.id());
+        info!(
+            "RealRocksDBStorage: Saving session with ID: {}",
+            session.id()
+        );
 
         let db = self.db.clone();
         let session = session.clone();
@@ -200,7 +212,9 @@ impl RealRocksDBStorage {
                 Some(data) => {
                     let (checkpoint, _): (SessionCheckpoint, usize) =
                         bincode::serde::decode_from_slice(&data, bincode::config::standard())
-                            .map_err(|e| anyhow::anyhow!("Failed to deserialize checkpoint: {}", e))?;
+                            .map_err(|e| {
+                                anyhow::anyhow!("Failed to deserialize checkpoint: {}", e)
+                            })?;
 
                     info!(
                         "RealRocksDBStorage: Checkpoint loaded with ID: {}",
@@ -229,8 +243,9 @@ impl RealRocksDBStorage {
 
             for update in &updates {
                 let key = format!("session:{}:update:{}", session_id, update.id);
-                let update_data = bincode::serde::encode_to_vec(update, bincode::config::standard())
-                    .map_err(|e| anyhow::anyhow!("Failed to serialize update: {}", e))?;
+                let update_data =
+                    bincode::serde::encode_to_vec(update, bincode::config::standard())
+                        .map_err(|e| anyhow::anyhow!("Failed to serialize update: {}", e))?;
 
                 batch.put(key.as_bytes(), &update_data);
             }
@@ -239,8 +254,7 @@ impl RealRocksDBStorage {
 
             info!(
                 "RealRocksDBStorage: Batch saved {} updates for session {}",
-                updates_len,
-                session_id
+                updates_len, session_id
             );
 
             Ok(())
@@ -258,14 +272,24 @@ impl RealRocksDBStorage {
         tokio::task::spawn_blocking(move || -> Result<Vec<Uuid>> {
             let mut sessions = Vec::new();
 
-            let iter = db.iterator(rocksdb::IteratorMode::Start);
+            // Use prefix iterator for efficiency - only scan "session:" keys
+            let iter = db.prefix_iterator(b"session:");
             for item in iter {
                 let (key, _) = item?;
                 let key_str = String::from_utf8_lossy(&key);
 
-                if key_str.starts_with("session:")
-                    && !key_str.contains(":update:")
-                    && let Some(uuid_str) = key_str.strip_prefix("session:")
+                // Stop when we've passed the "session:" prefix
+                if !key_str.starts_with("session:") {
+                    break;
+                }
+
+                // Skip update keys (format: "session:{id}:update:{update_id}")
+                if key_str.contains(":update:") {
+                    continue;
+                }
+
+                // Extract UUID from "session:{uuid}" format
+                if let Some(uuid_str) = key_str.strip_prefix("session:")
                     && let Ok(uuid) = Uuid::parse_str(uuid_str)
                 {
                     sessions.push(uuid);
@@ -319,18 +343,21 @@ impl RealRocksDBStorage {
             let session_key = format!("session:{}", session_id);
             batch.delete(session_key.as_bytes());
 
-            // Delete all updates for this session
-            let update_prefix = format!("update:{}:", session_id);
-            let iter = db.iterator(rocksdb::IteratorMode::Start);
+            // Delete all updates for this session using prefix iterator
+            // Key format: "session:{session_id}:update:{update_id}"
+            let update_prefix = format!("session:{}:update:", session_id);
+            let iter = db.prefix_iterator(update_prefix.as_bytes());
             let mut keys_to_delete = Vec::new();
 
             for item in iter {
                 let (key, _) = item?;
                 let key_str = String::from_utf8_lossy(&key);
 
-                if key_str.starts_with(&update_prefix) {
-                    keys_to_delete.push(key.to_vec());
+                // Stop when we've passed our prefix (prefix_iterator may continue)
+                if !key_str.starts_with(&update_prefix) {
+                    break;
                 }
+                keys_to_delete.push(key.to_vec());
             }
 
             // Batch delete all related keys
@@ -349,14 +376,24 @@ impl RealRocksDBStorage {
         .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
     }
 
-    /// Get total number of keys in database
+    /// Get estimated number of keys in database (O(1) using RocksDB property)
     pub async fn get_key_count(&self) -> Result<usize> {
         let db = self.db.clone();
 
         tokio::task::spawn_blocking(move || -> Result<usize> {
+            // Use RocksDB's estimate-num-keys property for O(1) performance
+            // This is an approximation but avoids full table scan
+            if let Some(count_str) = db.property_value(rocksdb::properties::ESTIMATE_NUM_KEYS)? {
+                if let Ok(count) = count_str.parse::<usize>() {
+                    return Ok(count);
+                }
+            }
+
+            // Fallback to counting if property not available (shouldn't happen)
             let mut count = 0;
             let iter = db.iterator(rocksdb::IteratorMode::Start);
-            for _ in iter {
+            for item in iter {
+                let _ = item?;
                 count += 1;
             }
 
@@ -388,47 +425,48 @@ impl RealRocksDBStorage {
 
         tokio::task::spawn_blocking(move || -> Result<Vec<StoredWorkspace>> {
             let mut workspaces: HashMap<Uuid, StoredWorkspace> = HashMap::new();
-            let iter = db.iterator(rocksdb::IteratorMode::Start);
 
-            // First pass: Load all workspaces and sessions
-            // Note: Since iterator order is lexicographical, we might see "workspace:..." after "ws_session:..." or vice-versa
-            // depending on UUID string representation. But usually "workspace:" comes after "session:" but before "ws_session:"
-            // Actually "wo" comes after "ws". Wait. "workspace" vs "ws_session".
-            // 'o' (111) vs 's' (115). So "workspace" comes BEFORE "ws_session".
-            // This is great, we can likely do it in one pass if order is guaranteed, but HashMapping is safer.
-
-            for item in iter {
+            // First pass: Load all workspaces using prefix iterator
+            let workspace_iter = db.prefix_iterator(b"workspace:");
+            for item in workspace_iter {
                 let (key, value) = item?;
                 let key_str = String::from_utf8_lossy(&key);
 
-                if key_str.starts_with("workspace:") {
-                    if let Ok((mut workspace, _)) = bincode::serde::decode_from_slice::<StoredWorkspace, _>(
+                // Stop when we've passed the "workspace:" prefix
+                if !key_str.starts_with("workspace:") {
+                    break;
+                }
+
+                if let Ok((mut workspace, _)) =
+                    bincode::serde::decode_from_slice::<StoredWorkspace, _>(
                         &value,
                         bincode::config::standard(),
-                    ) {
-                        // Clear stored sessions as they might be stale (source of truth is ws_session records)
-                        workspace.sessions.clear();
-                        workspaces.insert(workspace.id, workspace);
-                    }
-                } else if key_str.starts_with("ws_session:") {
-                    if let Ok((ws_session, _)) = bincode::serde::decode_from_slice::<StoredWorkspaceSession, _>(
-                        &value,
-                        bincode::config::standard(),
-                    ) {
-                        // We can only add to workspace if we've seen it or if we store it temporarily
-                        // Since "workspace:" comes before "ws_session:" alphabetically, we should be fine in one pass!
-                        if let Some(ws) = workspaces.get_mut(&ws_session.workspace_id) {
-                            ws.sessions.push((ws_session.session_id, ws_session.role));
-                        } else {
-                            // If order is not guaranteed or mixed, we might miss sessions.
-                            // But UUIDs are random.
-                            // "ws_session:{id}" key depends on ID.
-                            // "workspace:{id}" key depends on ID.
-                            // The prefix "workspace" vs "ws_session" determines major order.
-                            // 'w' 'o' vs 'w' 's'. 'o' < 's'.
-                            // So "workspace:..." keys ALWAYS come before "ws_session:..." keys.
-                            // So one pass is safe!
-                        }
+                    )
+                {
+                    // Clear stored sessions as they might be stale (source of truth is ws_session records)
+                    workspace.sessions.clear();
+                    workspaces.insert(workspace.id, workspace);
+                }
+            }
+
+            // Second pass: Load all workspace-session associations using prefix iterator
+            let ws_session_iter = db.prefix_iterator(b"ws_session:");
+            for item in ws_session_iter {
+                let (key, value) = item?;
+                let key_str = String::from_utf8_lossy(&key);
+
+                // Stop when we've passed the "ws_session:" prefix
+                if !key_str.starts_with("ws_session:") {
+                    break;
+                }
+
+                if let Ok((ws_session, _)) = bincode::serde::decode_from_slice::<
+                    StoredWorkspaceSession,
+                    _,
+                >(&value, bincode::config::standard())
+                {
+                    if let Some(ws) = workspaces.get_mut(&ws_session.workspace_id) {
+                        ws.sessions.push((ws_session.session_id, ws_session.role));
                     }
                 }
             }
@@ -464,7 +502,10 @@ impl RealRocksDBStorage {
                 id: workspace_id,
                 name,
                 description,
-                sessions: session_ids.iter().map(|id| (*id, SessionRole::Primary)).collect(),
+                sessions: session_ids
+                    .iter()
+                    .map(|id| (*id, SessionRole::Primary))
+                    .collect(),
                 created_at: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
@@ -477,7 +518,10 @@ impl RealRocksDBStorage {
             let key = format!("workspace:{}", workspace_id);
             db.put(key.as_bytes(), data)?;
 
-            info!("RealRocksDBStorage: Workspace {} saved successfully", workspace_id);
+            info!(
+                "RealRocksDBStorage: Workspace {} saved successfully",
+                workspace_id
+            );
             Ok(())
         })
         .await
@@ -496,18 +540,20 @@ impl RealRocksDBStorage {
             let key = format!("workspace:{}", workspace_id);
             db.delete(key.as_bytes())?;
 
-            // Also delete all workspace-session associations
+            // Also delete all workspace-session associations using prefix iterator
             let ws_session_prefix = format!("ws_session:{}:", workspace_id);
-            let iter = db.iterator(rocksdb::IteratorMode::Start);
+            let iter = db.prefix_iterator(ws_session_prefix.as_bytes());
             let mut keys_to_delete = Vec::new();
 
             for item in iter {
                 let (key, _) = item?;
                 let key_str = String::from_utf8_lossy(&key);
 
-                if key_str.starts_with(&ws_session_prefix) {
-                    keys_to_delete.push(key.to_vec());
+                // Stop when we've passed our prefix
+                if !key_str.starts_with(&ws_session_prefix) {
+                    break;
                 }
+                keys_to_delete.push(key.to_vec());
             }
 
             let mut batch = WriteBatch::default();
@@ -516,7 +562,10 @@ impl RealRocksDBStorage {
             }
             db.write(batch)?;
 
-            info!("RealRocksDBStorage: Workspace {} deleted successfully", workspace_id);
+            info!(
+                "RealRocksDBStorage: Workspace {} deleted successfully",
+                workspace_id
+            );
             Ok(())
         })
         .await
