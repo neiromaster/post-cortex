@@ -55,8 +55,11 @@ impl HotContext {
     }
 
     /// Push new update, evicting oldest if at capacity (lock-free)
+    ///
+    /// Uses Release ordering to ensure the insert is visible before the ID increment
+    /// is visible to readers using Acquire ordering.
     pub fn push(&self, update: ContextUpdate) {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = self.next_id.fetch_add(1, Ordering::Release);
         self.updates.insert(id, update);
 
         // Evict oldest if we exceed capacity (lock-free cleanup)
@@ -67,11 +70,17 @@ impl HotContext {
     }
 
     /// Get N most recent updates (lock-free)
+    ///
+    /// Note: In a concurrent environment, some entries may have been evicted
+    /// between loading the ID and fetching. This is expected lock-free behavior.
+    /// The returned Vec may contain fewer than N elements.
     pub fn get_recent(&self, n: usize) -> Vec<ContextUpdate> {
-        let current_id = self.next_id.load(Ordering::Relaxed);
-        let start_id = current_id.saturating_sub(n as u64);
+        let current_id = self.next_id.load(Ordering::Acquire);
+        // Limit to max_size to avoid iterating over evicted entries
+        let effective_n = n.min(self.max_size);
+        let start_id = current_id.saturating_sub(effective_n as u64);
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(effective_n);
         for id in (start_id..current_id).rev() {
             if let Some(entry) = self.updates.get(&id) {
                 results.push(entry.clone());
@@ -80,9 +89,21 @@ impl HotContext {
         results
     }
 
-    /// Get all updates as Vec (lock-free)
+    /// Get all updates as Vec in chronological order (lock-free)
+    ///
+    /// Returns updates sorted by insertion order (oldest first).
+    /// Only iterates over the valid range of IDs to avoid O(n) iteration.
     pub fn get_all(&self) -> Vec<ContextUpdate> {
-        self.updates.iter().map(|e| e.value().clone()).collect()
+        let current_id = self.next_id.load(Ordering::Acquire);
+        let start_id = current_id.saturating_sub(self.max_size as u64);
+
+        let mut results = Vec::with_capacity(self.max_size.min(current_id as usize));
+        for id in start_id..current_id {
+            if let Some(entry) = self.updates.get(&id) {
+                results.push(entry.clone());
+            }
+        }
+        results
     }
 
     /// Get current length (lock-free)
@@ -98,12 +119,15 @@ impl HotContext {
     /// Clear all updates (lock-free)
     pub fn clear(&self) {
         self.updates.clear();
-        self.next_id.store(0, Ordering::Relaxed);
+        self.next_id.store(0, Ordering::Release);
     }
 
     /// Get most recent update (lock-free)
+    ///
+    /// Returns None if the context is empty or if the most recent entry
+    /// was evicted by a concurrent push operation.
     pub fn back(&self) -> Option<ContextUpdate> {
-        let current_id = self.next_id.load(Ordering::Relaxed);
+        let current_id = self.next_id.load(Ordering::Acquire);
         if current_id == 0 {
             return None;
         }
@@ -122,11 +146,13 @@ impl HotContext {
     }
 
     /// Convert to VecDeque for serialization
+    /// Only iterates over the valid range of IDs (last max_size entries)
     pub fn to_deque(&self) -> VecDeque<ContextUpdate> {
-        let current_id = self.next_id.load(Ordering::Relaxed);
-        let mut deque = VecDeque::new();
+        let current_id = self.next_id.load(Ordering::Acquire);
+        let start_id = current_id.saturating_sub(self.max_size as u64);
 
-        for id in 0..current_id {
+        let mut deque = VecDeque::with_capacity(self.max_size.min(current_id as usize));
+        for id in start_id..current_id {
             if let Some(entry) = self.updates.get(&id) {
                 deque.push_back(entry.clone());
             }

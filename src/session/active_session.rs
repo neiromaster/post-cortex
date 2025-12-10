@@ -26,8 +26,10 @@ use chrono::DateTime;
 use dashmap::DashSet;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, OnceLock};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, LazyLock};
+#[cfg(feature = "embeddings")]
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
@@ -39,6 +41,78 @@ use crate::core::ner_engine::LockFreeNEREngine;
 // Global shared NER engine (lazy loaded on first use)
 #[cfg(feature = "embeddings")]
 static GLOBAL_NER_ENGINE: OnceLock<Arc<LockFreeNEREngine>> = OnceLock::new();
+
+// Global stop word sets for O(1) lookup (lazy initialized)
+static ENGLISH_STOP_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    [
+        "a", "an", "the", "this", "that", "these", "those", "in", "on", "at", "by", "for",
+        "with", "from", "to", "of", "and", "or", "but", "nor", "so", "yet", "all", "some",
+        "any", "each", "every", "both", "few", "many", "total", "using", "used", "uses", "use",
+        "made", "make", "now", "then", "when", "where", "how", "what", "why", "one", "two",
+        "three", "first", "second", "last",
+    ].into_iter().collect()
+});
+
+static BULGARIAN_STOP_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    [
+        // Common Bulgarian stop words
+        "и", "в", "на", "за", "с", "от", "до", "по", "при", "без",
+        "е", "са", "си", "съм", "беше", "бяха", "ще", "би",
+        "това", "тази", "тези", "този", "онзи",
+        "която", "който", "които",
+        "как", "какво", "къде", "кога", "защо", "кой",
+        "не", "да", "ли", "че", "ако", "когато", "докато", "или", "но", "а",
+        "още", "само", "вече", "тук", "там",
+        "всички", "всяка", "всеки", "няколко", "много", "малко",
+        "го", "му", "й", "ги", "им", "ме", "ти", "ви", "ни",
+        "един", "една", "едно", "два", "две", "три",
+        // Common verbs
+        "прави", "работи", "работят", "има", "имат",
+        "мога", "може", "могат", "трябва", "искам", "иска",
+        "използва", "използваме", "използвам", "използват",
+        "осигурява", "осигуряват", "позволява", "позволяват",
+        "оркестрира", "оркестрират",
+        "върна", "връща", "връщат",
+        "търсения", "търсене", "достъп", "данни", "параметри",
+        "сесии", "сесия", "система", "системи",
+        // Common prepositions and conjunctions
+        "през", "след", "преди", "около", "между", "над", "под", "към", "чрез",
+        "според", "заради", "поради",
+        // Common adjectives and descriptors
+        "различни", "различен", "различна", "различно",
+        "семантични", "семантичен", "семантична", "семантично", "семантичните",
+        "приблизително", "приблизителен", "приблизителна",
+        "по-добър", "по-добра", "по-добро", "по-добре",
+        "висока", "висок", "високо", "високи",
+        "вместо", "индексът", "индекса", "индекси",
+        "използване", "използването",
+        // Common nouns that are too generic
+        "начин", "начина", "начини",
+        "вид", "вида", "видове",
+        "тип", "типа", "типове",
+        "част", "частта", "части",
+        "случай", "случая", "случаи",
+    ].into_iter().collect()
+});
+
+static COMMON_ENGLISH_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    [
+        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
+        "her", "was", "one", "our", "out", "day", "get", "has", "him", "his",
+        "how", "its", "may", "new", "now", "old", "see", "two", "who", "boy",
+        "did", "man", "men", "put", "say", "she", "too", "use", "this", "that",
+        "with", "have", "from", "they", "know", "want", "been", "good", "much",
+        "some", "time", "very", "when", "come", "here", "just", "like", "long",
+        "make", "many", "over", "such", "take", "than", "them", "well", "were",
+        "will", "your", "about", "after", "again", "back", "could", "every",
+        "first", "going", "house", "little", "might", "never", "only", "other",
+        "right", "should", "through", "under", "where", "while", "would", "write",
+        "years", "because", "before", "being", "between", "during", "without",
+        "within", "against", "across", "around", "behind", "beside", "beneath",
+        "beyond", "inside", "outside", "toward", "towards", "underneath",
+        "thing", "stuff", "something", "anything", "everything",
+    ].into_iter().collect()
+});
 
 /// Pre-load the global NER engine (call during daemon startup for best performance)
 ///
@@ -933,22 +1007,14 @@ impl ActiveSession {
         Some(cleaned.to_string())
     }
 
-    /// Check if entity name is a stop word
+    /// Check if entity name is a stop word (O(1) HashSet lookup)
     fn is_stop_word(&self, name: &str) -> bool {
         if name.is_empty() {
             return true;
         }
 
-        const STOP_WORDS: &[&str] = &[
-            "a", "an", "the", "this", "that", "these", "those", "in", "on", "at", "by", "for",
-            "with", "from", "to", "of", "and", "or", "but", "nor", "so", "yet", "all", "some",
-            "any", "each", "every", "both", "few", "many", "total", "using", "used", "uses", "use",
-            "made", "make", "now", "then", "when", "where", "how", "what", "why", "one", "two",
-            "three", "first", "second", "last",
-        ];
-
         let normalized = name.to_lowercase();
-        STOP_WORDS.contains(&normalized.as_str()) || normalized.parse::<f64>().is_ok()
+        ENGLISH_STOP_WORDS.contains(normalized.as_str()) || normalized.parse::<f64>().is_ok()
     }
 
     /// Normalize entity name (safe, returns None on error)
@@ -1454,294 +1520,14 @@ impl ActiveSession {
         }
     }
 
-    /// Check if a word is a common English word that shouldn't be an entity
+    /// Check if a word is a common English word that shouldn't be an entity (O(1) HashSet lookup)
     fn is_common_word(&self, word: &str) -> bool {
-        let common_words = [
-            "the",
-            "and",
-            "for",
-            "are",
-            "but",
-            "not",
-            "you",
-            "all",
-            "can",
-            "had",
-            "her",
-            "was",
-            "one",
-            "our",
-            "out",
-            "day",
-            "get",
-            "has",
-            "him",
-            "his",
-            "how",
-            "its",
-            "may",
-            "new",
-            "now",
-            "old",
-            "see",
-            "two",
-            "who",
-            "boy",
-            "did",
-            "man",
-            "men",
-            "put",
-            "say",
-            "she",
-            "too",
-            "use",
-            "this",
-            "that",
-            "with",
-            "have",
-            "from",
-            "they",
-            "know",
-            "want",
-            "been",
-            "good",
-            "much",
-            "some",
-            "time",
-            "very",
-            "when",
-            "come",
-            "here",
-            "just",
-            "like",
-            "long",
-            "make",
-            "many",
-            "over",
-            "such",
-            "take",
-            "than",
-            "them",
-            "well",
-            "were",
-            "will",
-            "your",
-            "about",
-            "after",
-            "again",
-            "back",
-            "could",
-            "every",
-            "first",
-            "going",
-            "house",
-            "little",
-            "might",
-            "never",
-            "only",
-            "other",
-            "right",
-            "should",
-            "through",
-            "under",
-            "where",
-            "while",
-            "would",
-            "write",
-            "years",
-            "because",
-            "before",
-            "being",
-            "between",
-            "during",
-            "through",
-            "without",
-            "within",
-            "against",
-            "across",
-            "around",
-            "behind",
-            "beside",
-            "beneath",
-            "beyond",
-            "inside",
-            "outside",
-            "toward",
-            "towards",
-            "underneath",
-        ];
-
-        common_words.contains(&word)
+        COMMON_ENGLISH_WORDS.contains(word)
     }
 
-    /// Check if a word is a common Bulgarian stop word
+    /// Check if a word is a common Bulgarian stop word (O(1) HashSet lookup)
     fn is_bulgarian_stop_word(&self, word: &str) -> bool {
-        let bulgarian_stop_words = [
-            // Common Bulgarian stop words
-            "и",
-            "в",
-            "на",
-            "за",
-            "с",
-            "от",
-            "до",
-            "по",
-            "при",
-            "без",
-            "е",
-            "са",
-            "си",
-            "съм",
-            "беше",
-            "бяха",
-            "ще",
-            "би",
-            "това",
-            "тази",
-            "тези",
-            "този",
-            "онзи",
-            "която",
-            "който",
-            "които",
-            "как",
-            "какво",
-            "къде",
-            "кога",
-            "защо",
-            "кой",
-            "не",
-            "да",
-            "ли",
-            "че",
-            "ако",
-            "когато",
-            "докато",
-            "или",
-            "но",
-            "а",
-            "още",
-            "само",
-            "вече",
-            "тук",
-            "там",
-            "всички",
-            "всяка",
-            "всеки",
-            "няколко",
-            "много",
-            "малко",
-            "го",
-            "му",
-            "й",
-            "ги",
-            "им",
-            "ме",
-            "ти",
-            "ви",
-            "ни",
-            "един",
-            "една",
-            "едно",
-            "два",
-            "две",
-            "три",
-            // Common verbs
-            "прави",
-            "прави",
-            "работи",
-            "работят",
-            "има",
-            "имат",
-            "мога",
-            "може",
-            "могат",
-            "трябва",
-            "искам",
-            "иска",
-            "използва",
-            "използваме",
-            "използвам",
-            "използват",
-            "осигурява",
-            "осигуряват",
-            "позволява",
-            "позволяват",
-            "оркестрира",
-            "оркестрират",
-            "върна",
-            "връща",
-            "връщат",
-            "търсения",
-            "търсене",
-            "достъп",
-            "данни",
-            "параметри",
-            "сесии",
-            "сесия",
-            "система",
-            "системи",
-            // Common prepositions and conjunctions
-            "през",
-            "след",
-            "преди",
-            "около",
-            "между",
-            "над",
-            "под",
-            "към",
-            "чрез",
-            "според",
-            "заради",
-            "поради",
-            // Common adjectives and descriptors
-            "различни",
-            "различен",
-            "различна",
-            "различно",
-            "семантични",
-            "семантичен",
-            "семантична",
-            "семантично",
-            "семантичните",
-            "приблизително",
-            "приблизителен",
-            "приблизителна",
-            "по-добър",
-            "по-добра",
-            "по-добро",
-            "по-добре",
-            "висока",
-            "висок",
-            "високо",
-            "високи",
-            "вместо",
-            "заради",
-            "поради",
-            "индексът",
-            "индекса",
-            "индекси",
-            "използване",
-            "използването",
-            // Common nouns that are too generic
-            "начин",
-            "начина",
-            "начини",
-            "вид",
-            "вида",
-            "видове",
-            "тип",
-            "типа",
-            "типове",
-            "част",
-            "частта",
-            "части",
-            "случай",
-            "случая",
-            "случаи",
-        ];
-
-        bulgarian_stop_words.contains(&word)
+        BULGARIAN_STOP_WORDS.contains(word)
     }
 
     /// Score entities based on frequency, length, and context relevance
@@ -2165,8 +1951,10 @@ impl ActiveSession {
     }
 
     fn should_create_summary(&self) -> bool {
-        self.incremental_updates.len().is_multiple_of(self.metadata.user_preferences.auto_summary_threshold)
-            && !self.incremental_updates.is_empty()
+        let threshold = self.metadata.user_preferences.auto_summary_threshold;
+        let len = self.incremental_updates.len();
+        // Guard against threshold=0 (is_multiple_of(0) returns true for any number)
+        threshold > 0 && len > 0 && len % threshold == 0
     }
 
     fn create_periodic_summary(&mut self) -> anyhow::Result<()> {
