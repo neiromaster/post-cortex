@@ -1,6 +1,10 @@
-# Post-Cortex
+<p align="center">
+  <img src="design/v1.svg" width="128" height="128" alt="Post-Cortex Logo">
+</p>
 
-**Persistent Memory for AI Assistants**
+<h1 align="center">Post-Cortex</h1>
+
+<p align="center"><strong>Persistent Memory for AI Assistants</strong></p>
 
 Post-Cortex is an MCP server that gives AI assistants long-term memory. It stores conversations, decisions, and insights in a searchable knowledge base with automatic entity extraction.
 
