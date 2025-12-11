@@ -1,65 +1,34 @@
 # Post-Cortex
 
-**Intelligent Memory System for AI Assistants**
+**Persistent Memory for AI Assistants**
 
-Post-Cortex is a high-performance MCP server that transforms ephemeral AI conversations into persistent, searchable knowledge. Built in Rust with lock-free architecture, it enables AI assistants to maintain memory across sessions with semantic search and automatic knowledge graph construction.
+Post-Cortex is an MCP server that gives AI assistants long-term memory. It stores conversations, decisions, and insights in a searchable knowledge base with automatic entity extraction.
 
 ## Features
 
-- **Persistent Memory**: Three-tier storage (hot/warm/cold) with RocksDB
-- **Semantic Search**: Local transformer models with configurable accuracy/speed
-- **Knowledge Graph**: Automatic entity extraction with 95%+ accuracy
-- **Privacy-First**: All processing local, zero external API calls
-- **Lock-Free**: Zero-deadlock guarantee through atomic operations
+- **Persistent Memory** - Conversations survive across sessions
+- **Semantic Search** - Find related content using AI embeddings
+- **Knowledge Graph** - Automatic entity and relationship extraction
+- **Privacy-First** - All processing runs locally, no external APIs
+- **Fast** - Lock-free Rust architecture, <10ms queries
+
+## Installation
+
+```bash
+# Homebrew (macOS/Linux)
+brew install julymetodiev/tap/post-cortex
+
+# Or download binary
+curl -L https://github.com/julymetodiev/post-cortex/releases/latest/download/pcx-aarch64-apple-darwin -o /usr/local/bin/pcx
+chmod +x /usr/local/bin/pcx
+```
 
 ## Quick Start
 
-### Installation
+### 1. Configure Claude Desktop
 
-**Homebrew (macOS/Linux):**
-```bash
-brew install julymetodiev/tap/post-cortex
-```
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
-**Direct Download:**
-```bash
-# macOS Apple Silicon
-curl -L https://github.com/julymetodiev/post-cortex/releases/latest/download/pcx-aarch64-apple-darwin -o /usr/local/bin/pcx && chmod +x /usr/local/bin/pcx
-
-# macOS Intel
-curl -L https://github.com/julymetodiev/post-cortex/releases/latest/download/pcx-x86_64-apple-darwin -o /usr/local/bin/pcx && chmod +x /usr/local/bin/pcx
-
-# Linux
-curl -L https://github.com/julymetodiev/post-cortex/releases/latest/download/pcx-x86_64-unknown-linux-gnu -o /usr/local/bin/pcx && chmod +x /usr/local/bin/pcx
-```
-
-**Build from source:**
-```bash
-cargo build --release --features embeddings
-# Binary: target/release/pcx
-```
-
-### Usage
-
-Post-Cortex provides a **single unified binary** (`pcx`) supporting both stdio and SSE transports:
-
-```bash
-# Stdio mode (default) - for Claude Desktop
-pcx
-
-# Daemon mode - HTTP server on port 3737
-pcx start
-
-# Check status
-pcx status
-
-# Stop daemon
-pcx stop
-```
-
-### Claude Desktop Configuration
-
-**Stdio mode (simple):**
 ```json
 {
   "mcpServers": {
@@ -70,7 +39,119 @@ pcx stop
 }
 ```
 
-**SSE mode (daemon):**
+### 2. Create a Session
+
+Ask Claude: *"Create a Post-Cortex session for this project"*
+
+### 3. Use Memory
+
+Claude will automatically store important context and search past knowledge.
+
+## MCP Tools (6 Tools)
+
+### `session` - Manage Sessions
+
+```
+session(action: "create", name: "my-project", description: "Project notes")
+session(action: "list")
+```
+
+### `update_conversation_context` - Store Knowledge
+
+```
+// Single update
+update_conversation_context(
+  session_id: "uuid",
+  interaction_type: "decision_made",
+  content: {
+    "decision": "Use PostgreSQL",
+    "rationale": "Better JSON support"
+  }
+)
+
+// Bulk update
+update_conversation_context(
+  session_id: "uuid",
+  updates: [
+    {interaction_type: "qa", content: {...}},
+    {interaction_type: "code_change", content: {...}}
+  ]
+)
+```
+
+**Interaction types:** `qa`, `decision_made`, `problem_solved`, `code_change`
+
+### `semantic_search` - Find Related Content
+
+```
+// Search within session
+semantic_search(query: "database decisions", scope: "session", scope_id: "uuid")
+
+// Search across workspace
+semantic_search(query: "authentication", scope: "workspace", scope_id: "ws-uuid")
+
+// Search everything
+semantic_search(query: "performance issues", scope: "global")
+```
+
+### `get_structured_summary` - Session Overview
+
+```
+// Get decisions only
+get_structured_summary(session_id: "uuid", include: ["decisions"])
+
+// Get insights only
+get_structured_summary(session_id: "uuid", include: ["insights"])
+
+// Get full summary
+get_structured_summary(session_id: "uuid", include: ["all"])
+```
+
+### `query_conversation_context` - Query Entities
+
+```
+// Entity importance ranking
+query_conversation_context(
+  session_id: "uuid",
+  query_type: "entity_importance",
+  parameters: {"limit": "10"}
+)
+
+// Keyword search
+query_conversation_context(
+  session_id: "uuid",
+  query_type: "search_updates",
+  parameters: {"keyword": "API"}
+)
+```
+
+### `manage_workspace` - Organize Sessions
+
+```
+manage_workspace(action: "create", name: "trading-project")
+manage_workspace(action: "list")
+manage_workspace(action: "add_session", workspace_id: "ws-uuid", session_id: "uuid", role: "primary")
+manage_workspace(action: "remove_session", workspace_id: "ws-uuid", session_id: "uuid")
+```
+
+**Roles:** `primary`, `related`, `dependency`, `shared`
+
+## Daemon Mode
+
+For multiple Claude instances sharing the same memory:
+
+```bash
+# Start daemon
+pcx start
+
+# Check status
+pcx status
+
+# Stop daemon
+pcx stop
+```
+
+Configure Claude for SSE:
 ```json
 {
   "mcpServers": {
@@ -82,107 +163,35 @@ pcx stop
 }
 ```
 
-### Environment Variables
+## Environment Variables
 
-- `PC_HOST` - Host to bind (default: 127.0.0.1)
-- `PC_PORT` - Port (default: 3737)
-- `PC_DATA_DIR` - Data directory (default: ~/.post-cortex/data)
-- `RUST_LOG` - Logging level (e.g., `RUST_LOG=debug`)
-
-## Setting Up for Your Project
-
-**1. Create CLAUDE.md in your project root:**
-
-```markdown
-# CLAUDE.md
-
-## Using Post-Cortex for Knowledge Management
-
-**Project session ID:** `YOUR-SESSION-ID-HERE`
-
-**Throughout conversation:**
-- Add context using `update_conversation_context(session_id: "YOUR-SESSION-ID")`
-- Query with `semantic_search_session(session_id: "YOUR-SESSION-ID")`
-```
-
-**2. Ask your AI assistant:**
-```
-"Create a Post-Cortex session for this project"
-```
-
-**3. Add the returned session_id to CLAUDE.md**
-
-## Available Tools (24 MCP Tools)
-
-**Session Management:**
-- `create_session`, `load_session`, `list_sessions`, `search_sessions`
-
-**Adding Context:**
-- `update_conversation_context` - QA, decisions, problems, code changes
-- `bulk_update_conversation_context` - Batch updates
-
-**Searching:**
-- `semantic_search_session` - AI-powered semantic search (auto-vectorizes)
-- `semantic_search_global` - Search across all sessions
-- `query_conversation_context` - Fast keyword search (< 10ms)
-
-**Analysis:**
-- `get_structured_summary` - Full session overview
-- `get_key_decisions`, `get_key_insights` - Decision timeline
-- `get_entity_importance_analysis` - Entity analysis
-
-**Workspace Management:**
-- `create_workspace`, `list_workspaces`, `get_workspace`
-- `add_session_to_workspace`, `remove_session_from_workspace`
-
-## Architecture
-
-**Memory Tiers:**
-```
-Hot (50 items)   → DashMap cache, instant access
-Warm (200 items) → Compressed cache, fast access
-Cold (unlimited) → RocksDB persistence
-```
-
-**Lock-Free Concurrency:**
-- DashMap, ArcSwap, atomic operations
-- Actor pattern for async storage
-- Zero deadlocks, linear scaling
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PC_HOST` | 127.0.0.1 | Bind address |
+| `PC_PORT` | 3737 | Port |
+| `PC_DATA_DIR` | ~/.post-cortex/data | Storage location |
 
 ## Performance
 
-- Semantic search: 1-7ms
-- Keyword search: < 10ms
-- Embedding generation: 17-20 texts/sec
-- 500+ context updates/sec
+| Operation | Latency |
+|-----------|---------|
+| Semantic search | 1-7ms |
+| Keyword search | <10ms |
+| Context update | <5ms |
 
 ## Development
 
 ```bash
-# Run tests
-cargo test --features embeddings
+# Build
+cargo build --release --features embeddings
 
-# Run with debug logging
-RUST_LOG=post_cortex=debug cargo run --bin pcx --features embeddings
-```
+# Test
+cargo test
 
-**Project Structure:**
-```
-src/
-├── bin/pcx.rs     # Unified binary (stdio + SSE)
-├── core/          # Lock-free memory, vector DB
-├── session/       # Session management
-├── storage/       # RocksDB persistence
-├── graph/         # Entity relationships
-└── tools/mcp/     # MCP protocol (24 tools)
+# Run with logging
+RUST_LOG=debug pcx start
 ```
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file.
-
-## Contributing
-
-Contributions welcome! Please ensure lock-free principles and include tests.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+MIT
