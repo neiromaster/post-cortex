@@ -91,8 +91,10 @@ impl RealRocksDBStorage {
         // Compaction settings
         opts.set_compaction_style(rocksdb::DBCompactionStyle::Universal);
 
-        // Enable prefix bloom filter for efficient prefix_iterator operations
-        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(16)); // Extract first 16 bytes as prefix
+        // Enable prefix bloom filter (16 bytes)
+        // NOTE: prefix_iterator() only works correctly when the search prefix is >= 16 bytes.
+        // For shorter prefixes like "session:" (8 bytes), use iterator() with IteratorMode::From instead.
+        opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(16));
 
         let db = DB::open(&opts, &db_path)?;
 
@@ -272,8 +274,9 @@ impl RealRocksDBStorage {
         tokio::task::spawn_blocking(move || -> Result<Vec<Uuid>> {
             let mut sessions = Vec::new();
 
-            // Use prefix iterator for efficiency - only scan "session:" keys
-            let iter = db.prefix_iterator(b"session:");
+            // Use iterator with seek - prefix_iterator doesn't work correctly
+            // when prefix_extractor size (16 bytes) doesn't match our prefix (8 bytes "session:")
+            let iter = db.iterator(rocksdb::IteratorMode::From(b"session:", rocksdb::Direction::Forward));
             for item in iter {
                 let (key, _) = item?;
                 let key_str = String::from_utf8_lossy(&key);
@@ -343,10 +346,10 @@ impl RealRocksDBStorage {
             let session_key = format!("session:{}", session_id);
             batch.delete(session_key.as_bytes());
 
-            // Delete all updates for this session using prefix iterator
+            // Delete all updates for this session
             // Key format: "session:{session_id}:update:{update_id}"
             let update_prefix = format!("session:{}:update:", session_id);
-            let iter = db.prefix_iterator(update_prefix.as_bytes());
+            let iter = db.iterator(rocksdb::IteratorMode::From(update_prefix.as_bytes(), rocksdb::Direction::Forward));
             let mut keys_to_delete = Vec::new();
 
             for item in iter {
@@ -426,8 +429,9 @@ impl RealRocksDBStorage {
         tokio::task::spawn_blocking(move || -> Result<Vec<StoredWorkspace>> {
             let mut workspaces: HashMap<Uuid, StoredWorkspace> = HashMap::new();
 
-            // First pass: Load all workspaces using prefix iterator
-            let workspace_iter = db.prefix_iterator(b"workspace:");
+            // First pass: Load all workspaces using iterator with seek
+            // (prefix_iterator doesn't work with our 16-byte prefix extractor)
+            let workspace_iter = db.iterator(rocksdb::IteratorMode::From(b"workspace:", rocksdb::Direction::Forward));
             for item in workspace_iter {
                 let (key, value) = item?;
                 let key_str = String::from_utf8_lossy(&key);
@@ -449,8 +453,8 @@ impl RealRocksDBStorage {
                 }
             }
 
-            // Second pass: Load all workspace-session associations using prefix iterator
-            let ws_session_iter = db.prefix_iterator(b"ws_session:");
+            // Second pass: Load all workspace-session associations using iterator with seek
+            let ws_session_iter = db.iterator(rocksdb::IteratorMode::From(b"ws_session:", rocksdb::Direction::Forward));
             for item in ws_session_iter {
                 let (key, value) = item?;
                 let key_str = String::from_utf8_lossy(&key);
@@ -540,9 +544,9 @@ impl RealRocksDBStorage {
             let key = format!("workspace:{}", workspace_id);
             db.delete(key.as_bytes())?;
 
-            // Also delete all workspace-session associations using prefix iterator
+            // Also delete all workspace-session associations
             let ws_session_prefix = format!("ws_session:{}:", workspace_id);
-            let iter = db.prefix_iterator(ws_session_prefix.as_bytes());
+            let iter = db.iterator(rocksdb::IteratorMode::From(ws_session_prefix.as_bytes(), rocksdb::Direction::Forward));
             let mut keys_to_delete = Vec::new();
 
             for item in iter {
