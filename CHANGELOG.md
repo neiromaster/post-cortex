@@ -5,6 +5,28 @@ All notable changes to Post-Cortex will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2025-12-11
+
+### Changed
+
+- **MCP Tools Consolidation**: Reduced from 24 tools to 6 consolidated tools for simpler AI integration
+  - `session` - Merges create_session + list_sessions via action parameter
+  - `update_conversation_context` - Supports bulk mode via optional `updates` array
+  - `semantic_search` - Unified search with `scope` parameter (session/workspace/global)
+  - `get_structured_summary` - Extended with `include` parameter for selective sections
+  - `query_conversation_context` - Added `entity_importance` and `entity_network` query types
+  - `manage_workspace` - Merges 6 workspace tools via action parameter
+
+### Fixed
+
+- **RocksDB prefix iteration for short prefixes**: Fixed `prefix_iterator()` not working for prefixes shorter than 16 bytes (the prefix_extractor size). Session list, workspace list, and delete operations now use `iterator(IteratorMode::From)` instead, correctly handling "session:" (8 bytes), "workspace:" (10 bytes), and "ws_session:" (11 bytes) prefixes
+
+### Improved
+
+- **README documentation**: Cleaner documentation with concise 6-tool API examples
+- **SummaryGenerator refactoring**: Converted to use associated functions for better code organization
+- **Axum route params**: Updated to use bracket syntax for path parameters
+
 ## [0.1.8] - 2025-12-09
 
 ### Added
