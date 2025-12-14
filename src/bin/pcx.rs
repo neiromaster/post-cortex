@@ -953,7 +953,7 @@ async fn handle_export(
 
     // Write to file
     let path = Path::new(&output);
-    let bytes = write_export_file(&export_data, path, &options)
+    let stats = write_export_file(&export_data, path, &options)
         .map_err(|e| format!("Failed to write export file: {}", e))?;
 
     println!();
@@ -965,7 +965,17 @@ async fn handle_export(
     println!("  Workspaces:  {}", export_data.metadata.workspace_count);
     println!("  Updates:     {}", export_data.metadata.update_count);
     println!("  Checkpoints: {}", export_data.metadata.checkpoint_count);
-    println!("  Size:        {} bytes (uncompressed JSON)", bytes);
+
+    // Show size info based on compression
+    if compression == CompressionType::None {
+        println!("  Size:        {} bytes", stats.file_size);
+    } else {
+        let compression_ratio = (1.0 - (stats.file_size as f64 / stats.uncompressed_size as f64)) * 100.0;
+        println!(
+            "  Size:        {} bytes ({:.0}% compression, from {} uncompressed)",
+            stats.file_size, compression_ratio, stats.uncompressed_size
+        );
+    }
 
     Ok(())
 }

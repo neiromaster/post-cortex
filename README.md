@@ -167,6 +167,32 @@ Configure Claude for SSE:
 }
 ```
 
+## Data Export/Import
+
+Backup and restore your memory database:
+
+```bash
+# Full export
+pcx export --output backup.json
+
+# Export with compression
+pcx export --output backup.json.gz
+
+# Export specific session
+pcx export --output session.json --session <uuid>
+
+# List contents of backup
+pcx import --input backup.json --list
+
+# Import (skip existing)
+pcx import --input backup.json --skip-existing
+
+# Import (overwrite existing)
+pcx import --input backup.json --overwrite
+```
+
+**Compression:** Auto-detected from extension (`.json`, `.json.gz`, `.json.zst`)
+
 ## Environment Variables
 
 | Variable | Default | Description |

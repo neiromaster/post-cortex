@@ -563,12 +563,21 @@ impl RealRocksDBStorage {
 // File I/O Functions
 // ============================================================================
 
+/// Statistics from export operation
+#[derive(Debug, Clone)]
+pub struct ExportStats {
+    /// Size of the file on disk (after compression)
+    pub file_size: u64,
+    /// Size of the uncompressed JSON data
+    pub uncompressed_size: usize,
+}
+
 /// Write export data to a file with optional compression
 pub fn write_export_file(
     data: &ExportData,
     path: &Path,
     options: &ExportOptions,
-) -> Result<usize> {
+) -> Result<ExportStats> {
     let compression = if options.compression == CompressionType::None {
         CompressionType::from_path(path)
     } else {
@@ -583,34 +592,41 @@ pub fn write_export_file(
         serde_json::to_vec(data)?
     };
 
+    let uncompressed_size = json_data.len();
+
     let file = File::create(path).context("Failed to create export file")?;
     let mut writer = BufWriter::new(file);
 
-    let bytes_written = match compression {
+    match compression {
         CompressionType::None => {
             writer.write_all(&json_data)?;
-            json_data.len()
         }
         CompressionType::Gzip => {
             let mut encoder = GzEncoder::new(writer, GzCompression::default());
             encoder.write_all(&json_data)?;
             encoder.finish()?;
-            // Return uncompressed size for reporting
-            json_data.len()
         }
         CompressionType::Zstd => {
             let mut encoder = zstd::stream::Encoder::new(writer, 3)?;
             encoder.write_all(&json_data)?;
             encoder.finish()?;
-            json_data.len()
         }
     };
 
+    // Get actual file size after writing
+    let file_size = std::fs::metadata(path)
+        .context("Failed to get file metadata")?
+        .len();
+
     info!(
-        "Export written: {} bytes (uncompressed JSON size)",
-        bytes_written
+        "Export written: {} bytes on disk, {} bytes uncompressed",
+        file_size, uncompressed_size
     );
-    Ok(bytes_written)
+
+    Ok(ExportStats {
+        file_size,
+        uncompressed_size,
+    })
 }
 
 /// Read export data from a file with automatic decompression

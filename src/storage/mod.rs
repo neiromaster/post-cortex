@@ -26,7 +26,7 @@ pub use rocksdb_storage::SessionCheckpoint;
 
 // Re-export export/import types
 pub use export_import::{
-    CompressionType, ExportData, ExportMetadata, ExportOptions, ExportType, ExportedSession,
-    ExportedWorkspace, ImportOptions, ImportResult, read_export_file, write_export_file,
-    list_export_sessions, preview_export_file,
+    CompressionType, ExportData, ExportMetadata, ExportOptions, ExportStats, ExportType,
+    ExportedSession, ExportedWorkspace, ImportOptions, ImportResult,
+    read_export_file, write_export_file, list_export_sessions, preview_export_file,
 };
