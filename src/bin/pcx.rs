@@ -103,7 +103,9 @@ enum Commands {
         Export workspace with all its sessions:\n\
         $ pcx export --output workspace.json --workspace <uuid>\n\n\
         Pretty-printed JSON for debugging:\n\
-        $ pcx export --output backup.json --pretty"
+        $ pcx export --output backup.json --pretty\n\n\
+        Force overwrite without asking:\n\
+        $ pcx export --output backup.json.gz --force"
     )]
     Export {
         /// Output file path. Extension determines compression:
@@ -131,6 +133,10 @@ enum Commands {
         /// Pretty print JSON (human-readable, larger file size)
         #[arg(long)]
         pretty: bool,
+
+        /// Overwrite existing file without asking
+        #[arg(long, short = 'f')]
+        force: bool,
     },
 
     /// Import data from JSON file
@@ -363,9 +369,10 @@ async fn main() -> Result<(), String> {
             workspace,
             checkpoints,
             pretty,
+            force,
         }) => {
             init_logging(false);
-            handle_export(output, compress, session, workspace, checkpoints, pretty).await
+            handle_export(output, compress, session, workspace, checkpoints, pretty, force).await
         }
 
         Some(Commands::Import {
@@ -883,8 +890,26 @@ async fn handle_export(
     workspace: Option<String>,
     checkpoints: bool,
     pretty: bool,
+    force: bool,
 ) -> Result<(), String> {
+    use std::io::{self, Write};
     use std::path::Path;
+
+    let path = Path::new(&output);
+
+    // Check if file exists and ask for confirmation
+    if path.exists() && !force {
+        print!("File '{}' already exists. Overwrite? [y/N] ", output);
+        io::stdout().flush().ok();
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).map_err(|e| format!("Failed to read input: {}", e))?;
+
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Export cancelled.");
+            return Ok(());
+        }
+    }
 
     println!("Initializing export...");
 
