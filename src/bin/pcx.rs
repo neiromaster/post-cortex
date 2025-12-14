@@ -18,6 +18,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use clap::{Parser, Subcommand};
 use post_cortex::daemon::{DaemonConfig, is_daemon_running, run_stdio_proxy, start_rmcp_daemon};
+use post_cortex::storage::{
+    CompressionType, ExportOptions, ImportOptions, RealRocksDBStorage,
+    read_export_file, write_export_file, list_export_sessions, preview_export_file,
+};
 use post_cortex::workspace::SessionRole;
 use post_cortex::{LockFreeConversationMemorySystem, SystemConfig};
 use serde::{Deserialize, Serialize};
@@ -81,33 +85,155 @@ enum Commands {
         #[command(subcommand)]
         action: SessionAction,
     },
+
+    /// Export data to JSON file
+    #[command(
+        long_about = "Export sessions and workspaces to a JSON file.\n\n\
+        Supports optional compression (gzip, zstd) for smaller file sizes.\n\
+        The compression type is auto-detected from the file extension.\n\n\
+        EXAMPLES:\n\n\
+        Full export (all sessions and workspaces):\n\
+        $ pcx export --output backup.json\n\n\
+        Export with gzip compression:\n\
+        $ pcx export --output backup.json.gz\n\n\
+        Export with zstd compression (fastest):\n\
+        $ pcx export --output backup.json.zst\n\n\
+        Export specific session:\n\
+        $ pcx export --output session.json --session <uuid>\n\n\
+        Export workspace with all its sessions:\n\
+        $ pcx export --output workspace.json --workspace <uuid>\n\n\
+        Pretty-printed JSON for debugging:\n\
+        $ pcx export --output backup.json --pretty"
+    )]
+    Export {
+        /// Output file path. Extension determines compression:
+        /// .json (none), .json.gz (gzip), .json.zst (zstd)
+        #[arg(short, long, value_name = "FILE")]
+        output: String,
+
+        /// Compression type: none, gzip, zstd.
+        /// Auto-detected from file extension if not specified.
+        #[arg(short, long, value_name = "TYPE")]
+        compress: Option<String>,
+
+        /// Export only specific session(s). Can be repeated.
+        #[arg(long, value_name = "UUID")]
+        session: Option<Vec<String>>,
+
+        /// Export only specific workspace and all its sessions
+        #[arg(long, value_name = "UUID")]
+        workspace: Option<String>,
+
+        /// Include checkpoints in export
+        #[arg(long)]
+        checkpoints: bool,
+
+        /// Pretty print JSON (human-readable, larger file size)
+        #[arg(long)]
+        pretty: bool,
+    },
+
+    /// Import data from JSON file
+    #[command(
+        long_about = "Import sessions and workspaces from an export file.\n\n\
+        Supports automatic decompression based on file extension.\n\
+        Use --list to preview contents before importing.\n\n\
+        EXAMPLES:\n\n\
+        List contents without importing:\n\
+        $ pcx import --input backup.json --list\n\n\
+        Import everything:\n\
+        $ pcx import --input backup.json\n\n\
+        Import from compressed file:\n\
+        $ pcx import --input backup.json.gz\n\n\
+        Import specific session only:\n\
+        $ pcx import --input backup.json --session <uuid>\n\n\
+        Import and skip existing (no errors):\n\
+        $ pcx import --input backup.json --skip-existing\n\n\
+        Import and overwrite existing:\n\
+        $ pcx import --input backup.json --overwrite"
+    )]
+    Import {
+        /// Input file path (.json, .json.gz, or .json.zst)
+        #[arg(short, long, value_name = "FILE")]
+        input: String,
+
+        /// Import only specific session(s). Can be repeated.
+        #[arg(long, value_name = "UUID")]
+        session: Option<Vec<String>>,
+
+        /// Import only specific workspace from the file
+        #[arg(long, value_name = "UUID")]
+        workspace: Option<String>,
+
+        /// Skip existing sessions/workspaces (no error)
+        #[arg(long)]
+        skip_existing: bool,
+
+        /// Overwrite existing sessions/workspaces
+        #[arg(long)]
+        overwrite: bool,
+
+        /// List contents of export file without importing
+        #[arg(long)]
+        list: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum WorkspaceAction {
     /// Create a new workspace
+    #[command(
+        long_about = "Create a new workspace for organizing related sessions.\n\n\
+        EXAMPLES:\n\n\
+        $ pcx workspace create my-project \"Main project workspace\""
+    )]
     Create {
         /// Workspace name
+        #[arg(value_name = "NAME")]
         name: String,
         /// Workspace description
-        #[arg(default_value = "")]
+        #[arg(default_value = "", value_name = "DESC")]
         description: String,
     },
+
     /// Delete a workspace
+    #[command(
+        long_about = "Delete a workspace by ID.\n\n\
+        Note: This does NOT delete the sessions in the workspace.\n\n\
+        EXAMPLES:\n\n\
+        $ pcx workspace delete <uuid>"
+    )]
     Delete {
         /// Workspace ID (UUID)
+        #[arg(value_name = "UUID")]
         id: String,
     },
+
     /// List all workspaces
+    #[command(long_about = "List all workspaces with their session counts.")]
     List,
+
     /// Attach a session to a workspace
+    #[command(
+        long_about = "Attach a session to a workspace with a specific role.\n\n\
+        ROLES:\n\
+        - primary:    Main session for this workspace\n\
+        - related:    Related/peer session (default)\n\
+        - dependency: External dependency documentation\n\
+        - shared:     Shared across multiple workspaces\n\n\
+        EXAMPLES:\n\n\
+        $ pcx workspace attach <workspace-uuid> <session-uuid>\n\
+        $ pcx workspace attach <workspace-uuid> <session-uuid> primary"
+    )]
     Attach {
         /// Workspace ID (UUID)
+        #[arg(value_name = "WORKSPACE_UUID")]
         workspace_id: String,
         /// Session ID (UUID)
+        #[arg(value_name = "SESSION_UUID")]
         session_id: String,
         /// Role: primary, related, dependency, shared
-        #[arg(default_value = "related")]
+        #[arg(default_value = "related", value_name = "ROLE")]
         role: String,
     },
 }
@@ -115,18 +241,37 @@ enum WorkspaceAction {
 #[derive(Subcommand)]
 enum SessionAction {
     /// Create a new session
+    #[command(
+        long_about = "Create a new session for storing conversation context.\n\n\
+        EXAMPLES:\n\n\
+        $ pcx session create\n\
+        $ pcx session create my-session\n\
+        $ pcx session create my-session \"Session description\""
+    )]
     Create {
-        /// Session name
+        /// Session name (optional)
+        #[arg(value_name = "NAME")]
         name: Option<String>,
-        /// Session description
+        /// Session description (optional)
+        #[arg(value_name = "DESC")]
         description: Option<String>,
     },
+
     /// Delete a session
+    #[command(
+        long_about = "Delete a session and all its data.\n\n\
+        WARNING: This permanently deletes all context updates in the session.\n\n\
+        EXAMPLES:\n\n\
+        $ pcx session delete <uuid>"
+    )]
     Delete {
         /// Session ID (UUID)
+        #[arg(value_name = "UUID")]
         id: String,
     },
+
     /// List all sessions
+    #[command(long_about = "List all sessions with their workspace associations.")]
     List,
 }
 
@@ -209,6 +354,30 @@ async fn main() -> Result<(), String> {
         Some(Commands::Session { action }) => {
             init_logging(false);
             handle_session_action(action).await
+        }
+
+        Some(Commands::Export {
+            output,
+            compress,
+            session,
+            workspace,
+            checkpoints,
+            pretty,
+        }) => {
+            init_logging(false);
+            handle_export(output, compress, session, workspace, checkpoints, pretty).await
+        }
+
+        Some(Commands::Import {
+            input,
+            session,
+            workspace,
+            skip_existing,
+            overwrite,
+            list,
+        }) => {
+            init_logging(false);
+            handle_import(input, session, workspace, skip_existing, overwrite, list).await
         }
     }
 }
@@ -701,4 +870,237 @@ async fn vectorize_all() -> Result<(), String> {
     eprintln!("Vectorization requires the 'embeddings' feature");
     eprintln!("Rebuild with: cargo build --release --features embeddings");
     Err("Embeddings feature not enabled".to_string())
+}
+
+// ============================================================================
+// Export/Import Handlers
+// ============================================================================
+
+async fn handle_export(
+    output: String,
+    compress: Option<String>,
+    session: Option<Vec<String>>,
+    workspace: Option<String>,
+    checkpoints: bool,
+    pretty: bool,
+) -> Result<(), String> {
+    use std::path::Path;
+
+    println!("Initializing export...");
+
+    let daemon_config = DaemonConfig::load();
+    let data_dir = daemon_config.data_directory;
+    let storage = RealRocksDBStorage::new(&data_dir).await
+        .map_err(|e| {
+            let err_str = e.to_string();
+            if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
+                format!(
+                    "Database is locked by another process (likely the daemon).\n\
+                     \n\
+                     Please stop the daemon first:\n\
+                     \n\
+                     Option 1: Stop via CLI\n\
+                     $ pkill -f 'pcx start'\n\
+                     \n\
+                     Option 2: Stop via launchctl (macOS)\n\
+                     $ launchctl unload ~/Library/LaunchAgents/com.juliusml.post-cortex.plist\n\
+                     \n\
+                     Then retry the export command."
+                )
+            } else {
+                format!("Failed to open storage: {}", e)
+            }
+        })?;
+
+    // Determine compression
+    let compression = if let Some(ref c) = compress {
+        CompressionType::from_str(c)
+            .ok_or_else(|| format!("Invalid compression type: {}. Use: none, gzip, zstd", c))?
+    } else {
+        CompressionType::from_path(Path::new(&output))
+    };
+
+    let options = ExportOptions {
+        compression,
+        include_checkpoints: checkpoints,
+        pretty,
+    };
+
+    // Perform export based on options
+    let export_data = if let Some(workspace_id) = workspace {
+        // Export specific workspace
+        let uuid = Uuid::parse_str(&workspace_id)
+            .map_err(|e| format!("Invalid workspace UUID: {}", e))?;
+        println!("Exporting workspace {}...", workspace_id);
+        storage.export_workspace(uuid, &options).await
+            .map_err(|e| format!("Export failed: {}", e))?
+    } else if let Some(session_ids) = session {
+        // Export specific sessions
+        let uuids: Result<Vec<Uuid>, _> = session_ids
+            .iter()
+            .map(|s| Uuid::parse_str(s).map_err(|e| format!("Invalid session UUID {}: {}", s, e)))
+            .collect();
+        let uuids = uuids?;
+        println!("Exporting {} session(s)...", uuids.len());
+        storage.export_sessions(uuids, &options).await
+            .map_err(|e| format!("Export failed: {}", e))?
+    } else {
+        // Full export
+        println!("Exporting all data...");
+        storage.export_full(&options).await
+            .map_err(|e| format!("Export failed: {}", e))?
+    };
+
+    // Write to file
+    let path = Path::new(&output);
+    let bytes = write_export_file(&export_data, path, &options)
+        .map_err(|e| format!("Failed to write export file: {}", e))?;
+
+    println!();
+    println!("Export complete!");
+    println!("  File:        {}", output);
+    println!("  Format:      {}", export_data.format_version);
+    println!("  Compression: {:?}", compression);
+    println!("  Sessions:    {}", export_data.metadata.session_count);
+    println!("  Workspaces:  {}", export_data.metadata.workspace_count);
+    println!("  Updates:     {}", export_data.metadata.update_count);
+    println!("  Checkpoints: {}", export_data.metadata.checkpoint_count);
+    println!("  Size:        {} bytes (uncompressed JSON)", bytes);
+
+    Ok(())
+}
+
+async fn handle_import(
+    input: String,
+    session: Option<Vec<String>>,
+    workspace: Option<String>,
+    skip_existing: bool,
+    overwrite: bool,
+    list: bool,
+) -> Result<(), String> {
+    use std::path::Path;
+
+    let path = Path::new(&input);
+
+    if !path.exists() {
+        return Err(format!("File not found: {}", input));
+    }
+
+    // List mode - just show contents
+    if list {
+        println!("Reading export file: {}", input);
+        println!();
+
+        let metadata = preview_export_file(path)
+            .map_err(|e| format!("Failed to read export: {}", e))?;
+
+        println!("Export Metadata:");
+        println!("  Format Version:  {}", metadata.post_cortex_version);
+        println!("  Exported At:     {}", metadata.exported_at);
+        println!("  Export Type:     {:?}", metadata.export_type);
+        println!("  Sessions:        {}", metadata.session_count);
+        println!("  Workspaces:      {}", metadata.workspace_count);
+        println!("  Updates:         {}", metadata.update_count);
+        println!("  Checkpoints:     {}", metadata.checkpoint_count);
+        println!();
+
+        let sessions = list_export_sessions(path)
+            .map_err(|e| format!("Failed to list sessions: {}", e))?;
+
+        if !sessions.is_empty() {
+            println!("Sessions in export:");
+            println!("{:<38} {:<30} {}", "ID", "Name", "Updates");
+            println!("{:-<38} {:-<30} {:-<10}", "", "", "");
+            for (id, name, updates) in sessions {
+                println!("{:<38} {:<30} {}", id, name, updates);
+            }
+        }
+
+        return Ok(());
+    }
+
+    // Import mode
+    println!("Reading export file: {}", input);
+
+    let export_data = read_export_file(path)
+        .map_err(|e| format!("Failed to read export: {}", e))?;
+
+    println!("  Format:      {}", export_data.format_version);
+    println!("  Sessions:    {}", export_data.sessions.len());
+    println!("  Workspaces:  {}", export_data.workspaces.len());
+    println!();
+
+    // Parse filters
+    let session_filter = if let Some(ref ids) = session {
+        let uuids: Result<Vec<Uuid>, _> = ids
+            .iter()
+            .map(|s| Uuid::parse_str(s).map_err(|e| format!("Invalid session UUID {}: {}", s, e)))
+            .collect();
+        Some(uuids?)
+    } else {
+        None
+    };
+
+    let workspace_filter = if let Some(ref id) = workspace {
+        let uuid = Uuid::parse_str(id)
+            .map_err(|e| format!("Invalid workspace UUID: {}", e))?;
+        Some(vec![uuid])
+    } else {
+        None
+    };
+
+    let options = ImportOptions {
+        session_filter,
+        workspace_filter,
+        skip_existing,
+        overwrite,
+    };
+
+    println!("Initializing import...");
+    let daemon_config = DaemonConfig::load();
+    let data_dir = daemon_config.data_directory;
+    let storage = RealRocksDBStorage::new(&data_dir).await
+        .map_err(|e| {
+            let err_str = e.to_string();
+            if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
+                format!(
+                    "Database is locked by another process (likely the daemon).\n\
+                     \n\
+                     Please stop the daemon first:\n\
+                     \n\
+                     Option 1: Stop via CLI\n\
+                     $ pkill -f 'pcx start'\n\
+                     \n\
+                     Option 2: Stop via launchctl (macOS)\n\
+                     $ launchctl unload ~/Library/LaunchAgents/com.juliusml.post-cortex.plist\n\
+                     \n\
+                     Then retry the import command."
+                )
+            } else {
+                format!("Failed to open storage: {}", e)
+            }
+        })?;
+
+    println!("Importing data...");
+    let result = storage.import_data(export_data, &options).await
+        .map_err(|e| format!("Import failed: {}", e))?;
+
+    println!();
+    println!("Import complete!");
+    println!("  Sessions imported:   {}", result.sessions_imported);
+    println!("  Sessions skipped:    {}", result.sessions_skipped);
+    println!("  Workspaces imported: {}", result.workspaces_imported);
+    println!("  Workspaces skipped:  {}", result.workspaces_skipped);
+    println!("  Updates imported:    {}", result.updates_imported);
+    println!("  Checkpoints:         {}", result.checkpoints_imported);
+
+    if !result.errors.is_empty() {
+        println!();
+        println!("Errors ({}):", result.errors.len());
+        for err in &result.errors {
+            println!("  - {}", err);
+        }
+    }
+
+    Ok(())
 }

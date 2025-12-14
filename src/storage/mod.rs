@@ -17,8 +17,16 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
+pub mod export_import;
 pub mod rocksdb_storage;
 
 // Re-export RealRocksDBStorage as the main storage type
 pub use rocksdb_storage::RealRocksDBStorage;
 pub use rocksdb_storage::SessionCheckpoint;
+
+// Re-export export/import types
+pub use export_import::{
+    CompressionType, ExportData, ExportMetadata, ExportOptions, ExportType, ExportedSession,
+    ExportedWorkspace, ImportOptions, ImportResult, read_export_file, write_export_file,
+    list_export_sessions, preview_export_file,
+};

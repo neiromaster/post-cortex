@@ -60,6 +60,10 @@ hyper = "1.5"
 dirs = "5.0"
 reqwest = { version = "0.12", features = ["json"] }
 toml = "0.8"
+
+# Export/Import compression
+flate2 = "1.0"
+zstd = "0.13"
 rmcp = { version = "0.9", features = ["server", "transport-sse-server"] }
 
 [dev-dependencies]

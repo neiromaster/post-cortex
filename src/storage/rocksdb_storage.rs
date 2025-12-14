@@ -31,7 +31,7 @@ use tracing::info;
 
 use uuid::Uuid;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StoredWorkspace {
     pub id: Uuid,
     pub name: String,
@@ -40,7 +40,7 @@ pub struct StoredWorkspace {
     pub created_at: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct StoredWorkspaceSession {
     pub workspace_id: Uuid,
     pub session_id: Uuid,
@@ -641,6 +641,85 @@ impl RealRocksDBStorage {
                 session_id, workspace_id
             );
             Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+    }
+
+    // ========================================================================
+    // Export/Import Support Methods
+    // ========================================================================
+
+    /// Load all updates for a session
+    pub async fn load_session_updates(&self, session_id: Uuid) -> Result<Vec<ContextUpdate>> {
+        let db = self.db.clone();
+        let update_prefix = format!("session:{}:update:", session_id);
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<ContextUpdate>> {
+            let mut updates = Vec::new();
+            let iter = db.iterator(rocksdb::IteratorMode::From(
+                update_prefix.as_bytes(),
+                rocksdb::Direction::Forward,
+            ));
+
+            for item in iter {
+                let (key, value) = item?;
+                let key_str = String::from_utf8_lossy(&key);
+
+                if !key_str.starts_with(&update_prefix) {
+                    break;
+                }
+
+                if let Ok((update, _)) = bincode::serde::decode_from_slice::<ContextUpdate, _>(
+                    &value,
+                    bincode::config::standard(),
+                ) {
+                    updates.push(update);
+                }
+            }
+
+            info!(
+                "RealRocksDBStorage: Loaded {} updates for session {}",
+                updates.len(),
+                session_id
+            );
+            Ok(updates)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+    }
+
+    /// List all checkpoints
+    pub async fn list_checkpoints(&self) -> Result<Vec<SessionCheckpoint>> {
+        let db = self.db.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<SessionCheckpoint>> {
+            let mut checkpoints = Vec::new();
+            let iter = db.iterator(rocksdb::IteratorMode::From(
+                b"checkpoint:",
+                rocksdb::Direction::Forward,
+            ));
+
+            for item in iter {
+                let (key, value) = item?;
+                let key_str = String::from_utf8_lossy(&key);
+
+                if !key_str.starts_with("checkpoint:") {
+                    break;
+                }
+
+                if let Ok((checkpoint, _)) =
+                    bincode::serde::decode_from_slice::<SessionCheckpoint, _>(
+                        &value,
+                        bincode::config::standard(),
+                    )
+                {
+                    checkpoints.push(checkpoint);
+                }
+            }
+
+            info!("RealRocksDBStorage: Listed {} checkpoints", checkpoints.len());
+            Ok(checkpoints)
         })
         .await
         .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
