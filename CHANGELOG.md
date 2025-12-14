@@ -5,6 +5,24 @@ All notable changes to Post-Cortex will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2025-12-14
+
+### Added
+
+- **Data Export/Import**: Full backup and restore functionality for Post-Cortex data
+  - `pcx export` - Export sessions, workspaces, updates, and checkpoints to JSON
+  - `pcx import` - Import data with selective filtering and conflict handling
+  - **Compression support**: gzip (`.json.gz`) and zstd (`.json.zst`) with auto-detection
+  - **Selective export**: Export specific sessions (`--session`) or workspaces (`--workspace`)
+  - **Import options**: `--skip-existing`, `--overwrite`, `--list` for preview
+  - **Versioned format**: Format version 1.0.0 with forward compatibility support
+  - **Overwrite protection**: Prompts before overwriting existing files (`--force` to skip)
+
+### Improved
+
+- **CLI help system**: Added detailed `--help` with examples for all commands and subcommands
+- **Storage layer**: Added `load_session_updates` and `list_checkpoints` methods to RocksDB storage
+
 ## [0.1.9] - 2025-12-11
 
 ### Changed
