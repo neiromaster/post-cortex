@@ -234,6 +234,12 @@ pub trait VectorStorage: Send + Sync {
 
     /// Get total vector count
     async fn total_count(&self) -> usize;
+
+    /// Get all vectors for a session (for loading into memory)
+    async fn get_session_vectors(&self, session_id: &str) -> Result<Vec<(Vec<f32>, VectorMetadata)>>;
+
+    /// Get all vectors from storage (for loading into memory on startup)
+    async fn get_all_vectors(&self) -> Result<Vec<(Vec<f32>, VectorMetadata)>>;
 }
 
 /// Unified storage backend enum for runtime selection.

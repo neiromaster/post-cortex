@@ -85,11 +85,35 @@ impl LockFreeDaemonServer {
             config.host, config.port
         );
 
-        // Create memory system
-        let system_config = crate::SystemConfig {
+        // Create memory system with storage backend from config
+        #[allow(unused_mut)]
+        let mut system_config = crate::SystemConfig {
             data_directory: config.data_directory.clone(),
             ..Default::default()
         };
+
+        // Configure storage backend if surrealdb-storage feature is enabled
+        #[cfg(feature = "surrealdb-storage")]
+        {
+            use crate::storage::traits::StorageBackendType;
+
+            system_config.storage_backend = match config.storage_backend.as_str() {
+                "surrealdb" => StorageBackendType::SurrealDB,
+                _ => StorageBackendType::RocksDB,
+            };
+            system_config.surrealdb_endpoint = config.surrealdb_endpoint.clone();
+            system_config.surrealdb_username = config.surrealdb_username.clone();
+            system_config.surrealdb_password = config.surrealdb_password.clone();
+
+            if system_config.storage_backend == StorageBackendType::SurrealDB {
+                info!(
+                    "Using SurrealDB storage backend: {}",
+                    system_config.surrealdb_endpoint.as_deref().unwrap_or("not configured")
+                );
+            } else {
+                info!("Using RocksDB storage backend");
+            }
+        }
 
         let memory_system = Arc::new(
             ConversationMemorySystem::new(system_config)
@@ -1502,6 +1526,10 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .to_string(),
+            storage_backend: "rocksdb".to_string(),
+            surrealdb_endpoint: None,
+            surrealdb_username: None,
+            surrealdb_password: None,
         };
 
         let server = LockFreeDaemonServer::new(config).await;
@@ -1523,6 +1551,10 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .to_string(),
+            storage_backend: "rocksdb".to_string(),
+            surrealdb_endpoint: None,
+            surrealdb_username: None,
+            surrealdb_password: None,
         };
 
         let server = LockFreeDaemonServer::new(config).await.unwrap();

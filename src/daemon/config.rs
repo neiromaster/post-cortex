@@ -38,6 +38,27 @@ pub struct DaemonConfig {
 
     /// Data directory for RocksDB (default: ~/.post-cortex/data)
     pub data_directory: String,
+
+    /// Storage backend: "rocksdb" or "surrealdb" (default: rocksdb)
+    #[serde(default = "default_storage_backend")]
+    pub storage_backend: String,
+
+    /// SurrealDB endpoint (required if storage_backend = "surrealdb")
+    /// Example: "ws://localhost:8000"
+    #[serde(default)]
+    pub surrealdb_endpoint: Option<String>,
+
+    /// SurrealDB username (optional)
+    #[serde(default)]
+    pub surrealdb_username: Option<String>,
+
+    /// SurrealDB password (optional)
+    #[serde(default)]
+    pub surrealdb_password: Option<String>,
+}
+
+fn default_storage_backend() -> String {
+    "rocksdb".to_string()
 }
 
 impl Default for DaemonConfig {
@@ -46,6 +67,10 @@ impl Default for DaemonConfig {
             host: "127.0.0.1".to_string(),
             port: 3737,
             data_directory: default_data_dir(),
+            storage_backend: default_storage_backend(),
+            surrealdb_endpoint: None,
+            surrealdb_username: None,
+            surrealdb_password: None,
         }
     }
 }
@@ -106,6 +131,35 @@ impl DaemonConfig {
             tracing::debug!("Overriding data_directory from PC_DATA_DIR environment variable");
         }
 
+        // Storage backend overrides
+        if let Ok(backend) = std::env::var("PC_STORAGE_BACKEND") {
+            config.storage_backend = backend;
+            tracing::debug!(
+                "Overriding storage_backend from PC_STORAGE_BACKEND environment variable"
+            );
+        }
+
+        if let Ok(endpoint) = std::env::var("PC_SURREALDB_ENDPOINT") {
+            config.surrealdb_endpoint = Some(endpoint);
+            tracing::debug!(
+                "Overriding surrealdb_endpoint from PC_SURREALDB_ENDPOINT environment variable"
+            );
+        }
+
+        if let Ok(username) = std::env::var("PC_SURREALDB_USER") {
+            config.surrealdb_username = Some(username);
+            tracing::debug!(
+                "Overriding surrealdb_username from PC_SURREALDB_USER environment variable"
+            );
+        }
+
+        if let Ok(password) = std::env::var("PC_SURREALDB_PASS") {
+            config.surrealdb_password = Some(password);
+            tracing::debug!(
+                "Overriding surrealdb_password from PC_SURREALDB_PASS environment variable"
+            );
+        }
+
         config
     }
 
@@ -138,6 +192,10 @@ impl DaemonConfig {
              #   PC_HOST - Override host\n\
              #   PC_PORT - Override port\n\
              #   PC_DATA_DIR - Override data directory\n\
+             #   PC_STORAGE_BACKEND - Storage backend: \"rocksdb\" or \"surrealdb\"\n\
+             #   PC_SURREALDB_ENDPOINT - SurrealDB WebSocket endpoint (e.g., \"ws://localhost:8000\")\n\
+             #   PC_SURREALDB_USER - SurrealDB username\n\
+             #   PC_SURREALDB_PASS - SurrealDB password\n\
              # \n\
              # Priority: Environment > Config file > Defaults\n\n\
              {}",

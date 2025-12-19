@@ -18,13 +18,13 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use clap::{Parser, Subcommand};
 use post_cortex::daemon::{DaemonConfig, is_daemon_running, run_stdio_proxy, start_rmcp_daemon};
-use post_cortex::storage::{
-    CompressionType, ExportOptions, ImportOptions, RealRocksDBStorage,
-    read_export_file, write_export_file, list_export_sessions, preview_export_file,
-    StorageBackendType, Storage, GraphStorage,
-};
 #[cfg(feature = "surrealdb-storage")]
 use post_cortex::storage::SurrealDBStorage;
+use post_cortex::storage::{
+    CompressionType, ExportOptions, GraphStorage, ImportOptions, RealRocksDBStorage, Storage,
+    StorageBackendType, list_export_sessions, preview_export_file, read_export_file,
+    write_export_file,
+};
 use post_cortex::workspace::SessionRole;
 use post_cortex::{LockFreeConversationMemorySystem, SystemConfig};
 use serde::{Deserialize, Serialize};
@@ -90,8 +90,7 @@ enum Commands {
     },
 
     /// Export data to JSON file
-    #[command(
-        long_about = "Export sessions and workspaces to a JSON file.\n\n\
+    #[command(long_about = "Export sessions and workspaces to a JSON file.\n\n\
         Supports optional compression (gzip, zstd) for smaller file sizes.\n\
         The compression type is auto-detected from the file extension.\n\n\
         EXAMPLES:\n\n\
@@ -108,8 +107,7 @@ enum Commands {
         Pretty-printed JSON for debugging:\n\
         $ pcx export --output backup.json --pretty\n\n\
         Force overwrite without asking:\n\
-        $ pcx export --output backup.json.gz --force"
-    )]
+        $ pcx export --output backup.json.gz --force")]
     Export {
         /// Output file path. Extension determines compression:
         /// .json (none), .json.gz (gzip), .json.zst (zstd)
@@ -143,8 +141,7 @@ enum Commands {
     },
 
     /// Import data from JSON file
-    #[command(
-        long_about = "Import sessions and workspaces from an export file.\n\n\
+    #[command(long_about = "Import sessions and workspaces from an export file.\n\n\
         Supports automatic decompression based on file extension.\n\
         Use --list to preview contents before importing.\n\n\
         EXAMPLES:\n\n\
@@ -159,8 +156,7 @@ enum Commands {
         Import and skip existing (no errors):\n\
         $ pcx import --input backup.json --skip-existing\n\n\
         Import and overwrite existing:\n\
-        $ pcx import --input backup.json --overwrite"
-    )]
+        $ pcx import --input backup.json --overwrite")]
     Import {
         /// Input file path (.json, .json.gz, or .json.zst)
         #[arg(short, long, value_name = "FILE")]
@@ -189,8 +185,7 @@ enum Commands {
 
     /// Migrate data between storage backends
     #[cfg(feature = "surrealdb-storage")]
-    #[command(
-        long_about = "Migrate data from one storage backend to another.\n\n\
+    #[command(long_about = "Migrate data from one storage backend to another.\n\n\
         Currently supports migration from RocksDB to SurrealDB (local or remote).\n\n\
         EXAMPLES:\n\n\
         Migrate to local SurrealDB:\n\
@@ -200,8 +195,7 @@ enum Commands {
             --remote-endpoint localhost:8000 \\\n\
             --username root --password root\n\n\
         Dry run (show what would be migrated):\n\
-        $ pcx migrate --from rocksdb --to surrealdb --dry-run"
-    )]
+        $ pcx migrate --from rocksdb --to surrealdb --dry-run")]
     Migrate {
         /// Source storage backend (rocksdb)
         #[arg(long, value_name = "BACKEND")]
@@ -255,12 +249,10 @@ enum WorkspaceAction {
     },
 
     /// Delete a workspace
-    #[command(
-        long_about = "Delete a workspace by ID.\n\n\
+    #[command(long_about = "Delete a workspace by ID.\n\n\
         Note: This does NOT delete the sessions in the workspace.\n\n\
         EXAMPLES:\n\n\
-        $ pcx workspace delete <uuid>"
-    )]
+        $ pcx workspace delete <uuid>")]
     Delete {
         /// Workspace ID (UUID)
         #[arg(value_name = "UUID")]
@@ -316,12 +308,10 @@ enum SessionAction {
     },
 
     /// Delete a session
-    #[command(
-        long_about = "Delete a session and all its data.\n\n\
+    #[command(long_about = "Delete a session and all its data.\n\n\
         WARNING: This permanently deletes all context updates in the session.\n\n\
         EXAMPLES:\n\n\
-        $ pcx session delete <uuid>"
-    )]
+        $ pcx session delete <uuid>")]
     Delete {
         /// Session ID (UUID)
         #[arg(value_name = "UUID")]
@@ -424,7 +414,16 @@ async fn main() -> Result<(), String> {
             force,
         }) => {
             init_logging(false);
-            handle_export(output, compress, session, workspace, checkpoints, pretty, force).await
+            handle_export(
+                output,
+                compress,
+                session,
+                workspace,
+                checkpoints,
+                pretty,
+                force,
+            )
+            .await
         }
 
         Some(Commands::Import {
@@ -451,7 +450,17 @@ async fn main() -> Result<(), String> {
             dry_run,
         }) => {
             init_logging(false);
-            handle_migrate(from, to, source_path, target_path, remote_endpoint, username, password, dry_run).await
+            handle_migrate(
+                from,
+                to,
+                source_path,
+                target_path,
+                remote_endpoint,
+                username,
+                password,
+                dry_run,
+            )
+            .await
         }
     }
 }
@@ -970,7 +979,9 @@ async fn handle_export(
         io::stdout().flush().ok();
 
         let mut input = String::new();
-        io::stdin().read_line(&mut input).map_err(|e| format!("Failed to read input: {}", e))?;
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| format!("Failed to read input: {}", e))?;
 
         if !input.trim().eq_ignore_ascii_case("y") {
             println!("Export cancelled.");
@@ -982,12 +993,11 @@ async fn handle_export(
 
     let daemon_config = DaemonConfig::load();
     let data_dir = daemon_config.data_directory;
-    let storage = RealRocksDBStorage::new(&data_dir).await
-        .map_err(|e| {
-            let err_str = e.to_string();
-            if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
-                format!(
-                    "Database is locked by another process (likely the daemon).\n\
+    let storage = RealRocksDBStorage::new(&data_dir).await.map_err(|e| {
+        let err_str = e.to_string();
+        if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
+            format!(
+                "Database is locked by another process (likely the daemon).\n\
                      \n\
                      Please stop the daemon first:\n\
                      \n\
@@ -998,11 +1008,11 @@ async fn handle_export(
                      $ launchctl unload ~/Library/LaunchAgents/com.juliusml.post-cortex.plist\n\
                      \n\
                      Then retry the export command."
-                )
-            } else {
-                format!("Failed to open storage: {}", e)
-            }
-        })?;
+            )
+        } else {
+            format!("Failed to open storage: {}", e)
+        }
+    })?;
 
     // Determine compression
     let compression = if let Some(ref c) = compress {
@@ -1021,10 +1031,12 @@ async fn handle_export(
     // Perform export based on options
     let export_data = if let Some(workspace_id) = workspace {
         // Export specific workspace
-        let uuid = Uuid::parse_str(&workspace_id)
-            .map_err(|e| format!("Invalid workspace UUID: {}", e))?;
+        let uuid =
+            Uuid::parse_str(&workspace_id).map_err(|e| format!("Invalid workspace UUID: {}", e))?;
         println!("Exporting workspace {}...", workspace_id);
-        storage.export_workspace(uuid, &options).await
+        storage
+            .export_workspace(uuid, &options)
+            .await
             .map_err(|e| format!("Export failed: {}", e))?
     } else if let Some(session_ids) = session {
         // Export specific sessions
@@ -1034,12 +1046,16 @@ async fn handle_export(
             .collect();
         let uuids = uuids?;
         println!("Exporting {} session(s)...", uuids.len());
-        storage.export_sessions(uuids, &options).await
+        storage
+            .export_sessions(uuids, &options)
+            .await
             .map_err(|e| format!("Export failed: {}", e))?
     } else {
         // Full export
         println!("Exporting all data...");
-        storage.export_full(&options).await
+        storage
+            .export_full(&options)
+            .await
             .map_err(|e| format!("Export failed: {}", e))?
     };
 
@@ -1062,7 +1078,8 @@ async fn handle_export(
     if compression == CompressionType::None {
         println!("  Size:        {} bytes", stats.file_size);
     } else {
-        let compression_ratio = (1.0 - (stats.file_size as f64 / stats.uncompressed_size as f64)) * 100.0;
+        let compression_ratio =
+            (1.0 - (stats.file_size as f64 / stats.uncompressed_size as f64)) * 100.0;
         println!(
             "  Size:        {} bytes ({:.0}% compression, from {} uncompressed)",
             stats.file_size, compression_ratio, stats.uncompressed_size
@@ -1093,8 +1110,8 @@ async fn handle_import(
         println!("Reading export file: {}", input);
         println!();
 
-        let metadata = preview_export_file(path)
-            .map_err(|e| format!("Failed to read export: {}", e))?;
+        let metadata =
+            preview_export_file(path).map_err(|e| format!("Failed to read export: {}", e))?;
 
         println!("Export Metadata:");
         println!("  Format Version:  {}", metadata.post_cortex_version);
@@ -1106,8 +1123,8 @@ async fn handle_import(
         println!("  Checkpoints:     {}", metadata.checkpoint_count);
         println!();
 
-        let sessions = list_export_sessions(path)
-            .map_err(|e| format!("Failed to list sessions: {}", e))?;
+        let sessions =
+            list_export_sessions(path).map_err(|e| format!("Failed to list sessions: {}", e))?;
 
         if !sessions.is_empty() {
             println!("Sessions in export:");
@@ -1124,8 +1141,8 @@ async fn handle_import(
     // Import mode
     println!("Reading export file: {}", input);
 
-    let export_data = read_export_file(path)
-        .map_err(|e| format!("Failed to read export: {}", e))?;
+    let export_data =
+        read_export_file(path).map_err(|e| format!("Failed to read export: {}", e))?;
 
     println!("  Format:      {}", export_data.format_version);
     println!("  Sessions:    {}", export_data.sessions.len());
@@ -1144,8 +1161,7 @@ async fn handle_import(
     };
 
     let workspace_filter = if let Some(ref id) = workspace {
-        let uuid = Uuid::parse_str(id)
-            .map_err(|e| format!("Invalid workspace UUID: {}", e))?;
+        let uuid = Uuid::parse_str(id).map_err(|e| format!("Invalid workspace UUID: {}", e))?;
         Some(vec![uuid])
     } else {
         None
@@ -1161,12 +1177,11 @@ async fn handle_import(
     println!("Initializing import...");
     let daemon_config = DaemonConfig::load();
     let data_dir = daemon_config.data_directory;
-    let storage = RealRocksDBStorage::new(&data_dir).await
-        .map_err(|e| {
-            let err_str = e.to_string();
-            if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
-                format!(
-                    "Database is locked by another process (likely the daemon).\n\
+    let storage = RealRocksDBStorage::new(&data_dir).await.map_err(|e| {
+        let err_str = e.to_string();
+        if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
+            format!(
+                "Database is locked by another process (likely the daemon).\n\
                      \n\
                      Please stop the daemon first:\n\
                      \n\
@@ -1177,14 +1192,16 @@ async fn handle_import(
                      $ launchctl unload ~/Library/LaunchAgents/com.juliusml.post-cortex.plist\n\
                      \n\
                      Then retry the import command."
-                )
-            } else {
-                format!("Failed to open storage: {}", e)
-            }
-        })?;
+            )
+        } else {
+            format!("Failed to open storage: {}", e)
+        }
+    })?;
 
     println!("Importing data...");
-    let result = storage.import_data(export_data, &options).await
+    let result = storage
+        .import_data(export_data, &options)
+        .await
         .map_err(|e| format!("Import failed: {}", e))?;
 
     println!();
@@ -1247,18 +1264,19 @@ async fn handle_migrate(
 
     // Determine target (local path or remote endpoint)
     let is_remote = remote_endpoint.is_some();
-    let target = target_path
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".post-cortex/surrealdb")
-        });
+    let target = target_path.map(PathBuf::from).unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".post-cortex/surrealdb")
+    });
 
     println!("Migration: {} -> {}", from, to);
     println!("  Source path: {}", source.display());
     if is_remote {
-        println!("  Target: remote SurrealDB at {}", remote_endpoint.as_ref().unwrap());
+        println!(
+            "  Target: remote SurrealDB at {}",
+            remote_endpoint.as_ref().unwrap()
+        );
     } else {
         println!("  Target path: {}", target.display());
     }
@@ -1266,25 +1284,30 @@ async fn handle_migrate(
 
     // Open source storage
     println!("Opening source storage (RocksDB)...");
-    let source_storage = RealRocksDBStorage::new(&source).await
-        .map_err(|e| {
-            let err_str = e.to_string();
-            if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
-                format!(
-                    "Source database is locked by another process (likely the daemon).\n\
+    let source_storage = RealRocksDBStorage::new(&source).await.map_err(|e| {
+        let err_str = e.to_string();
+        if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
+            format!(
+                "Source database is locked by another process (likely the daemon).\n\
                      Please stop the daemon first: pkill -f 'pcx start'"
-                )
-            } else {
-                format!("Failed to open source storage: {}", e)
-            }
-        })?;
+            )
+        } else {
+            format!("Failed to open source storage: {}", e)
+        }
+    })?;
 
     // Get source statistics
-    let sessions = source_storage.list_sessions().await
+    let sessions = source_storage
+        .list_sessions()
+        .await
         .map_err(|e| format!("Failed to list sessions: {}", e))?;
-    let workspaces = source_storage.list_workspaces().await
+    let workspaces = source_storage
+        .list_workspaces()
+        .await
         .map_err(|e| format!("Failed to list workspaces: {}", e))?;
-    let checkpoints = source_storage.list_checkpoints().await
+    let checkpoints = source_storage
+        .list_checkpoints()
+        .await
         .map_err(|e| format!("Failed to list checkpoints: {}", e))?;
 
     println!("Source statistics:");
@@ -1299,8 +1322,13 @@ async fn handle_migrate(
         println!("Sessions to migrate:");
         for session_id in &sessions {
             if let Ok(session) = source_storage.load_session(*session_id).await {
-                let name = session.name().clone().unwrap_or_else(|| "Unnamed".to_string());
-                let update_count = source_storage.load_session_updates(*session_id).await
+                let name = session
+                    .name()
+                    .clone()
+                    .unwrap_or_else(|| "Unnamed".to_string());
+                let update_count = source_storage
+                    .load_session_updates(*session_id)
+                    .await
                     .map(|u| u.len())
                     .unwrap_or(0);
                 println!("  {} - {} ({} updates)", session_id, name, update_count);
@@ -1312,15 +1340,13 @@ async fn handle_migrate(
     // Open target storage (local or remote)
     let target_storage = if let Some(endpoint) = &remote_endpoint {
         println!("Connecting to remote SurrealDB at {}...", endpoint);
-        SurrealDBStorage::new(
-            endpoint,
-            username.as_deref(),
-            password.as_deref(),
-        ).await
-        .map_err(|e| format!("Failed to connect to remote SurrealDB: {}", e))?
+        SurrealDBStorage::new(endpoint, username.as_deref(), password.as_deref())
+            .await
+            .map_err(|e| format!("Failed to connect to remote SurrealDB: {}", e))?
     } else {
         println!("Opening local SurrealDB at {}...", target.display());
-        SurrealDBStorage::new(target.to_str().unwrap_or_default(), None, None).await
+        SurrealDBStorage::new(target.to_str().unwrap_or_default(), None, None)
+            .await
             .map_err(|e| format!("Failed to open target storage: {}", e))?
     };
 
@@ -1335,7 +1361,10 @@ async fn handle_migrate(
     for session_id in &sessions {
         match source_storage.load_session(*session_id).await {
             Ok(session) => {
-                let name = session.name().clone().unwrap_or_else(|| "Unnamed".to_string());
+                let name = session
+                    .name()
+                    .clone()
+                    .unwrap_or_else(|| "Unnamed".to_string());
 
                 // Save session to target
                 if let Err(e) = target_storage.save_session(&session).await {
@@ -1348,8 +1377,14 @@ async fn handle_migrate(
                     Ok(updates) => {
                         let count = updates.len();
                         if !updates.is_empty() {
-                            if let Err(e) = target_storage.batch_save_updates(*session_id, updates).await {
-                                println!("  [WARN] {} - {}: Failed to save updates: {}", session_id, name, e);
+                            if let Err(e) = target_storage
+                                .batch_save_updates(*session_id, updates)
+                                .await
+                            {
+                                println!(
+                                    "  [WARN] {} - {}: Failed to save updates: {}",
+                                    session_id, name, e
+                                );
                             } else {
                                 migrated_updates += count;
                             }
@@ -1357,7 +1392,10 @@ async fn handle_migrate(
                         count
                     }
                     Err(e) => {
-                        println!("  [WARN] {} - {}: Failed to load updates: {}", session_id, name, e);
+                        println!(
+                            "  [WARN] {} - {}: Failed to load updates: {}",
+                            session_id, name, e
+                        );
                         0
                     }
                 };
@@ -1367,7 +1405,10 @@ async fn handle_migrate(
                 let entity_count = entities.len();
                 for entity in &entities {
                     if let Err(e) = target_storage.upsert_entity(*session_id, entity).await {
-                        println!("  [WARN] {} - {}: Failed to save entity '{}': {}", session_id, name, entity.name, e);
+                        println!(
+                            "  [WARN] {} - {}: Failed to save entity '{}': {}",
+                            session_id, name, entity.name, e
+                        );
                     } else {
                         migrated_entities += 1;
                     }
@@ -1378,15 +1419,19 @@ async fn handle_migrate(
                 let rel_count = relationships.len();
                 for rel in &relationships {
                     if let Err(e) = target_storage.create_relationship(*session_id, rel).await {
-                        println!("  [WARN] {} - {}: Failed to save relationship '{}'->'{}': {}",
-                            session_id, name, rel.from_entity, rel.to_entity, e);
+                        println!(
+                            "  [WARN] {} - {}: Failed to save relationship '{}'->'{}': {}",
+                            session_id, name, rel.from_entity, rel.to_entity, e
+                        );
                     } else {
                         migrated_relationships += 1;
                     }
                 }
 
-                println!("  [OK] {} - {} ({} updates, {} entities, {} relations)",
-                    session_id, name, update_count, entity_count, rel_count);
+                println!(
+                    "  [OK] {} - {} ({} updates, {} entities, {} relations)",
+                    session_id, name, update_count, entity_count, rel_count
+                );
                 migrated_sessions += 1;
             }
             Err(e) => {
@@ -1409,7 +1454,12 @@ async fn handle_migrate(
             println!("  [ERROR] {} - {}: {}", ws.id, ws.name, e);
             continue;
         }
-        println!("  [OK] {} - {} ({} sessions)", ws.id, ws.name, ws.sessions.len());
+        println!(
+            "  [OK] {} - {} ({} sessions)",
+            ws.id,
+            ws.name,
+            ws.sessions.len()
+        );
         migrated_workspaces += 1;
     }
 
@@ -1423,19 +1473,77 @@ async fn handle_migrate(
             println!("  [ERROR] {} - {}", checkpoint.id, e);
             continue;
         }
-        println!("  [OK] {} (session: {})", checkpoint.id, checkpoint.session_id);
+        println!(
+            "  [OK] {} (session: {})",
+            checkpoint.id, checkpoint.session_id
+        );
         migrated_checkpoints += 1;
     }
+
+    // Migrate embeddings
+    println!();
+    println!("Migrating embeddings...");
+    let mut migrated_embeddings = 0;
+
+    use post_cortex::storage::traits::VectorStorage;
+    let embeddings = source_storage
+        .load_all_embeddings()
+        .await
+        .map_err(|e| format!("Failed to load embeddings: {}", e))?;
+
+    let total_embeddings = embeddings.len();
+    println!("  Found {} embeddings to migrate", total_embeddings);
+
+    for (i, embedding) in embeddings.into_iter().enumerate() {
+        let metadata = embedding.to_metadata();
+        if let Err(e) = target_storage
+            .add_vector(embedding.vector, metadata.clone())
+            .await
+        {
+            println!(
+                "  [WARN] Failed to migrate embedding {}: {}",
+                metadata.id, e
+            );
+        } else {
+            migrated_embeddings += 1;
+        }
+
+        // Progress every 100 embeddings
+        if (i + 1) % 100 == 0 {
+            println!(
+                "  Progress: {}/{} embeddings migrated",
+                i + 1,
+                total_embeddings
+            );
+        }
+    }
+    println!("  [OK] {} embeddings migrated", migrated_embeddings);
 
     // Summary
     println!();
     println!("Migration complete!");
-    println!("  Sessions migrated:      {}/{}", migrated_sessions, sessions.len());
+    println!(
+        "  Sessions migrated:      {}/{}",
+        migrated_sessions,
+        sessions.len()
+    );
     println!("  Updates migrated:       {}", migrated_updates);
     println!("  Entities migrated:      {}", migrated_entities);
     println!("  Relationships migrated: {}", migrated_relationships);
-    println!("  Workspaces migrated:    {}/{}", migrated_workspaces, workspaces.len());
-    println!("  Checkpoints migrated:   {}/{}", migrated_checkpoints, checkpoints.len());
+    println!(
+        "  Workspaces migrated:    {}/{}",
+        migrated_workspaces,
+        workspaces.len()
+    );
+    println!(
+        "  Checkpoints migrated:   {}/{}",
+        migrated_checkpoints,
+        checkpoints.len()
+    );
+    println!(
+        "  Embeddings migrated:    {}/{}",
+        migrated_embeddings, total_embeddings
+    );
 
     Ok(())
 }

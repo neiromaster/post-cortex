@@ -1565,6 +1565,56 @@ impl VectorStorage for SurrealDBStorage {
 
         0
     }
+
+    async fn get_session_vectors(&self, session_id: &str) -> Result<Vec<(Vec<f32>, VectorMetadata)>> {
+        let mut response = self
+            .db
+            .query("SELECT * FROM embedding WHERE session_id = $session_id")
+            .bind(("session_id", session_id.to_string()))
+            .await?;
+
+        let records: Vec<EmbeddingRecord> = response.take(0)?;
+
+        Ok(records
+            .into_iter()
+            .map(|r| {
+                (
+                    r.vector,
+                    VectorMetadata {
+                        id: r.content_id,
+                        text: r.text,
+                        source: r.session_id,
+                        content_type: r.content_type,
+                        timestamp: Self::parse_datetime(&r.timestamp),
+                        metadata: r.metadata,
+                    },
+                )
+            })
+            .collect())
+    }
+
+    async fn get_all_vectors(&self) -> Result<Vec<(Vec<f32>, VectorMetadata)>> {
+        let mut response = self.db.query("SELECT * FROM embedding").await?;
+
+        let records: Vec<EmbeddingRecord> = response.take(0)?;
+
+        Ok(records
+            .into_iter()
+            .map(|r| {
+                (
+                    r.vector,
+                    VectorMetadata {
+                        id: r.content_id,
+                        text: r.text,
+                        source: r.session_id,
+                        content_type: r.content_type,
+                        timestamp: Self::parse_datetime(&r.timestamp),
+                        metadata: r.metadata,
+                    },
+                )
+            })
+            .collect())
+    }
 }
 
 // ============================================================================

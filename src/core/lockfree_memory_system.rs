@@ -92,6 +92,9 @@ pub struct LockFreeConversationMemorySystem {
     /// Storage actor handle
     pub storage_actor: StorageActorHandle,
 
+    /// Direct storage reference for VectorStorage trait
+    pub vector_storage: Arc<dyn crate::storage::traits::VectorStorage>,
+
     /// System configuration - immutable after creation
     pub config: SystemConfig,
 
@@ -196,7 +199,7 @@ pub struct LockFreeSystemMetrics {
 
 /// Storage actor for handling all storage operations asynchronously
 pub struct StorageActor {
-    storage: RealRocksDBStorage,
+    storage: Arc<dyn crate::storage::traits::Storage>,
     receiver: UnboundedReceiver<StorageMessage>,
     performance_monitor: Arc<LockFreePerformanceMonitor>,
     operation_count: AtomicU64,
@@ -329,6 +332,15 @@ pub struct SystemConfig {
     pub semantic_search_threshold: f32,
     pub auto_vectorize_on_update: bool,
     pub cross_session_search_enabled: bool,
+    // Storage backend configuration
+    #[cfg(feature = "surrealdb-storage")]
+    pub storage_backend: crate::storage::traits::StorageBackendType,
+    #[cfg(feature = "surrealdb-storage")]
+    pub surrealdb_endpoint: Option<String>,
+    #[cfg(feature = "surrealdb-storage")]
+    pub surrealdb_username: Option<String>,
+    #[cfg(feature = "surrealdb-storage")]
+    pub surrealdb_password: Option<String>,
 }
 
 impl Default for SystemConfig {
@@ -356,32 +368,88 @@ impl Default for SystemConfig {
             semantic_search_threshold: 0.7,
             auto_vectorize_on_update: true,
             cross_session_search_enabled: true,
+            // Storage backend defaults
+            #[cfg(feature = "surrealdb-storage")]
+            storage_backend: crate::storage::traits::StorageBackendType::RocksDB,
+            #[cfg(feature = "surrealdb-storage")]
+            surrealdb_endpoint: None,
+            #[cfg(feature = "surrealdb-storage")]
+            surrealdb_username: None,
+            #[cfg(feature = "surrealdb-storage")]
+            surrealdb_password: None,
         }
     }
 }
 
 impl LockFreeConversationMemorySystem {
-    /// Create system from config (backward compatibility)
+    /// Create system from config
     ///
     /// # Errors
     /// Returns an error if storage initialization fails or if system setup encounters any issues
     pub async fn new(config: SystemConfig) -> Result<Self, String> {
-        // Create storage from config
+        // Check storage backend configuration
+        #[cfg(feature = "surrealdb-storage")]
+        {
+            use crate::storage::traits::StorageBackendType;
+
+            if config.storage_backend == StorageBackendType::SurrealDB {
+                let endpoint = config.surrealdb_endpoint.as_ref()
+                    .ok_or_else(|| "SurrealDB endpoint not configured".to_string())?;
+
+                let storage = crate::storage::surrealdb_storage::SurrealDBStorage::new(
+                    endpoint,
+                    config.surrealdb_username.as_deref(),
+                    config.surrealdb_password.as_deref(),
+                ).await
+                .map_err(|e| format!("Failed to initialize SurrealDB: {e}"))?;
+
+                let storage_arc = Arc::new(storage);
+                return Self::new_with_trait_storage(
+                    storage_arc.clone() as Arc<dyn crate::storage::traits::Storage>,
+                    storage_arc as Arc<dyn crate::storage::traits::VectorStorage>,
+                    config,
+                ).await;
+            }
+        }
+
+        // Default: use RocksDB
         let storage = RealRocksDBStorage::new(&config.data_directory)
             .await
             .map_err(|e| format!("Failed to initialize storage: {e}"))?;
 
-        Self::new_with_storage(storage, config).await
+        Self::new_with_rocksdb(storage, config).await
     }
 
-    /// Create system with existing storage
+    /// Create system with RocksDB storage (backward compatibility)
     pub async fn new_with_storage(
         storage: RealRocksDBStorage,
         config: SystemConfig,
     ) -> Result<Self, String> {
+        Self::new_with_rocksdb(storage, config).await
+    }
+
+    /// Create system with RocksDB storage
+    async fn new_with_rocksdb(
+        storage: RealRocksDBStorage,
+        config: SystemConfig,
+    ) -> Result<Self, String> {
+        let storage_arc = Arc::new(storage);
+        Self::new_with_trait_storage(
+            storage_arc.clone() as Arc<dyn crate::storage::traits::Storage>,
+            storage_arc as Arc<dyn crate::storage::traits::VectorStorage>,
+            config,
+        ).await
+    }
+
+    /// Create system with trait object storage (supports both RocksDB and SurrealDB)
+    async fn new_with_trait_storage(
+        storage: Arc<dyn crate::storage::traits::Storage>,
+        vector_storage: Arc<dyn crate::storage::traits::VectorStorage>,
+        config: SystemConfig,
+    ) -> Result<Self, String> {
         let performance_monitor = Arc::new(LockFreePerformanceMonitor::new(None));
 
-        // Create storage actor
+        // Create storage actor with trait object
         let storage_actor = StorageActor::spawn(storage, Arc::clone(&performance_monitor)).await?;
 
         // Create session cache
@@ -518,6 +586,7 @@ impl LockFreeConversationMemorySystem {
             graph_manager,
             workspace_manager,
             storage_actor,
+            vector_storage,
             config,
             performance_monitor,
             circuit_breaker,
@@ -1590,7 +1659,7 @@ impl StorageActorHandle {
 
 impl StorageActor {
     pub async fn spawn(
-        storage: RealRocksDBStorage,
+        storage: Arc<dyn crate::storage::traits::Storage>,
         performance_monitor: Arc<LockFreePerformanceMonitor>,
     ) -> Result<StorageActorHandle, String> {
         let (sender, receiver) = unbounded_channel();
@@ -1972,7 +2041,7 @@ impl LockFreeConversationMemorySystem {
         );
 
         // Try to initialize with retry logic
-        let result = self
+        let result: Result<&Arc<ContentVectorizer>, String> = self
             .content_vectorizer
             .get_or_try_init(|| async {
                 let embedding_config = EmbeddingConfig {
@@ -1996,10 +2065,16 @@ impl LockFreeConversationMemorySystem {
                     ..Default::default()
                 };
 
-                ContentVectorizer::new(vectorizer_config)
+                let vectorizer = ContentVectorizer::new(vectorizer_config)
                     .await
-                    .map(Arc::new)
-                    .map_err(|e| format!("Failed to initialize content vectorizer: {}", e))
+                    .map_err(|e| format!("Failed to initialize content vectorizer: {}", e))?;
+
+                // Set persistent storage for embedding persistence
+                let vectorizer = vectorizer.with_persistent_storage(
+                    self.vector_storage.clone()
+                );
+
+                Ok(Arc::new(vectorizer))
             })
             .await;
 
@@ -2011,6 +2086,23 @@ impl LockFreeConversationMemorySystem {
                 );
                 // Clear any previous error
                 *self.embedding_config_holder.last_init_error.write() = None;
+
+                // Load persisted embeddings from storage on first initialization
+                // Only do this once (attempt == 1 means first successful init)
+                if attempt == 1 {
+                    match vectorizer.load_all_embeddings_from_storage().await {
+                        Ok(count) => {
+                            if count > 0 {
+                                info!("Loaded {} persisted embeddings from storage", count);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to load persisted embeddings: {}", e);
+                            // Continue anyway - embeddings will be regenerated on first search
+                        }
+                    }
+                }
+
                 Ok(Arc::clone(vectorizer))
             }
             Err(e) => {
