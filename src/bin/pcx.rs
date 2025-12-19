@@ -21,7 +21,7 @@ use post_cortex::daemon::{DaemonConfig, is_daemon_running, run_stdio_proxy, star
 use post_cortex::storage::{
     CompressionType, ExportOptions, ImportOptions, RealRocksDBStorage,
     read_export_file, write_export_file, list_export_sessions, preview_export_file,
-    StorageBackendType, Storage,
+    StorageBackendType, Storage, GraphStorage,
 };
 #[cfg(feature = "surrealdb-storage")]
 use post_cortex::storage::SurrealDBStorage;
@@ -1329,6 +1329,8 @@ async fn handle_migrate(
     println!("Migrating sessions...");
     let mut migrated_sessions = 0;
     let mut migrated_updates = 0;
+    let mut migrated_entities = 0;
+    let mut migrated_relationships = 0;
 
     for session_id in &sessions {
         match source_storage.load_session(*session_id).await {
@@ -1360,7 +1362,31 @@ async fn handle_migrate(
                     }
                 };
 
-                println!("  [OK] {} - {} ({} updates)", session_id, name, update_count);
+                // Extract and save entities from entity_graph to native SurrealDB graph
+                let entities = session.entity_graph.get_all_entities();
+                let entity_count = entities.len();
+                for entity in &entities {
+                    if let Err(e) = target_storage.upsert_entity(*session_id, entity).await {
+                        println!("  [WARN] {} - {}: Failed to save entity '{}': {}", session_id, name, entity.name, e);
+                    } else {
+                        migrated_entities += 1;
+                    }
+                }
+
+                // Extract and save relationships to native SurrealDB RELATE
+                let relationships = session.entity_graph.get_all_relationships();
+                let rel_count = relationships.len();
+                for rel in &relationships {
+                    if let Err(e) = target_storage.create_relationship(*session_id, rel).await {
+                        println!("  [WARN] {} - {}: Failed to save relationship '{}'->'{}': {}",
+                            session_id, name, rel.from_entity, rel.to_entity, e);
+                    } else {
+                        migrated_relationships += 1;
+                    }
+                }
+
+                println!("  [OK] {} - {} ({} updates, {} entities, {} relations)",
+                    session_id, name, update_count, entity_count, rel_count);
                 migrated_sessions += 1;
             }
             Err(e) => {
@@ -1404,10 +1430,12 @@ async fn handle_migrate(
     // Summary
     println!();
     println!("Migration complete!");
-    println!("  Sessions migrated:    {}/{}", migrated_sessions, sessions.len());
-    println!("  Updates migrated:     {}", migrated_updates);
-    println!("  Workspaces migrated:  {}/{}", migrated_workspaces, workspaces.len());
-    println!("  Checkpoints migrated: {}/{}", migrated_checkpoints, checkpoints.len());
+    println!("  Sessions migrated:      {}/{}", migrated_sessions, sessions.len());
+    println!("  Updates migrated:       {}", migrated_updates);
+    println!("  Entities migrated:      {}", migrated_entities);
+    println!("  Relationships migrated: {}", migrated_relationships);
+    println!("  Workspaces migrated:    {}/{}", migrated_workspaces, workspaces.len());
+    println!("  Checkpoints migrated:   {}/{}", migrated_checkpoints, checkpoints.len());
 
     Ok(())
 }

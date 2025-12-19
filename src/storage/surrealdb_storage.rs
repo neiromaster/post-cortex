@@ -31,22 +31,24 @@ use crate::core::context_update::{
     ContextUpdate, EntityData, EntityRelationship, EntityType, RelationType,
 };
 use crate::core::lockfree_vector_db::{SearchMatch, VectorMetadata};
-use crate::graph::entity_graph::EntityNetwork;
-use crate::session::active_session::ActiveSession;
+use crate::core::structured_context::StructuredContext;
+use crate::graph::entity_graph::{EntityNetwork, SimpleEntityGraph};
+use crate::session::active_session::{ActiveSession, CompressedUpdate, StructuredSummary, UserPreferences, ChangeRecord, CodeReference};
 use crate::storage::rocksdb_storage::{SessionCheckpoint, StoredWorkspace};
 use crate::storage::traits::{GraphStorage, Storage, VectorStorage};
 use crate::workspace::SessionRole;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use surrealdb::engine::any::{Any, connect};
 use surrealdb::opt::auth::Root;
 use surrealdb::Surreal;
-use surrealdb::types::{Bytes, SurrealValue};
-use tracing::{debug, info};
+use surrealdb::types::SurrealValue;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// Embedding dimension (must match the embedding model)
@@ -66,7 +68,7 @@ pub struct SurrealDBStorage {
 // SurrealDB Record Types
 // ============================================================================
 
-/// Session record for SurrealDB
+/// Session record for SurrealDB - hybrid storage (scalars native, complex as JSON)
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct SessionRecord {
     session_id: String,
@@ -74,19 +76,37 @@ struct SessionRecord {
     description: Option<String>,
     created_at: String,
     last_updated: String,
-    /// Serialized ActiveSession data
-    data: Bytes,
+    // User preferences as JSON (queryable object)
+    user_preferences: JsonValue,
+    // Tiered context as JSON arrays (queryable)
+    hot_context: JsonValue,
+    warm_context: JsonValue,
+    cold_context: JsonValue,
+    // Structured context as JSON (queryable object)
+    current_state: JsonValue,
+    // Code integration as JSON
+    code_references: JsonValue,
+    change_history: JsonValue,
+    // Configuration (native scalars)
+    max_extracted_entities: u32,
+    max_referenced_entities: u32,
+    enable_smart_entity_ranking: bool,
+    // Metrics (native scalars)
+    total_entity_truncations: u32,
+    total_entities_truncated: u32,
+    // Vectorization tracking
+    vectorized_update_ids: Vec<String>,
 }
 
-/// Context update record for SurrealDB
+/// Context update record for SurrealDB - hybrid storage
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct ContextUpdateRecord {
     update_id: String,
     session_id: String,
     timestamp: String,
     update_type: String,
-    /// Serialized ContextUpdate data
-    data: Bytes,
+    // Full update as JSON (queryable object!)
+    update_data: JsonValue,
 }
 
 /// Entity record for SurrealDB graph nodes
@@ -132,14 +152,21 @@ struct WorkspaceSessionRecord {
     added_at: u64,
 }
 
-/// Checkpoint record for SurrealDB
+/// Checkpoint record for SurrealDB - hybrid storage
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct CheckpointRecord {
     checkpoint_id: String,
     session_id: String,
     created_at: String,
-    /// Serialized checkpoint data
-    data: Bytes,
+    // Complete context snapshot as JSON (queryable)
+    structured_context: JsonValue,
+    recent_updates: JsonValue,
+    code_references: JsonValue,
+    change_history: JsonValue,
+    // Metadata (native scalars)
+    total_updates: u32,
+    context_quality_score: f32,
+    compression_ratio: f32,
 }
 
 impl SurrealDBStorage {
@@ -226,26 +253,27 @@ impl SurrealDBStorage {
     async fn initialize_schema(&self) -> Result<()> {
         info!("SurrealDBStorage: Initializing schema...");
 
-        // Define tables with schema
+        // First, remove old binary 'data' fields if they exist (schema migration)
+        let cleanup = r#"
+            -- Remove old binary data fields from previous schema versions
+            REMOVE FIELD IF EXISTS data ON session;
+            REMOVE FIELD IF EXISTS data ON context_update;
+            REMOVE FIELD IF EXISTS data ON checkpoint;
+        "#;
+
+        // Ignore cleanup errors (fields may not exist)
+        let _ = self.db.query(cleanup).await;
+
+        // Define tables with schema - using SCHEMALESS for complex nested JSON storage
+        // This allows storing arbitrary JSON structures while still being queryable
         let schema = r#"
-            -- Sessions table
-            DEFINE TABLE IF NOT EXISTS session SCHEMAFULL;
-            DEFINE FIELD IF NOT EXISTS session_id ON session TYPE string;
-            DEFINE FIELD IF NOT EXISTS name ON session TYPE option<string>;
-            DEFINE FIELD IF NOT EXISTS description ON session TYPE option<string>;
-            DEFINE FIELD IF NOT EXISTS created_at ON session TYPE string;
-            DEFINE FIELD IF NOT EXISTS last_updated ON session TYPE string;
-            DEFINE FIELD IF NOT EXISTS data ON session TYPE bytes;
+            -- Sessions table (SCHEMALESS to allow complex nested JSON)
+            DEFINE TABLE IF NOT EXISTS session SCHEMALESS;
             DEFINE INDEX IF NOT EXISTS idx_session_id ON session FIELDS session_id UNIQUE;
             DEFINE INDEX IF NOT EXISTS idx_session_created ON session FIELDS created_at;
 
-            -- Context updates table
-            DEFINE TABLE IF NOT EXISTS context_update SCHEMAFULL;
-            DEFINE FIELD IF NOT EXISTS update_id ON context_update TYPE string;
-            DEFINE FIELD IF NOT EXISTS session_id ON context_update TYPE string;
-            DEFINE FIELD IF NOT EXISTS timestamp ON context_update TYPE string;
-            DEFINE FIELD IF NOT EXISTS update_type ON context_update TYPE string;
-            DEFINE FIELD IF NOT EXISTS data ON context_update TYPE bytes;
+            -- Context updates table (SCHEMALESS for complex nested JSON)
+            DEFINE TABLE IF NOT EXISTS context_update SCHEMALESS;
             DEFINE INDEX IF NOT EXISTS idx_update_id ON context_update FIELDS update_id UNIQUE;
             DEFINE INDEX IF NOT EXISTS idx_update_session ON context_update FIELDS session_id;
             DEFINE INDEX IF NOT EXISTS idx_update_timestamp ON context_update FIELDS timestamp;
@@ -307,12 +335,8 @@ impl SurrealDBStorage {
             DEFINE INDEX IF NOT EXISTS idx_ws_session ON workspace_session FIELDS session_id;
             DEFINE INDEX IF NOT EXISTS idx_ws_unique ON workspace_session FIELDS workspace_id, session_id UNIQUE;
 
-            -- Checkpoints table
-            DEFINE TABLE IF NOT EXISTS checkpoint SCHEMAFULL;
-            DEFINE FIELD IF NOT EXISTS checkpoint_id ON checkpoint TYPE string;
-            DEFINE FIELD IF NOT EXISTS session_id ON checkpoint TYPE string;
-            DEFINE FIELD IF NOT EXISTS created_at ON checkpoint TYPE string;
-            DEFINE FIELD IF NOT EXISTS data ON checkpoint TYPE bytes;
+            -- Checkpoints table (SCHEMALESS for complex nested JSON)
+            DEFINE TABLE IF NOT EXISTS checkpoint SCHEMALESS;
             DEFINE INDEX IF NOT EXISTS idx_checkpoint_id ON checkpoint FIELDS checkpoint_id UNIQUE;
             DEFINE INDEX IF NOT EXISTS idx_checkpoint_session ON checkpoint FIELDS session_id;
         "#;
@@ -392,8 +416,8 @@ impl Storage for SurrealDBStorage {
             session.id()
         );
 
-        let session_data = bincode::serde::encode_to_vec(session, bincode::config::standard())
-            .context("Failed to serialize session")?;
+        // Convert complex types to JSON for queryable storage
+        let hot_context_vec: Vec<ContextUpdate> = session.hot_context.iter();
 
         let record = SessionRecord {
             session_id: session.id().to_string(),
@@ -401,17 +425,46 @@ impl Storage for SurrealDBStorage {
             description: session.description().clone(),
             created_at: session.created_at().to_rfc3339(),
             last_updated: Utc::now().to_rfc3339(),
-            data: Bytes::from(session_data),
+            user_preferences: serde_json::to_value(session.user_preferences())?,
+            hot_context: serde_json::to_value(&hot_context_vec)?,
+            warm_context: serde_json::to_value(session.warm_context.as_ref())?,
+            cold_context: serde_json::to_value(session.cold_context.as_ref())?,
+            current_state: serde_json::to_value(session.current_state.as_ref())?,
+            code_references: serde_json::to_value(session.code_references.as_ref())?,
+            change_history: serde_json::to_value(session.change_history.as_ref())?,
+            max_extracted_entities: session.max_extracted_entities as u32,
+            max_referenced_entities: session.max_referenced_entities as u32,
+            enable_smart_entity_ranking: session.enable_smart_entity_ranking,
+            total_entity_truncations: session.total_entity_truncations as u32,
+            total_entities_truncated: session.total_entities_truncated as u32,
+            vectorized_update_ids: session.vectorized_update_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect(),
         };
 
-        // Upsert session
+        // Upsert session record
         let _: Option<SessionRecord> = self
             .db
             .upsert(("session", session.id().to_string()))
             .content(record)
             .await?;
 
-        debug!("SurrealDBStorage: Session saved successfully");
+        // Save entities to native graph table
+        for entity in session.entity_graph.get_all_entities() {
+            if let Err(e) = self.upsert_entity(session.id(), &entity).await {
+                warn!("Failed to save entity '{}': {}", entity.name, e);
+            }
+        }
+
+        // Save relationships via native RELATE
+        for rel in session.entity_graph.get_all_relationships() {
+            if let Err(e) = self.create_relationship(session.id(), &rel).await {
+                warn!("Failed to save relationship '{}' -> '{}': {}", rel.from_entity, rel.to_entity, e);
+            }
+        }
+
+        debug!("SurrealDBStorage: Session saved successfully with native graph");
 
         Ok(())
     }
@@ -422,21 +475,87 @@ impl Storage for SurrealDBStorage {
             session_id
         );
 
+        // Load session record
         let record: Option<SessionRecord> = self
             .db
             .select(("session", session_id.to_string()))
             .await?;
 
-        match record {
-            Some(r) => {
-                let (session, _): (ActiveSession, usize) =
-                    bincode::serde::decode_from_slice(&r.data.as_ref(), bincode::config::standard())
-                        .context("Failed to deserialize session")?;
-                debug!("SurrealDBStorage: Session loaded successfully");
-                Ok(session)
-            }
-            None => Err(anyhow::anyhow!("Session not found")),
+        let r = record.ok_or_else(|| anyhow::anyhow!("Session not found"))?;
+
+        // Load entities from native table and build graph
+        let entities = self.list_entities(session_id).await.unwrap_or_default();
+        let mut entity_graph = SimpleEntityGraph::new();
+        for entity in &entities {
+            entity_graph.add_or_update_entity(
+                entity.name.clone(),
+                entity.entity_type.clone(),
+                entity.last_mentioned,
+                entity.description.as_deref().unwrap_or(""),
+            );
         }
+
+        // Load relationships and add to graph
+        for entity in &entities {
+            let related = self.find_related_entities(session_id, &entity.name).await.unwrap_or_default();
+            for related_name in related {
+                entity_graph.add_relationship(EntityRelationship {
+                    from_entity: entity.name.clone(),
+                    to_entity: related_name,
+                    relation_type: RelationType::RelatedTo,
+                    context: String::new(),
+                });
+            }
+        }
+
+        // Load incremental updates from native table
+        let incremental_updates = self.load_session_updates(session_id).await.unwrap_or_default();
+
+        // Parse JSON fields back to types
+        let user_preferences: UserPreferences = serde_json::from_value(r.user_preferences)?;
+        let hot_context: Vec<ContextUpdate> = serde_json::from_value(r.hot_context)?;
+        let warm_context: Vec<CompressedUpdate> = serde_json::from_value(r.warm_context)?;
+        let cold_context: Vec<StructuredSummary> = serde_json::from_value(r.cold_context)?;
+        let current_state: StructuredContext = serde_json::from_value(r.current_state)?;
+        let code_references: HashMap<String, Vec<CodeReference>> = serde_json::from_value(r.code_references)?;
+        let change_history: Vec<ChangeRecord> = serde_json::from_value(r.change_history)?;
+
+        // Parse vectorized_update_ids from strings to Uuids
+        let vectorized_ids: Vec<Uuid> = r.vectorized_update_ids
+            .iter()
+            .filter_map(|s| Uuid::parse_str(s).ok())
+            .collect();
+
+        // Reconstruct ActiveSession from components
+        let session = ActiveSession::from_components(
+            session_id,
+            r.name,
+            r.description,
+            DateTime::parse_from_rfc3339(&r.created_at)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now()),
+            DateTime::parse_from_rfc3339(&r.last_updated)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now()),
+            user_preferences,
+            hot_context,
+            warm_context,
+            cold_context,
+            current_state,
+            incremental_updates,
+            code_references,
+            change_history,
+            entity_graph,
+            r.max_extracted_entities as usize,
+            r.max_referenced_entities as usize,
+            r.enable_smart_entity_ranking,
+            r.total_entity_truncations as usize,
+            r.total_entities_truncated as usize,
+            vectorized_ids,
+        );
+
+        debug!("SurrealDBStorage: Session loaded and reconstructed successfully");
+        Ok(session)
     }
 
     async fn delete_session(&self, session_id: Uuid) -> Result<()> {
@@ -526,21 +645,18 @@ impl Storage for SurrealDBStorage {
             session_id
         );
 
-        for update in &updates {
-            let update_data = bincode::serde::encode_to_vec(update, bincode::config::standard())
-                .context("Failed to serialize update")?;
-
+        for update in updates {
             let record = ContextUpdateRecord {
-                    update_id: update.id.to_string(),
+                update_id: update.id.to_string(),
                 session_id: session_id.to_string(),
                 timestamp: update.timestamp.to_rfc3339(),
                 update_type: format!("{:?}", update.update_type),
-                data: Bytes::from(update_data),
+                update_data: serde_json::to_value(&update)?,
             };
 
             let _: Option<ContextUpdateRecord> = self
                 .db
-                .upsert(("context_update", update.id.to_string()))
+                .upsert(("context_update", record.update_id.clone()))
                 .content(record)
                 .await?;
         }
@@ -564,13 +680,11 @@ impl Storage for SurrealDBStorage {
 
         let records: Vec<ContextUpdateRecord> = response.take(0)?;
 
-        let mut updates = Vec::new();
-        for record in records {
-            let (update, _): (ContextUpdate, usize) =
-                bincode::serde::decode_from_slice(&record.data.as_ref(), bincode::config::standard())
-                    .context("Failed to deserialize update")?;
-            updates.push(update);
-        }
+        // Parse update_data JSON back to ContextUpdate
+        let updates: Vec<ContextUpdate> = records
+            .into_iter()
+            .filter_map(|r| serde_json::from_value(r.update_data).ok())
+            .collect();
 
         debug!("SurrealDBStorage: Loaded {} updates", updates.len());
 
@@ -583,15 +697,17 @@ impl Storage for SurrealDBStorage {
             checkpoint.id
         );
 
-        let checkpoint_data =
-            bincode::serde::encode_to_vec(checkpoint, bincode::config::standard())
-                .context("Failed to serialize checkpoint")?;
-
         let record = CheckpointRecord {
             checkpoint_id: checkpoint.id.to_string(),
             session_id: checkpoint.session_id.to_string(),
             created_at: checkpoint.created_at.to_rfc3339(),
-            data: Bytes::from(checkpoint_data),
+            structured_context: serde_json::to_value(&checkpoint.structured_context)?,
+            recent_updates: serde_json::to_value(&checkpoint.recent_updates)?,
+            code_references: serde_json::to_value(&checkpoint.code_references)?,
+            change_history: serde_json::to_value(&checkpoint.change_history)?,
+            total_updates: checkpoint.total_updates as u32,
+            context_quality_score: checkpoint.context_quality_score,
+            compression_ratio: checkpoint.compression_ratio,
         };
 
         let _: Option<CheckpointRecord> = self
@@ -618,9 +734,20 @@ impl Storage for SurrealDBStorage {
 
         match record {
             Some(r) => {
-                let (checkpoint, _): (SessionCheckpoint, usize) =
-                    bincode::serde::decode_from_slice(&r.data.as_ref(), bincode::config::standard())
-                        .context("Failed to deserialize checkpoint")?;
+                let checkpoint = SessionCheckpoint {
+                    id: Uuid::parse_str(&r.checkpoint_id)?,
+                    session_id: Uuid::parse_str(&r.session_id)?,
+                    created_at: DateTime::parse_from_rfc3339(&r.created_at)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                    structured_context: serde_json::from_value(r.structured_context)?,
+                    recent_updates: serde_json::from_value(r.recent_updates)?,
+                    code_references: serde_json::from_value(r.code_references)?,
+                    change_history: serde_json::from_value(r.change_history)?,
+                    total_updates: r.total_updates as usize,
+                    context_quality_score: r.context_quality_score,
+                    compression_ratio: r.compression_ratio,
+                };
                 Ok(checkpoint)
             }
             None => Err(anyhow::anyhow!("Checkpoint not found")),
@@ -632,17 +759,25 @@ impl Storage for SurrealDBStorage {
 
         let records: Vec<CheckpointRecord> = self.select_all("checkpoint").await?;
 
-        let mut checkpoints = Vec::new();
-        for record in records {
-            if let Ok((checkpoint, _)) =
-                bincode::serde::decode_from_slice::<SessionCheckpoint, _>(
-                    &record.data.as_ref(),
-                    bincode::config::standard(),
-                )
-            {
-                checkpoints.push(checkpoint);
-            }
-        }
+        let checkpoints: Vec<SessionCheckpoint> = records
+            .into_iter()
+            .filter_map(|r| {
+                Some(SessionCheckpoint {
+                    id: Uuid::parse_str(&r.checkpoint_id).ok()?,
+                    session_id: Uuid::parse_str(&r.session_id).ok()?,
+                    created_at: DateTime::parse_from_rfc3339(&r.created_at)
+                        .map(|dt| dt.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now()),
+                    structured_context: serde_json::from_value(r.structured_context).ok()?,
+                    recent_updates: serde_json::from_value(r.recent_updates).ok()?,
+                    code_references: serde_json::from_value(r.code_references).ok()?,
+                    change_history: serde_json::from_value(r.change_history).ok()?,
+                    total_updates: r.total_updates as usize,
+                    context_quality_score: r.context_quality_score,
+                    compression_ratio: r.compression_ratio,
+                })
+            })
+            .collect();
 
         debug!("SurrealDBStorage: Listed {} checkpoints", checkpoints.len());
 
@@ -889,10 +1024,11 @@ impl GraphStorage for SurrealDBStorage {
             description: entity.description.clone(),
         };
 
-        let _: Option<EntityRecord> = self
-            .db
-            .upsert(("entity", entity_id))
-            .content(record)
+        // Use query with backticks for IDs containing special chars (UUIDs have dashes)
+        let query = format!("UPSERT entity:`{}` CONTENT $content", entity_id);
+        self.db
+            .query(query)
+            .bind(("content", record))
             .await?;
 
         Ok(())
@@ -957,9 +1093,9 @@ impl GraphStorage for SurrealDBStorage {
         let to_id = Self::entity_id(session_id, &relationship.to_entity);
         let table = Self::relation_table_name(&relationship.relation_type);
 
-        // Create relationship using RELATE
+        // Create relationship using RELATE (backticks needed for IDs with dashes/special chars)
         let query = format!(
-            "RELATE entity:{}->{}->entity:{} SET context = $context, session_id = $session_id",
+            "RELATE entity:`{}`->{}->entity:`{}` SET context = $context, session_id = $session_id",
             from_id, table, to_id
         );
 
@@ -979,12 +1115,12 @@ impl GraphStorage for SurrealDBStorage {
     ) -> Result<Vec<String>> {
         let entity_id = Self::entity_id(session_id, entity_name);
 
-        // Query all outgoing and incoming relations
+        // Query all outgoing and incoming relations (backticks for IDs with special chars)
         let query = format!(
             r#"
             SELECT array::distinct(array::flatten([
-                (SELECT VALUE out.name FROM entity:{}->*->entity WHERE session_id = $session_id),
-                (SELECT VALUE in.name FROM entity:{}<-*<-entity WHERE session_id = $session_id)
+                (SELECT VALUE out.name FROM entity:`{}`->*->entity WHERE session_id = $session_id),
+                (SELECT VALUE in.name FROM entity:`{}`<-*<-entity WHERE session_id = $session_id)
             ])) AS related
             "#,
             entity_id, entity_id
@@ -1018,8 +1154,8 @@ impl GraphStorage for SurrealDBStorage {
         let query = format!(
             r#"
             SELECT array::distinct(array::flatten([
-                (SELECT VALUE out.name FROM entity:{}->{table}->entity WHERE session_id = $session_id),
-                (SELECT VALUE in.name FROM entity:{}<-{table}<-entity WHERE session_id = $session_id)
+                (SELECT VALUE out.name FROM entity:`{}`->{table}->entity WHERE session_id = $session_id),
+                (SELECT VALUE in.name FROM entity:`{}`<-{table}<-entity WHERE session_id = $session_id)
             ])) AS related
             "#,
             entity_id, entity_id
@@ -1050,13 +1186,13 @@ impl GraphStorage for SurrealDBStorage {
         let from_id = Self::entity_id(session_id, from);
         let to_id = Self::entity_id(session_id, to);
 
-        // Use SurrealDB's graph traversal
+        // Use SurrealDB's graph traversal (backticks for IDs with special chars)
         let query = format!(
             r#"
             SELECT VALUE array::flatten([
-                entity:{}.name,
-                (SELECT VALUE name FROM entity:{}->*..5->entity:{} WHERE session_id = $session_id),
-                entity:{}.name
+                entity:`{}`.name,
+                (SELECT VALUE name FROM entity:`{}`->*..5->entity:`{}` WHERE session_id = $session_id),
+                entity:`{}`.name
             ])
             "#,
             from_id, from_id, to_id, to_id
@@ -1081,12 +1217,12 @@ impl GraphStorage for SurrealDBStorage {
     ) -> Result<EntityNetwork> {
         let entity_id = Self::entity_id(session_id, center);
 
-        // Get entities within max_depth hops
+        // Get entities within max_depth hops (backticks for IDs with special chars)
         let entity_query = format!(
             r#"
             SELECT name, entity_type, first_mentioned, last_mentioned,
                    mention_count, importance_score, description
-            FROM entity:{}<->*..{}->entity WHERE session_id = $session_id
+            FROM entity:`{}`<->*..{}->entity WHERE session_id = $session_id
             "#,
             entity_id, max_depth
         );

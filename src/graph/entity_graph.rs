@@ -755,6 +755,29 @@ impl SimpleEntityGraph {
             .filter(|component: &Vec<String>| component.len() > 1) // Only return actual communities
             .collect()
     }
+
+    /// Get all relationships in the graph as EntityRelationship structs
+    /// Used for migration to SurrealDB native graph format
+    pub fn get_all_relationships(&self) -> Vec<EntityRelationship> {
+        self.graph
+            .edge_references()
+            .filter_map(|edge| {
+                let source_name = self.node_to_entity.get(&edge.source())?;
+                let target_name = self.node_to_entity.get(&edge.target())?;
+                Some(EntityRelationship {
+                    from_entity: source_name.clone(),
+                    to_entity: target_name.clone(),
+                    relation_type: edge.weight().clone(),
+                    context: String::new(), // Context not stored in graph edges
+                })
+            })
+            .collect()
+    }
+
+    /// Get all entities as a vector (convenience method for migration)
+    pub fn get_all_entities(&self) -> Vec<EntityData> {
+        self.entities.values().cloned().collect()
+    }
 }
 
 /// Entity network structure - uses BTreeMap for deterministic serialization
