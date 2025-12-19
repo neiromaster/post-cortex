@@ -292,6 +292,11 @@ pub enum StorageMessage {
     ListAllWorkspaces {
         response_tx: Sender<Result<Vec<crate::storage::rocksdb_storage::StoredWorkspace>, String>>,
     },
+    BatchSaveUpdates {
+        session_id: Uuid,
+        updates: Vec<crate::core::context_update::ContextUpdate>,
+        response_tx: Sender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -918,7 +923,7 @@ impl LockFreeConversationMemorySystem {
         };
 
         match update_result {
-            Ok(update_id) => {
+            Ok((update_id, context_update)) => {
                 // Update graph metrics
                 self.graph_manager
                     .graph_operations
@@ -938,6 +943,24 @@ impl LockFreeConversationMemorySystem {
                     // Continue anyway - session is still updated in memory
                 } else {
                     debug!("Session {} persisted to storage", session_id);
+                }
+
+                // Save context update to normalized storage (for SurrealDB)
+                if let Err(save_error) = self
+                    .storage_actor
+                    .batch_save_updates(session_id, vec![context_update])
+                    .await
+                {
+                    warn!(
+                        "Failed to persist context update to normalized storage: {}",
+                        save_error
+                    );
+                    // Continue anyway - update is already saved in session blob
+                } else {
+                    debug!(
+                        "Context update {} persisted to normalized storage",
+                        update_id
+                    );
                 }
 
                 // Auto-vectorize if embeddings are enabled
@@ -1655,6 +1678,29 @@ impl StorageActorHandle {
         )
         .await
     }
+
+    pub async fn batch_save_updates(
+        &self,
+        session_id: Uuid,
+        updates: Vec<crate::core::context_update::ContextUpdate>,
+    ) -> Result<(), String> {
+        let (response_tx, mut response_rx) = channel::<Result<(), String>>(1);
+
+        self.sender
+            .send(StorageMessage::BatchSaveUpdates {
+                session_id,
+                updates,
+                response_tx,
+            })
+            .map_err(|_| "Storage actor unavailable".to_string())?;
+
+        self.execute_with_timeout(
+            OperationType::Medium,
+            &format!("BatchSaveUpdates {}", session_id),
+            response_rx.recv(),
+        )
+        .await
+    }
 }
 
 impl StorageActor {
@@ -1850,6 +1896,18 @@ impl StorageActor {
                     .map_err(|e| e.to_string());
                 let _ = response_tx.send(result).await;
             }
+            StorageMessage::BatchSaveUpdates {
+                session_id,
+                updates,
+                response_tx,
+            } => {
+                let result = self
+                    .storage
+                    .batch_save_updates(session_id, updates)
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = response_tx.send(result).await;
+            }
             StorageMessage::Shutdown => {} // Handled in main loop
         }
     }
@@ -1899,7 +1957,7 @@ impl LockFreeConversationMemorySystem {
         session: &mut ActiveSession,
         description: String,
         metadata: Option<serde_json::Value>,
-    ) -> Result<String, String> {
+    ) -> Result<(String, crate::core::context_update::ContextUpdate), String> {
         use crate::core::context_update::{ContextUpdate, UpdateContent, UpdateType};
 
         tracing::info!(
@@ -1970,13 +2028,14 @@ impl LockFreeConversationMemorySystem {
         // Use the proper add_incremental_update method that handles entity extraction
         tracing::info!("Calling session.add_incremental_update...");
         let update_id = update.id;
+        let update_clone = update.clone(); // Clone for returning to caller
         match session.add_incremental_update(update).await {
             Ok(_) => {
                 tracing::info!(
                     "add_context_update_to_session: Successfully added update {}",
                     update_id
                 );
-                Ok(update_id.to_string())
+                Ok((update_id.to_string(), update_clone))
             }
             Err(e) => {
                 tracing::error!(

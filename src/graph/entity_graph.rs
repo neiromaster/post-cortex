@@ -26,6 +26,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use tracing::warn;
 
+/// Edge data containing relation type and context
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EdgeData {
+    pub relation_type: RelationType,
+    pub context: String,
+}
+
 /// Enhanced entity graph using petgraph for efficient relationship operations
 #[derive(Clone, Debug, Serialize)]
 pub struct SimpleEntityGraph {
@@ -35,9 +42,9 @@ pub struct SimpleEntityGraph {
     /// Entity mentions tracking - uses BTreeMap for deterministic JSON serialization
     pub entity_mentions: BTreeMap<String, Vec<uuid::Uuid>>,
 
-    /// Petgraph directed graph for relationships
+    /// Petgraph directed graph for relationships (now stores context with edges)
     #[serde(with = "petgraph_serde")]
-    graph: DiGraph<String, RelationType>,
+    graph: DiGraph<String, EdgeData>,
 
     /// Bidirectional mapping between entity names and graph nodes
     /// CRITICAL: Rebuilt automatically after deserialization
@@ -54,8 +61,8 @@ pub struct SimpleEntityGraph {
 struct SerializableGraphData {
     /// Sorted list of entity names (nodes) for deterministic deserialization
     nodes: Vec<String>,
-    /// Edges represented by entity name pairs instead of NodeIndex
-    edges: Vec<(String, String, RelationType)>,
+    /// Edges represented by entity name pairs with full edge data (including context)
+    edges: Vec<(String, String, EdgeData)>,
 }
 
 // Custom serde module for petgraph serialization with full graph reconstruction
@@ -64,7 +71,7 @@ mod petgraph_serde {
     use serde::{Deserializer, Serializer};
 
     pub fn serialize<S>(
-        graph: &DiGraph<String, RelationType>,
+        graph: &DiGraph<String, EdgeData>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
@@ -74,8 +81,8 @@ mod petgraph_serde {
         let mut nodes: Vec<String> = graph.node_weights().cloned().collect();
         nodes.sort(); // CRITICAL: sorted for deterministic NodeIndex mapping
 
-        // Extract edges using entity names instead of NodeIndex
-        let mut edges: Vec<(String, String, RelationType)> = graph
+        // Extract edges using entity names instead of NodeIndex (includes context)
+        let mut edges: Vec<(String, String, EdgeData)> = graph
             .edge_references()
             .map(|edge| {
                 let from_entity = graph.node_weight(edge.source()).unwrap().clone();
@@ -85,18 +92,17 @@ mod petgraph_serde {
             .collect();
 
         // Sort edges for determinism (by source, then target, then relation type)
-        // RelationType now implements Ord, so we can compare directly
         edges.sort_by(|a, b| {
             a.0.cmp(&b.0)
                 .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.2.relation_type.cmp(&b.2.relation_type))
         });
 
         let data = SerializableGraphData { nodes, edges };
         data.serialize(serializer)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<DiGraph<String, RelationType>, D::Error>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<DiGraph<String, EdgeData>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -119,13 +125,13 @@ mod petgraph_serde {
             .map(|(idx, name)| (name, NodeIndex::new(idx)))
             .collect();
 
-        // Recreate all edges
-        for (from_entity, to_entity, relation_type) in data.edges {
+        // Recreate all edges (now with full EdgeData including context)
+        for (from_entity, to_entity, edge_data) in data.edges {
             if let (Some(&from_node), Some(&to_node)) = (
                 entity_to_node.get(&from_entity),
                 entity_to_node.get(&to_entity),
             ) {
-                graph.add_edge(from_node, to_node, relation_type);
+                graph.add_edge(from_node, to_node, edge_data);
             }
         }
 
@@ -144,7 +150,7 @@ impl<'de> Deserialize<'de> for SimpleEntityGraph {
             entities: BTreeMap<String, EntityData>,
             entity_mentions: BTreeMap<String, Vec<uuid::Uuid>>,
             #[serde(with = "petgraph_serde")]
-            graph: DiGraph<String, RelationType>,
+            graph: DiGraph<String, EdgeData>,
         }
 
         let data = SimpleEntityGraphData::deserialize(deserializer)?;
@@ -291,9 +297,12 @@ impl SimpleEntityGraph {
         let to_node =
             self.get_or_create_node(&relationship.to_entity, EntityType::Concept, timestamp);
 
-        // Add edge to graph
-        self.graph
-            .add_edge(from_node, to_node, relationship.relation_type);
+        // Add edge to graph with full EdgeData (includes context)
+        let edge_data = EdgeData {
+            relation_type: relationship.relation_type,
+            context: relationship.context,
+        };
+        self.graph.add_edge(from_node, to_node, edge_data);
     }
 
     /// Find related entities - now O(degree) instead of O(n)!
@@ -346,7 +355,7 @@ impl SimpleEntityGraph {
 
         // Check outgoing edges
         for edge in self.graph.edges_directed(node, Direction::Outgoing) {
-            if edge.weight() == relation_type
+            if &edge.weight().relation_type == relation_type
                 && let Some(target_name) = self.node_to_entity.get(&edge.target())
             {
                 related.insert(target_name.clone());
@@ -355,7 +364,7 @@ impl SimpleEntityGraph {
 
         // Check incoming edges
         for edge in self.graph.edges_directed(node, Direction::Incoming) {
-            if edge.weight() == relation_type
+            if &edge.weight().relation_type == relation_type
                 && let Some(source_name) = self.node_to_entity.get(&edge.source())
             {
                 related.insert(source_name.clone());
@@ -437,6 +446,7 @@ impl SimpleEntityGraph {
     }
 
     /// Get entity relationships - now uses efficient petgraph edge iteration
+    /// Returns (entity_name, relation_type, context) tuples
     pub fn get_entity_relationships(
         &self,
         entity_name: &str,
@@ -451,10 +461,11 @@ impl SimpleEntityGraph {
         // Outgoing relationships
         for edge in self.graph.edges_directed(node, Direction::Outgoing) {
             if let Some(target_name) = self.node_to_entity.get(&edge.target()) {
+                let edge_data = edge.weight();
                 relationships.push((
                     target_name.clone(),
-                    edge.weight().clone(),
-                    "outgoing".to_string(), // Could be enhanced with context from EntityRelationship
+                    edge_data.relation_type.clone(),
+                    edge_data.context.clone(), // Now returns stored context!
                 ));
             }
         }
@@ -462,10 +473,11 @@ impl SimpleEntityGraph {
         // Incoming relationships
         for edge in self.graph.edges_directed(node, Direction::Incoming) {
             if let Some(source_name) = self.node_to_entity.get(&edge.source()) {
+                let edge_data = edge.weight();
                 relationships.push((
                     source_name.clone(),
-                    edge.weight().clone(),
-                    "incoming".to_string(), // Could be enhanced with context from EntityRelationship
+                    edge_data.relation_type.clone(),
+                    edge_data.context.clone(), // Now returns stored context!
                 ));
             }
         }
@@ -513,7 +525,7 @@ impl SimpleEntityGraph {
                     if let Some(target_name) = self.node_to_entity.get(&target_node) {
                         trace.push((
                             current_name.clone(),
-                            format!("{:?}", edge.weight()),
+                            format!("{:?}", edge.weight().relation_type),
                             target_name.clone(),
                         ));
                     }
@@ -530,7 +542,7 @@ impl SimpleEntityGraph {
                     if let Some(source_name) = self.node_to_entity.get(&source_node) {
                         trace.push((
                             source_name.clone(),
-                            format!("inverse_{:?}", edge.weight()),
+                            format!("inverse_{:?}", edge.weight().relation_type),
                             current_name.clone(),
                         ));
                     }
@@ -597,13 +609,14 @@ impl SimpleEntityGraph {
                 ) && network.entities.contains_key(from_name)
                     && network.entities.contains_key(to_name)
                 {
-                    let rel_key = (from_name.clone(), to_name.clone(), edge.weight().clone());
+                    let edge_data = edge.weight();
+                    let rel_key = (from_name.clone(), to_name.clone(), edge_data.relation_type.clone());
                     if seen_relationships.insert(rel_key) {
                         network.relationships.push(EntityRelationship {
                             from_entity: from_name.clone(),
                             to_entity: to_name.clone(),
-                            relation_type: edge.weight().clone(),
-                            context: "network_traversal".to_string(),
+                            relation_type: edge_data.relation_type.clone(),
+                            context: edge_data.context.clone(), // Now uses stored context!
                         });
                     }
                 }
@@ -633,13 +646,14 @@ impl SimpleEntityGraph {
                 ) && network.entities.contains_key(from_name)
                     && network.entities.contains_key(to_name)
                 {
-                    let rel_key = (from_name.clone(), to_name.clone(), edge.weight().clone());
+                    let edge_data = edge.weight();
+                    let rel_key = (from_name.clone(), to_name.clone(), edge_data.relation_type.clone());
                     if seen_relationships.insert(rel_key) {
                         network.relationships.push(EntityRelationship {
                             from_entity: from_name.clone(),
                             to_entity: to_name.clone(),
-                            relation_type: edge.weight().clone(),
-                            context: "network_traversal".to_string(),
+                            relation_type: edge_data.relation_type.clone(),
+                            context: edge_data.context.clone(), // Now uses stored context!
                         });
                     }
                 }
@@ -764,11 +778,12 @@ impl SimpleEntityGraph {
             .filter_map(|edge| {
                 let source_name = self.node_to_entity.get(&edge.source())?;
                 let target_name = self.node_to_entity.get(&edge.target())?;
+                let edge_data = edge.weight();
                 Some(EntityRelationship {
                     from_entity: source_name.clone(),
                     to_entity: target_name.clone(),
-                    relation_type: edge.weight().clone(),
-                    context: String::new(), // Context not stored in graph edges
+                    relation_type: edge_data.relation_type.clone(),
+                    context: edge_data.context.clone(),
                 })
             })
             .collect()

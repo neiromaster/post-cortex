@@ -33,7 +33,7 @@ use crate::core::context_update::{
 use crate::core::lockfree_vector_db::{SearchMatch, VectorMetadata};
 use crate::core::structured_context::StructuredContext;
 use crate::graph::entity_graph::{EntityNetwork, SimpleEntityGraph};
-use crate::session::active_session::{ActiveSession, CompressedUpdate, StructuredSummary, UserPreferences, ChangeRecord, CodeReference};
+use crate::session::active_session::{ActiveSession, ChangeRecord, CodeReference, UserPreferences};
 use crate::storage::rocksdb_storage::{SessionCheckpoint, StoredWorkspace};
 use crate::storage::traits::{GraphStorage, Storage, VectorStorage};
 use crate::workspace::SessionRole;
@@ -44,9 +44,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use surrealdb::Surreal;
 use surrealdb::engine::any::{Any, connect};
 use surrealdb::opt::auth::Root;
-use surrealdb::Surreal;
 use surrealdb::types::SurrealValue;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -68,7 +68,10 @@ pub struct SurrealDBStorage {
 // SurrealDB Record Types
 // ============================================================================
 
-/// Session record for SurrealDB - hybrid storage (scalars native, complex as JSON)
+/// Session record for SurrealDB - NORMALIZED (no JSON blobs for context!)
+/// Context updates are stored in context_update table
+/// Entities are stored in entity table (native graph)
+/// Relationships are stored via RELATE (native graph)
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct SessionRecord {
     session_id: String,
@@ -76,17 +79,8 @@ struct SessionRecord {
     description: Option<String>,
     created_at: String,
     last_updated: String,
-    // User preferences as JSON (queryable object)
+    // User preferences as JSON (small, queryable)
     user_preferences: JsonValue,
-    // Tiered context as JSON arrays (queryable)
-    hot_context: JsonValue,
-    warm_context: JsonValue,
-    cold_context: JsonValue,
-    // Structured context as JSON (queryable object)
-    current_state: JsonValue,
-    // Code integration as JSON
-    code_references: JsonValue,
-    change_history: JsonValue,
     // Configuration (native scalars)
     max_extracted_entities: u32,
     max_referenced_entities: u32,
@@ -96,6 +90,8 @@ struct SessionRecord {
     total_entities_truncated: u32,
     // Vectorization tracking
     vectorized_update_ids: Vec<String>,
+    // Total updates count (for pagination)
+    total_updates: u32,
 }
 
 /// Context update record for SurrealDB - hybrid storage
@@ -235,17 +231,28 @@ impl SurrealDBStorage {
     }
 
     /// Select all records from a table
-    async fn select_all<T: for<'de> Deserialize<'de> + SurrealValue>(&self, table: &str) -> surrealdb::Result<Vec<T>> {
+    async fn select_all<T: for<'de> Deserialize<'de> + SurrealValue>(
+        &self,
+        table: &str,
+    ) -> surrealdb::Result<Vec<T>> {
         self.db.select(table).await
     }
 
     /// Select a single record by ID (table, id)
-    async fn select_one<T: for<'de> Deserialize<'de> + SurrealValue>(&self, table: &str, id: &str) -> surrealdb::Result<Option<T>> {
+    async fn select_one<T: for<'de> Deserialize<'de> + SurrealValue>(
+        &self,
+        table: &str,
+        id: &str,
+    ) -> surrealdb::Result<Option<T>> {
         self.db.select((table, id)).await
     }
 
     /// Delete a record and return it (table, id)
-    async fn delete<T: for<'de> Deserialize<'de> + SurrealValue>(&self, table: &str, id: &str) -> surrealdb::Result<Option<T>> {
+    async fn delete<T: for<'de> Deserialize<'de> + SurrealValue>(
+        &self,
+        table: &str,
+        id: &str,
+    ) -> surrealdb::Result<Option<T>> {
         self.db.delete((table, id)).await
     }
 
@@ -412,13 +419,15 @@ impl SurrealDBStorage {
 impl Storage for SurrealDBStorage {
     async fn save_session(&self, session: &ActiveSession) -> Result<()> {
         debug!(
-            "SurrealDBStorage: Saving session with ID: {}",
+            "SurrealDBStorage: Saving session with ID: {} (normalized)",
             session.id()
         );
 
-        // Convert complex types to JSON for queryable storage
-        let hot_context_vec: Vec<ContextUpdate> = session.hot_context.iter();
+        // Get all context updates for normalized storage
+        let all_updates: Vec<ContextUpdate> = session.hot_context.iter();
+        let total_updates = all_updates.len() as u32;
 
+        // Save session metadata ONLY (no JSON blobs for context!)
         let record = SessionRecord {
             session_id: session.id().to_string(),
             name: session.name().clone(),
@@ -426,29 +435,33 @@ impl Storage for SurrealDBStorage {
             created_at: session.created_at().to_rfc3339(),
             last_updated: Utc::now().to_rfc3339(),
             user_preferences: serde_json::to_value(session.user_preferences())?,
-            hot_context: serde_json::to_value(&hot_context_vec)?,
-            warm_context: serde_json::to_value(session.warm_context.as_ref())?,
-            cold_context: serde_json::to_value(session.cold_context.as_ref())?,
-            current_state: serde_json::to_value(session.current_state.as_ref())?,
-            code_references: serde_json::to_value(session.code_references.as_ref())?,
-            change_history: serde_json::to_value(session.change_history.as_ref())?,
             max_extracted_entities: session.max_extracted_entities as u32,
             max_referenced_entities: session.max_referenced_entities as u32,
             enable_smart_entity_ranking: session.enable_smart_entity_ranking,
             total_entity_truncations: session.total_entity_truncations as u32,
             total_entities_truncated: session.total_entities_truncated as u32,
-            vectorized_update_ids: session.vectorized_update_ids
+            vectorized_update_ids: session
+                .vectorized_update_ids
                 .iter()
                 .map(|id| id.to_string())
                 .collect(),
+            total_updates,
         };
 
-        // Upsert session record
+        // Upsert session metadata
         let _: Option<SessionRecord> = self
             .db
             .upsert(("session", session.id().to_string()))
             .content(record)
             .await?;
+
+        // Save ALL context updates to normalized table
+        // This is the source of truth - not JSON blobs!
+        if !all_updates.is_empty() {
+            if let Err(e) = self.batch_save_updates(session.id(), all_updates).await {
+                warn!("Failed to save context updates: {}", e);
+            }
+        }
 
         // Save entities to native graph table
         for entity in session.entity_graph.get_all_entities() {
@@ -460,30 +473,49 @@ impl Storage for SurrealDBStorage {
         // Save relationships via native RELATE
         for rel in session.entity_graph.get_all_relationships() {
             if let Err(e) = self.create_relationship(session.id(), &rel).await {
-                warn!("Failed to save relationship '{}' -> '{}': {}", rel.from_entity, rel.to_entity, e);
+                warn!(
+                    "Failed to save relationship '{}' -> '{}': {}",
+                    rel.from_entity, rel.to_entity, e
+                );
             }
         }
 
-        debug!("SurrealDBStorage: Session saved successfully with native graph");
+        debug!(
+            "SurrealDBStorage: Session saved (normalized) - {} updates, {} entities",
+            total_updates,
+            session.entity_graph.get_all_entities().len()
+        );
 
         Ok(())
     }
 
     async fn load_session(&self, session_id: Uuid) -> Result<ActiveSession> {
         debug!(
-            "SurrealDBStorage: Loading session with ID: {}",
+            "SurrealDBStorage: Loading session with ID: {} (normalized)",
             session_id
         );
 
-        // Load session record
-        let record: Option<SessionRecord> = self
-            .db
-            .select(("session", session_id.to_string()))
-            .await?;
+        // Load session metadata
+        let record: Option<SessionRecord> =
+            self.db.select(("session", session_id.to_string())).await?;
 
         let r = record.ok_or_else(|| anyhow::anyhow!("Session not found"))?;
 
-        // Load entities from native table and build graph
+        // Load ALL context updates from normalized table (source of truth!)
+        let all_updates = self
+            .load_session_updates(session_id)
+            .await
+            .unwrap_or_default();
+        debug!(
+            "SurrealDBStorage: Loaded {} updates from context_update table",
+            all_updates.len()
+        );
+
+        // Hot context = last 50 updates (same as HotContext::MAX_SIZE)
+        let hot_context: Vec<ContextUpdate> =
+            all_updates.iter().rev().take(50).rev().cloned().collect();
+
+        // Load entities from native graph table
         let entities = self.list_entities(session_id).await.unwrap_or_default();
         let mut entity_graph = SimpleEntityGraph::new();
         for entity in &entities {
@@ -495,38 +527,44 @@ impl Storage for SurrealDBStorage {
             );
         }
 
-        // Load relationships and add to graph
-        for entity in &entities {
-            let related = self.find_related_entities(session_id, &entity.name).await.unwrap_or_default();
-            for related_name in related {
-                entity_graph.add_relationship(EntityRelationship {
-                    from_entity: entity.name.clone(),
-                    to_entity: related_name,
-                    relation_type: RelationType::RelatedTo,
-                    context: String::new(),
-                });
-            }
+        // Load relationships from native graph and add to entity_graph
+        let relationships = self
+            .load_all_relationships(session_id)
+            .await
+            .unwrap_or_default();
+        for rel in relationships {
+            entity_graph.add_relationship(rel);
         }
+        debug!(
+            "SurrealDBStorage: Loaded {} entities, graph rebuilt",
+            entities.len()
+        );
 
-        // Load incremental updates from native table
-        let incremental_updates = self.load_session_updates(session_id).await.unwrap_or_default();
+        // Rebuild StructuredContext from updates
+        let current_state = Self::rebuild_structured_context(&all_updates);
 
-        // Parse JSON fields back to types
-        let user_preferences: UserPreferences = serde_json::from_value(r.user_preferences)?;
-        let hot_context: Vec<ContextUpdate> = serde_json::from_value(r.hot_context)?;
-        let warm_context: Vec<CompressedUpdate> = serde_json::from_value(r.warm_context)?;
-        let cold_context: Vec<StructuredSummary> = serde_json::from_value(r.cold_context)?;
-        let current_state: StructuredContext = serde_json::from_value(r.current_state)?;
-        let code_references: HashMap<String, Vec<CodeReference>> = serde_json::from_value(r.code_references)?;
-        let change_history: Vec<ChangeRecord> = serde_json::from_value(r.change_history)?;
+        // Extract code_references and change_history from updates
+        let code_references = Self::extract_code_references(&all_updates);
+        let change_history = Self::extract_change_history(&all_updates);
 
-        // Parse vectorized_update_ids from strings to Uuids
-        let vectorized_ids: Vec<Uuid> = r.vectorized_update_ids
+        // Parse user preferences
+        let user_preferences: UserPreferences = serde_json::from_value(r.user_preferences)
+            .unwrap_or_else(|_| UserPreferences {
+                auto_save_enabled: true,
+                context_retention_days: 30,
+                max_hot_context_size: 50,
+                auto_summary_threshold: 100,
+                important_keywords: Vec::new(),
+            });
+
+        // Parse vectorized_update_ids
+        let vectorized_ids: Vec<Uuid> = r
+            .vectorized_update_ids
             .iter()
             .filter_map(|s| Uuid::parse_str(s).ok())
             .collect();
 
-        // Reconstruct ActiveSession from components
+        // Reconstruct ActiveSession from normalized data
         let session = ActiveSession::from_components(
             session_id,
             r.name,
@@ -539,10 +577,10 @@ impl Storage for SurrealDBStorage {
                 .unwrap_or_else(|_| Utc::now()),
             user_preferences,
             hot_context,
-            warm_context,
-            cold_context,
+            Vec::new(), // warm_context - compressed from older updates if needed
+            Vec::new(), // cold_context - summaries generated on demand
             current_state,
-            incremental_updates,
+            all_updates, // All updates from normalized table
             code_references,
             change_history,
             entity_graph,
@@ -554,21 +592,19 @@ impl Storage for SurrealDBStorage {
             vectorized_ids,
         );
 
-        debug!("SurrealDBStorage: Session loaded and reconstructed successfully");
+        debug!(
+            "SurrealDBStorage: Session loaded (normalized) - {} updates, {} entities",
+            session.hot_context.len(),
+            entities.len()
+        );
         Ok(session)
     }
 
     async fn delete_session(&self, session_id: Uuid) -> Result<()> {
-        debug!(
-            "SurrealDBStorage: Deleting session with ID: {}",
-            session_id
-        );
+        debug!("SurrealDBStorage: Deleting session with ID: {}", session_id);
 
         // Delete session
-        let _: Option<SessionRecord> = self
-            .db
-            .delete(("session", session_id.to_string()))
-            .await?;
+        let _: Option<SessionRecord> = self.db.delete(("session", session_id.to_string())).await?;
 
         // Delete all context updates for this session
         self.db
@@ -626,10 +662,8 @@ impl Storage for SurrealDBStorage {
     }
 
     async fn session_exists(&self, session_id: Uuid) -> Result<bool> {
-        let record: Option<SessionRecord> = self
-            .db
-            .select(("session", session_id.to_string()))
-            .await?;
+        let record: Option<SessionRecord> =
+            self.db.select(("session", session_id.to_string())).await?;
 
         Ok(record.is_some())
     }
@@ -826,10 +860,7 @@ impl Storage for SurrealDBStorage {
     }
 
     async fn delete_workspace(&self, workspace_id: Uuid) -> Result<()> {
-        debug!(
-            "SurrealDBStorage: Deleting workspace {}",
-            workspace_id
-        );
+        debug!("SurrealDBStorage: Deleting workspace {}", workspace_id);
 
         // Delete workspace
         let _: Option<WorkspaceRecord> = self
@@ -859,9 +890,7 @@ impl Storage for SurrealDBStorage {
                 // Get sessions for this workspace
                 let mut response = self
                     .db
-                    .query(
-                        "SELECT * FROM workspace_session WHERE workspace_id = $workspace_id",
-                    )
+                    .query("SELECT * FROM workspace_session WHERE workspace_id = $workspace_id")
                     .bind(("workspace_id", record.workspace_id.clone()))
                     .await?;
 
@@ -870,18 +899,16 @@ impl Storage for SurrealDBStorage {
                 let sessions: Vec<(Uuid, SessionRole)> = session_records
                     .into_iter()
                     .filter_map(|s| {
-                        Uuid::parse_str(&s.session_id)
-                            .ok()
-                            .map(|id| {
-                                let role = match s.role.as_str() {
-                                    "Primary" => SessionRole::Primary,
-                                    "Related" => SessionRole::Related,
-                                    "Dependency" => SessionRole::Dependency,
-                                    "Shared" => SessionRole::Shared,
-                                    _ => SessionRole::Primary,
-                                };
-                                (id, role)
-                            })
+                        Uuid::parse_str(&s.session_id).ok().map(|id| {
+                            let role = match s.role.as_str() {
+                                "Primary" => SessionRole::Primary,
+                                "Related" => SessionRole::Related,
+                                "Dependency" => SessionRole::Dependency,
+                                "Shared" => SessionRole::Shared,
+                                _ => SessionRole::Primary,
+                            };
+                            (id, role)
+                        })
                     })
                     .collect();
 
@@ -944,8 +971,7 @@ impl Storage for SurrealDBStorage {
         );
 
         let key = format!("{}_{}", workspace_id, session_id);
-        let _: Option<WorkspaceSessionRecord> =
-            self.delete("workspace_session", &key).await?;
+        let _: Option<WorkspaceSessionRecord> = self.delete("workspace_session", &key).await?;
 
         Ok(())
     }
@@ -1026,10 +1052,7 @@ impl GraphStorage for SurrealDBStorage {
 
         // Use query with backticks for IDs containing special chars (UUIDs have dashes)
         let query = format!("UPSERT entity:`{}` CONTENT $content", entity_id);
-        self.db
-            .query(query)
-            .bind(("content", record))
-            .await?;
+        self.db.query(query).bind(("content", record)).await?;
 
         Ok(())
     }
@@ -1319,6 +1342,192 @@ impl GraphStorage for SurrealDBStorage {
 }
 
 // ============================================================================
+// Helper Methods for SurrealDB
+// ============================================================================
+
+impl SurrealDBStorage {
+    /// Load all relationships for a session from native graph
+    async fn load_all_relationships(&self, session_id: Uuid) -> Result<Vec<EntityRelationship>> {
+        let mut all_relationships = Vec::new();
+
+        // Query each relation type table
+        let relation_tables = [
+            ("required_by", RelationType::RequiredBy),
+            ("leads_to", RelationType::LeadsTo),
+            ("related_to", RelationType::RelatedTo),
+            ("conflicts_with", RelationType::ConflictsWith),
+            ("depends_on", RelationType::DependsOn),
+            ("implements", RelationType::Implements),
+            ("caused_by", RelationType::CausedBy),
+            ("solves", RelationType::Solves),
+        ];
+
+        for (table, rel_type) in relation_tables {
+            let query = format!(
+                r#"
+                SELECT
+                    in.name AS from_entity,
+                    out.name AS to_entity,
+                    context
+                FROM {}
+                WHERE session_id = $session_id
+                "#,
+                table
+            );
+
+            let mut response = self
+                .db
+                .query(query)
+                .bind(("session_id", session_id.to_string()))
+                .await?;
+
+            #[derive(Deserialize, SurrealValue)]
+            struct RelRecord {
+                from_entity: String,
+                to_entity: String,
+                context: String,
+            }
+
+            let records: Vec<RelRecord> = response.take(0).unwrap_or_default();
+
+            for record in records {
+                all_relationships.push(EntityRelationship {
+                    from_entity: record.from_entity,
+                    to_entity: record.to_entity,
+                    relation_type: rel_type.clone(),
+                    context: record.context,
+                });
+            }
+        }
+
+        debug!(
+            "SurrealDBStorage: Loaded {} relationships for session {}",
+            all_relationships.len(),
+            session_id
+        );
+
+        Ok(all_relationships)
+    }
+
+    /// Rebuild StructuredContext from context updates
+    fn rebuild_structured_context(updates: &[ContextUpdate]) -> StructuredContext {
+        use crate::core::context_update::UpdateType;
+        use crate::core::structured_context::{
+            ConceptItem, DecisionItem, FlowItem, QuestionItem, QuestionStatus,
+        };
+
+        let mut context = StructuredContext::default();
+
+        for update in updates {
+            // Extract key decisions
+            if update.update_type == UpdateType::DecisionMade {
+                context.key_decisions.push(DecisionItem {
+                    description: update.content.title.clone(),
+                    context: update.content.description.clone(),
+                    alternatives: update.content.details.clone(),
+                    confidence: if update.user_marked_important {
+                        0.9
+                    } else {
+                        0.7
+                    },
+                    timestamp: update.timestamp,
+                });
+            }
+
+            // Extract questions/answers
+            if update.update_type == UpdateType::QuestionAnswered {
+                context.open_questions.push(QuestionItem {
+                    question: update.content.title.clone(),
+                    context: update.content.description.clone(),
+                    status: QuestionStatus::Answered,
+                    timestamp: update.timestamp,
+                    last_updated: update.timestamp,
+                });
+            }
+
+            // Add to conversation flow (limit to recent 500)
+            if context.conversation_flow.len() < 500 {
+                context.add_flow_item(FlowItem {
+                    step_description: format!(
+                        "{}: {}",
+                        format!("{:?}", update.update_type),
+                        update.content.title
+                    ),
+                    timestamp: update.timestamp,
+                    related_updates: vec![update.id],
+                    outcome: if update.content.description.is_empty() {
+                        None
+                    } else {
+                        Some(update.content.description.clone())
+                    },
+                });
+            }
+
+            // Extract key concepts from entities
+            for entity in &update.creates_entities {
+                let already_exists = context.key_concepts.iter().any(|c| c.name == *entity);
+                if !already_exists && context.key_concepts.len() < 50 {
+                    context.key_concepts.push(ConceptItem {
+                        name: entity.clone(),
+                        definition: String::new(),
+                        examples: Vec::new(),
+                        related_concepts: update.references_entities.clone(),
+                        timestamp: update.timestamp,
+                    });
+                }
+            }
+        }
+
+        context
+    }
+
+    /// Extract code_references from context updates
+    /// Returns HashMap<file_path, Vec<CodeReference>> - multiple references per file
+    fn extract_code_references(updates: &[ContextUpdate]) -> HashMap<String, Vec<CodeReference>> {
+        let mut refs: HashMap<String, Vec<CodeReference>> = HashMap::new();
+
+        for update in updates {
+            if let Some(code_ref) = &update.related_code {
+                // Convert from core::context_update::CodeReference to session::active_session::CodeReference
+                let session_ref = CodeReference {
+                    file_path: code_ref.file_path.clone(),
+                    start_line: code_ref.start_line,
+                    end_line: code_ref.end_line,
+                    code_snippet: code_ref.code_snippet.clone(),
+                    commit_hash: code_ref.commit_hash.clone(),
+                    branch: code_ref.branch.clone(),
+                    change_description: code_ref.change_description.clone(),
+                };
+                // Collect all references for each file path
+                refs.entry(code_ref.file_path.clone())
+                    .or_default()
+                    .push(session_ref);
+            }
+        }
+
+        refs
+    }
+
+    /// Extract change_history from context updates
+    /// Creates ChangeRecord for each CodeChanged update
+    fn extract_change_history(updates: &[ContextUpdate]) -> Vec<ChangeRecord> {
+        use crate::core::context_update::UpdateType;
+
+        updates
+            .iter()
+            .filter(|u| u.update_type == UpdateType::CodeChanged)
+            .map(|u| ChangeRecord {
+                id: u.id,
+                timestamp: u.timestamp,
+                change_type: "CodeChanged".to_string(),
+                description: format!("{}: {}", u.content.title, u.content.description),
+                related_update_id: u.parent_update,
+            })
+            .collect()
+    }
+}
+
+// ============================================================================
 // VectorStorage Trait Implementation
 // ============================================================================
 
@@ -1566,7 +1775,10 @@ impl VectorStorage for SurrealDBStorage {
         0
     }
 
-    async fn get_session_vectors(&self, session_id: &str) -> Result<Vec<(Vec<f32>, VectorMetadata)>> {
+    async fn get_session_vectors(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<(Vec<f32>, VectorMetadata)>> {
         let mut response = self
             .db
             .query("SELECT * FROM embedding WHERE session_id = $session_id")
@@ -1773,7 +1985,10 @@ mod tests {
             .await
             .expect("Failed to load session from remote");
         assert_eq!(session.id(), loaded.id());
-        assert_eq!(loaded.name().clone(), Some("Remote Test Session".to_string()));
+        assert_eq!(
+            loaded.name().clone(),
+            Some("Remote Test Session".to_string())
+        );
 
         // Clean up
         storage
@@ -1782,5 +1997,578 @@ mod tests {
             .expect("Failed to delete session from remote");
 
         println!("Remote SurrealDB connection test passed!");
+    }
+
+    // ========================================================================
+    // Normalized Storage Tests
+    // ========================================================================
+
+    /// Helper to create test session with pre-populated data
+    fn create_test_session_with_updates(
+        session_id: Uuid,
+        name: &str,
+        updates: Vec<ContextUpdate>,
+        entity_graph: SimpleEntityGraph,
+    ) -> ActiveSession {
+        ActiveSession::from_components(
+            session_id,
+            Some(name.to_string()),
+            Some("Test session".to_string()),
+            Utc::now(),
+            Utc::now(),
+            UserPreferences {
+                auto_save_enabled: true,
+                context_retention_days: 30,
+                max_hot_context_size: 50,
+                auto_summary_threshold: 100,
+                important_keywords: Vec::new(),
+            },
+            updates.clone(), // hot_context_vec
+            Vec::new(),      // warm_context
+            Vec::new(),      // cold_context
+            StructuredContext::default(),
+            updates,        // incremental_updates
+            HashMap::new(), // code_references
+            Vec::new(),     // change_history
+            entity_graph,
+            100,        // max_extracted_entities
+            50,         // max_referenced_entities
+            true,       // enable_smart_entity_ranking
+            0,          // total_entity_truncations
+            0,          // total_entities_truncated
+            Vec::new(), // vectorized_update_ids
+        )
+    }
+
+    #[tokio::test]
+    async fn test_normalized_context_updates_roundtrip() {
+        use crate::core::context_update::{UpdateContent, UpdateType};
+
+        let storage = SurrealDBStorage::new("mem://", None, None)
+            .await
+            .expect("Failed to create SurrealDB storage");
+
+        let session_id = Uuid::new_v4();
+
+        // Create context updates
+        let update1 = ContextUpdate {
+            id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            update_type: UpdateType::QuestionAnswered,
+            content: UpdateContent {
+                title: "How does SurrealDB work?".to_string(),
+                description: "SurrealDB is a multi-model database".to_string(),
+                details: vec!["Graph support".to_string(), "Vector search".to_string()],
+                examples: vec![],
+                implications: vec![],
+            },
+            related_code: None,
+            parent_update: None,
+            user_marked_important: true,
+            creates_entities: vec!["SurrealDB".to_string()],
+            creates_relationships: vec![],
+            references_entities: vec![],
+        };
+
+        let update2 = ContextUpdate {
+            id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            update_type: UpdateType::DecisionMade,
+            content: UpdateContent {
+                title: "Use normalized storage".to_string(),
+                description: "Store context updates in separate table".to_string(),
+                details: vec!["No JSON blobs".to_string()],
+                examples: vec![],
+                implications: vec!["Better queryability".to_string()],
+            },
+            related_code: None,
+            parent_update: None,
+            user_marked_important: false,
+            creates_entities: vec!["NormalizedStorage".to_string()],
+            creates_relationships: vec![],
+            references_entities: vec!["SurrealDB".to_string()],
+        };
+
+        // Create session with updates
+        let session = create_test_session_with_updates(
+            session_id,
+            "Normalized Test",
+            vec![update1, update2],
+            SimpleEntityGraph::new(),
+        );
+
+        // Save session (should save updates to context_update table)
+        storage
+            .save_session(&session)
+            .await
+            .expect("Failed to save session");
+
+        // Verify updates are in context_update table
+        let loaded_updates = storage
+            .load_session_updates(session_id)
+            .await
+            .expect("Failed to load updates");
+        assert_eq!(
+            loaded_updates.len(),
+            2,
+            "Should have 2 updates in normalized table"
+        );
+
+        // Load session (should rebuild from normalized tables)
+        let loaded = storage
+            .load_session(session_id)
+            .await
+            .expect("Failed to load session");
+
+        // Verify hot_context was rebuilt
+        let hot_updates: Vec<_> = loaded.hot_context.iter();
+        assert_eq!(hot_updates.len(), 2, "Hot context should have 2 updates");
+
+        // Verify update content is preserved
+        let found_qa = hot_updates.iter().any(|u| {
+            u.update_type == UpdateType::QuestionAnswered
+                && u.content.title == "How does SurrealDB work?"
+        });
+        assert!(found_qa, "Should find QuestionAnswered update");
+
+        let found_decision = hot_updates.iter().any(|u| {
+            u.update_type == UpdateType::DecisionMade && u.content.title == "Use normalized storage"
+        });
+        assert!(found_decision, "Should find DecisionMade update");
+    }
+
+    #[tokio::test]
+    async fn test_normalized_entities_and_relationships() {
+        let storage = SurrealDBStorage::new("mem://", None, None)
+            .await
+            .expect("Failed to create SurrealDB storage");
+
+        let session_id = Uuid::new_v4();
+
+        // Create entity graph with entities and relationships
+        let mut entity_graph = SimpleEntityGraph::new();
+        entity_graph.add_or_update_entity(
+            "Rust".to_string(),
+            EntityType::Technology,
+            Utc::now(),
+            "Programming language",
+        );
+        entity_graph.add_or_update_entity(
+            "SurrealDB".to_string(),
+            EntityType::Technology,
+            Utc::now(),
+            "Multi-model database",
+        );
+
+        // Add relationship
+        let relationship = EntityRelationship {
+            from_entity: "Rust".to_string(),
+            to_entity: "SurrealDB".to_string(),
+            relation_type: RelationType::Implements,
+            context: "Rust client for SurrealDB".to_string(),
+        };
+        entity_graph.add_relationship(relationship);
+
+        // Create session with entity graph
+        let session =
+            create_test_session_with_updates(session_id, "Graph Test", Vec::new(), entity_graph);
+
+        // Save session
+        storage
+            .save_session(&session)
+            .await
+            .expect("Failed to save session");
+
+        // Verify entities in native table
+        let entities = storage
+            .list_entities(session_id)
+            .await
+            .expect("Failed to list entities");
+        assert_eq!(entities.len(), 2, "Should have 2 entities");
+
+        let rust_entity = entities.iter().find(|e| e.name == "Rust");
+        assert!(rust_entity.is_some(), "Should find Rust entity");
+        assert_eq!(rust_entity.unwrap().entity_type, EntityType::Technology);
+
+        // Verify relationships via load_all_relationships
+        let relationships = storage
+            .load_all_relationships(session_id)
+            .await
+            .expect("Failed to load relationships");
+        assert_eq!(relationships.len(), 1, "Should have 1 relationship");
+        assert_eq!(relationships[0].from_entity, "Rust");
+        assert_eq!(relationships[0].to_entity, "SurrealDB");
+        assert_eq!(relationships[0].relation_type, RelationType::Implements);
+        assert_eq!(relationships[0].context, "Rust client for SurrealDB");
+
+        // Load session and verify graph is rebuilt
+        let loaded = storage
+            .load_session(session_id)
+            .await
+            .expect("Failed to load session");
+
+        let loaded_entities = loaded.entity_graph.get_all_entities();
+        assert_eq!(
+            loaded_entities.len(),
+            2,
+            "Loaded session should have 2 entities"
+        );
+
+        let loaded_relationships = loaded.entity_graph.get_all_relationships();
+        assert_eq!(
+            loaded_relationships.len(),
+            1,
+            "Loaded session should have 1 relationship"
+        );
+        assert_eq!(loaded_relationships[0].context, "Rust client for SurrealDB");
+    }
+
+    #[test]
+    fn test_extract_code_references() {
+        use crate::core::context_update::{
+            CodeReference as CoreCodeRef, UpdateContent, UpdateType,
+        };
+
+        let updates = vec![
+            ContextUpdate {
+                id: Uuid::new_v4(),
+                timestamp: Utc::now(),
+                update_type: UpdateType::CodeChanged,
+                content: UpdateContent {
+                    title: "Fix bug".to_string(),
+                    description: "Fixed null pointer".to_string(),
+                    details: vec![],
+                    examples: vec![],
+                    implications: vec![],
+                },
+                related_code: Some(CoreCodeRef {
+                    file_path: "src/main.rs".to_string(),
+                    start_line: 10,
+                    end_line: 20,
+                    code_snippet: "fn main() {}".to_string(),
+                    commit_hash: Some("abc123".to_string()),
+                    branch: Some("main".to_string()),
+                    change_description: "Fixed bug".to_string(),
+                }),
+                parent_update: None,
+                user_marked_important: false,
+                creates_entities: vec![],
+                creates_relationships: vec![],
+                references_entities: vec![],
+            },
+            ContextUpdate {
+                id: Uuid::new_v4(),
+                timestamp: Utc::now(),
+                update_type: UpdateType::CodeChanged,
+                content: UpdateContent {
+                    title: "Add feature".to_string(),
+                    description: "Added logging".to_string(),
+                    details: vec![],
+                    examples: vec![],
+                    implications: vec![],
+                },
+                related_code: Some(CoreCodeRef {
+                    file_path: "src/main.rs".to_string(), // Same file, second reference
+                    start_line: 30,
+                    end_line: 40,
+                    code_snippet: "fn log() {}".to_string(),
+                    commit_hash: Some("def456".to_string()),
+                    branch: Some("feature".to_string()),
+                    change_description: "Added logging".to_string(),
+                }),
+                parent_update: None,
+                user_marked_important: false,
+                creates_entities: vec![],
+                creates_relationships: vec![],
+                references_entities: vec![],
+            },
+            ContextUpdate {
+                id: Uuid::new_v4(),
+                timestamp: Utc::now(),
+                update_type: UpdateType::QuestionAnswered,
+                content: UpdateContent {
+                    title: "Question".to_string(),
+                    description: "Answer".to_string(),
+                    details: vec![],
+                    examples: vec![],
+                    implications: vec![],
+                },
+                related_code: None, // No code reference
+                parent_update: None,
+                user_marked_important: false,
+                creates_entities: vec![],
+                creates_relationships: vec![],
+                references_entities: vec![],
+            },
+        ];
+
+        let refs = SurrealDBStorage::extract_code_references(&updates);
+
+        // Should have 1 file with 2 references
+        assert_eq!(refs.len(), 1, "Should have 1 file path");
+        assert!(refs.contains_key("src/main.rs"), "Should have src/main.rs");
+
+        let main_refs = refs.get("src/main.rs").unwrap();
+        assert_eq!(
+            main_refs.len(),
+            2,
+            "Should have 2 references for src/main.rs"
+        );
+
+        // Verify both references are captured
+        assert!(
+            main_refs.iter().any(|r| r.start_line == 10),
+            "Should have first reference"
+        );
+        assert!(
+            main_refs.iter().any(|r| r.start_line == 30),
+            "Should have second reference"
+        );
+    }
+
+    #[test]
+    fn test_extract_change_history() {
+        use crate::core::context_update::{UpdateContent, UpdateType};
+
+        let updates = vec![
+            ContextUpdate {
+                id: Uuid::new_v4(),
+                timestamp: Utc::now(),
+                update_type: UpdateType::CodeChanged,
+                content: UpdateContent {
+                    title: "Refactor storage".to_string(),
+                    description: "Split into modules".to_string(),
+                    details: vec![],
+                    examples: vec![],
+                    implications: vec![],
+                },
+                related_code: None,
+                parent_update: None,
+                user_marked_important: false,
+                creates_entities: vec![],
+                creates_relationships: vec![],
+                references_entities: vec![],
+            },
+            ContextUpdate {
+                id: Uuid::new_v4(),
+                timestamp: Utc::now(),
+                update_type: UpdateType::QuestionAnswered, // Not CodeChanged
+                content: UpdateContent {
+                    title: "Question".to_string(),
+                    description: "Answer".to_string(),
+                    details: vec![],
+                    examples: vec![],
+                    implications: vec![],
+                },
+                related_code: None,
+                parent_update: None,
+                user_marked_important: false,
+                creates_entities: vec![],
+                creates_relationships: vec![],
+                references_entities: vec![],
+            },
+            ContextUpdate {
+                id: Uuid::new_v4(),
+                timestamp: Utc::now(),
+                update_type: UpdateType::CodeChanged,
+                content: UpdateContent {
+                    title: "Add tests".to_string(),
+                    description: "Unit tests for helpers".to_string(),
+                    details: vec![],
+                    examples: vec![],
+                    implications: vec![],
+                },
+                related_code: None,
+                parent_update: None,
+                user_marked_important: false,
+                creates_entities: vec![],
+                creates_relationships: vec![],
+                references_entities: vec![],
+            },
+        ];
+
+        let history = SurrealDBStorage::extract_change_history(&updates);
+
+        // Should only include CodeChanged updates
+        assert_eq!(history.len(), 2, "Should have 2 change records");
+        assert!(
+            history
+                .iter()
+                .any(|r| r.description.contains("Refactor storage"))
+        );
+        assert!(history.iter().any(|r| r.description.contains("Add tests")));
+        assert!(!history.iter().any(|r| r.description.contains("Question")));
+    }
+
+    #[test]
+    fn test_rebuild_structured_context() {
+        use crate::core::context_update::{UpdateContent, UpdateType};
+
+        let updates = vec![
+            ContextUpdate {
+                id: Uuid::new_v4(),
+                timestamp: Utc::now(),
+                update_type: UpdateType::DecisionMade,
+                content: UpdateContent {
+                    title: "Use SurrealDB".to_string(),
+                    description: "For graph and vector storage".to_string(),
+                    details: vec!["Option A".to_string(), "Option B".to_string()],
+                    examples: vec![],
+                    implications: vec![],
+                },
+                related_code: None,
+                parent_update: None,
+                user_marked_important: true,
+                creates_entities: vec!["SurrealDB".to_string()],
+                creates_relationships: vec![],
+                references_entities: vec![],
+            },
+            ContextUpdate {
+                id: Uuid::new_v4(),
+                timestamp: Utc::now(),
+                update_type: UpdateType::QuestionAnswered,
+                content: UpdateContent {
+                    title: "How to normalize?".to_string(),
+                    description: "Store in separate tables".to_string(),
+                    details: vec![],
+                    examples: vec![],
+                    implications: vec![],
+                },
+                related_code: None,
+                parent_update: None,
+                user_marked_important: false,
+                creates_entities: vec![],
+                creates_relationships: vec![],
+                references_entities: vec!["SurrealDB".to_string()],
+            },
+        ];
+
+        let context = SurrealDBStorage::rebuild_structured_context(&updates);
+
+        // Should have 1 decision
+        assert_eq!(context.key_decisions.len(), 1, "Should have 1 decision");
+        assert_eq!(context.key_decisions[0].description, "Use SurrealDB");
+        assert_eq!(
+            context.key_decisions[0].confidence, 0.9,
+            "Important = high confidence"
+        );
+        assert_eq!(context.key_decisions[0].alternatives.len(), 2);
+
+        // Should have 1 question
+        assert_eq!(context.open_questions.len(), 1, "Should have 1 question");
+        assert_eq!(context.open_questions[0].question, "How to normalize?");
+
+        // Should have conversation flow
+        assert_eq!(
+            context.conversation_flow.len(),
+            2,
+            "Should have 2 flow items"
+        );
+
+        // Should have key concepts from entities
+        assert_eq!(context.key_concepts.len(), 1, "Should have 1 concept");
+        assert_eq!(context.key_concepts[0].name, "SurrealDB");
+    }
+
+    #[tokio::test]
+    async fn test_full_normalized_roundtrip() {
+        use crate::core::context_update::{
+            CodeReference as CoreCodeRef, UpdateContent, UpdateType,
+        };
+
+        let storage = SurrealDBStorage::new("mem://", None, None)
+            .await
+            .expect("Failed to create SurrealDB storage");
+
+        let session_id = Uuid::new_v4();
+
+        // Create entity graph with entity
+        let mut entity_graph = SimpleEntityGraph::new();
+        entity_graph.add_or_update_entity(
+            "TestEntity".to_string(),
+            EntityType::Concept,
+            Utc::now(),
+            "Test description",
+        );
+
+        // Create context update with code reference
+        let update = ContextUpdate {
+            id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            update_type: UpdateType::CodeChanged,
+            content: UpdateContent {
+                title: "Implement feature".to_string(),
+                description: "Added new functionality".to_string(),
+                details: vec!["Detail 1".to_string()],
+                examples: vec![],
+                implications: vec![],
+            },
+            related_code: Some(CoreCodeRef {
+                file_path: "src/lib.rs".to_string(),
+                start_line: 100,
+                end_line: 150,
+                code_snippet: "pub fn new_feature() {}".to_string(),
+                commit_hash: Some("abc123".to_string()),
+                branch: Some("main".to_string()),
+                change_description: "New feature implementation".to_string(),
+            }),
+            parent_update: None,
+            user_marked_important: true,
+            creates_entities: vec!["TestEntity".to_string()],
+            creates_relationships: vec![],
+            references_entities: vec![],
+        };
+
+        // Create session with update and entity graph
+        let session = create_test_session_with_updates(
+            session_id,
+            "Full Roundtrip Test",
+            vec![update],
+            entity_graph,
+        );
+
+        // Save
+        storage
+            .save_session(&session)
+            .await
+            .expect("Failed to save session");
+
+        // Load
+        let loaded = storage
+            .load_session(session_id)
+            .await
+            .expect("Failed to load session");
+
+        // Verify all data is preserved
+        assert_eq!(
+            loaded.name().clone(),
+            Some("Full Roundtrip Test".to_string())
+        );
+        assert_eq!(loaded.hot_context.len(), 1);
+
+        // Verify entities
+        let entities = loaded.entity_graph.get_all_entities();
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].name, "TestEntity");
+
+        // Verify code_references extracted
+        let code_refs = &loaded.code_references;
+        assert!(
+            code_refs.contains_key("src/lib.rs"),
+            "Should have code reference"
+        );
+        let lib_refs = code_refs.get("src/lib.rs").unwrap();
+        assert_eq!(lib_refs.len(), 1);
+        assert_eq!(lib_refs[0].start_line, 100);
+
+        // Verify change_history extracted
+        let change_history = &loaded.change_history;
+        assert_eq!(change_history.len(), 1);
+        assert!(change_history[0].description.contains("Implement feature"));
+
+        // Verify structured context rebuilt
+        // (The update is CodeChanged, so it won't create decisions/questions,
+        // but it will be in conversation_flow)
+        assert!(!loaded.current_state.conversation_flow.is_empty());
     }
 }
