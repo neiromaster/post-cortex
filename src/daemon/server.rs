@@ -388,7 +388,7 @@ fn handle_tools_list(_server: &Arc<LockFreeDaemonServer>) -> Result<serde_json::
                     "type": "object",
                     "properties": {
                         "session_id": {"type": "string", "description": "UUID of the session"},
-                        "interaction_type": {"type": "string", "description": "Type: qa, code_change, problem_solved, decision_made"},
+                        "interaction_type": {"type": "string", "description": "Type: qa, code_change, problem_solved, decision_made, requirement_added, concept_defined"},
                         "content": {"type": "object", "description": "Content object with interaction data"}
                     },
                     "required": ["session_id", "interaction_type", "content"]
