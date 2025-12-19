@@ -21,7 +21,10 @@ use post_cortex::daemon::{DaemonConfig, is_daemon_running, run_stdio_proxy, star
 use post_cortex::storage::{
     CompressionType, ExportOptions, ImportOptions, RealRocksDBStorage,
     read_export_file, write_export_file, list_export_sessions, preview_export_file,
+    StorageBackendType, Storage,
 };
+#[cfg(feature = "surrealdb-storage")]
+use post_cortex::storage::SurrealDBStorage;
 use post_cortex::workspace::SessionRole;
 use post_cortex::{LockFreeConversationMemorySystem, SystemConfig};
 use serde::{Deserialize, Serialize};
@@ -182,6 +185,55 @@ enum Commands {
         /// List contents of export file without importing
         #[arg(long)]
         list: bool,
+    },
+
+    /// Migrate data between storage backends
+    #[cfg(feature = "surrealdb-storage")]
+    #[command(
+        long_about = "Migrate data from one storage backend to another.\n\n\
+        Currently supports migration from RocksDB to SurrealDB (local or remote).\n\n\
+        EXAMPLES:\n\n\
+        Migrate to local SurrealDB:\n\
+        $ pcx migrate --from rocksdb --to surrealdb\n\n\
+        Migrate to remote SurrealDB (Docker):\n\
+        $ pcx migrate --from rocksdb --to surrealdb \\\n\
+            --remote-endpoint localhost:8000 \\\n\
+            --username root --password root\n\n\
+        Dry run (show what would be migrated):\n\
+        $ pcx migrate --from rocksdb --to surrealdb --dry-run"
+    )]
+    Migrate {
+        /// Source storage backend (rocksdb)
+        #[arg(long, value_name = "BACKEND")]
+        from: String,
+
+        /// Target storage backend (surrealdb)
+        #[arg(long, value_name = "BACKEND")]
+        to: String,
+
+        /// Source data path (default: ~/.post-cortex/data)
+        #[arg(long, value_name = "PATH")]
+        source_path: Option<String>,
+
+        /// Target data path for local SurrealDB (default: ~/.post-cortex/surrealdb)
+        #[arg(long, value_name = "PATH")]
+        target_path: Option<String>,
+
+        /// Remote SurrealDB endpoint (e.g., localhost:8000 or ws://host:port)
+        #[arg(long, value_name = "ENDPOINT")]
+        remote_endpoint: Option<String>,
+
+        /// Username for remote SurrealDB authentication
+        #[arg(long, value_name = "USER")]
+        username: Option<String>,
+
+        /// Password for remote SurrealDB authentication
+        #[arg(long, value_name = "PASS")]
+        password: Option<String>,
+
+        /// Dry run - show what would be migrated without actually migrating
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -385,6 +437,21 @@ async fn main() -> Result<(), String> {
         }) => {
             init_logging(false);
             handle_import(input, session, workspace, skip_existing, overwrite, list).await
+        }
+
+        #[cfg(feature = "surrealdb-storage")]
+        Some(Commands::Migrate {
+            from,
+            to,
+            source_path,
+            target_path,
+            remote_endpoint,
+            username,
+            password,
+            dry_run,
+        }) => {
+            init_logging(false);
+            handle_migrate(from, to, source_path, target_path, remote_endpoint, username, password, dry_run).await
         }
     }
 }
@@ -1136,6 +1203,211 @@ async fn handle_import(
             println!("  - {}", err);
         }
     }
+
+    Ok(())
+}
+
+// ============================================================================
+// Migration Handler
+// ============================================================================
+
+#[cfg(feature = "surrealdb-storage")]
+async fn handle_migrate(
+    from: String,
+    to: String,
+    source_path: Option<String>,
+    target_path: Option<String>,
+    remote_endpoint: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    dry_run: bool,
+) -> Result<(), String> {
+    use std::path::PathBuf;
+
+    // Validate backends
+    let from_backend = StorageBackendType::from_str(&from)
+        .ok_or_else(|| format!("Invalid source backend: {}. Use: rocksdb", from))?;
+    let to_backend = StorageBackendType::from_str(&to)
+        .ok_or_else(|| format!("Invalid target backend: {}. Use: surrealdb", to))?;
+
+    if from_backend == to_backend {
+        return Err("Source and target backends must be different".to_string());
+    }
+
+    // Only rocksdb -> surrealdb is supported for now
+    if from_backend != StorageBackendType::RocksDB || to_backend != StorageBackendType::SurrealDB {
+        return Err("Only migration from RocksDB to SurrealDB is currently supported".to_string());
+    }
+
+    // Determine source path
+    let daemon_config = DaemonConfig::load();
+    let source = source_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&daemon_config.data_directory));
+
+    // Determine target (local path or remote endpoint)
+    let is_remote = remote_endpoint.is_some();
+    let target = target_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".post-cortex/surrealdb")
+        });
+
+    println!("Migration: {} -> {}", from, to);
+    println!("  Source path: {}", source.display());
+    if is_remote {
+        println!("  Target: remote SurrealDB at {}", remote_endpoint.as_ref().unwrap());
+    } else {
+        println!("  Target path: {}", target.display());
+    }
+    println!();
+
+    // Open source storage
+    println!("Opening source storage (RocksDB)...");
+    let source_storage = RealRocksDBStorage::new(&source).await
+        .map_err(|e| {
+            let err_str = e.to_string();
+            if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
+                format!(
+                    "Source database is locked by another process (likely the daemon).\n\
+                     Please stop the daemon first: pkill -f 'pcx start'"
+                )
+            } else {
+                format!("Failed to open source storage: {}", e)
+            }
+        })?;
+
+    // Get source statistics
+    let sessions = source_storage.list_sessions().await
+        .map_err(|e| format!("Failed to list sessions: {}", e))?;
+    let workspaces = source_storage.list_workspaces().await
+        .map_err(|e| format!("Failed to list workspaces: {}", e))?;
+    let checkpoints = source_storage.list_checkpoints().await
+        .map_err(|e| format!("Failed to list checkpoints: {}", e))?;
+
+    println!("Source statistics:");
+    println!("  Sessions:    {}", sessions.len());
+    println!("  Workspaces:  {}", workspaces.len());
+    println!("  Checkpoints: {}", checkpoints.len());
+    println!();
+
+    if dry_run {
+        println!("DRY RUN - No data will be migrated.");
+        println!();
+        println!("Sessions to migrate:");
+        for session_id in &sessions {
+            if let Ok(session) = source_storage.load_session(*session_id).await {
+                let name = session.name().clone().unwrap_or_else(|| "Unnamed".to_string());
+                let update_count = source_storage.load_session_updates(*session_id).await
+                    .map(|u| u.len())
+                    .unwrap_or(0);
+                println!("  {} - {} ({} updates)", session_id, name, update_count);
+            }
+        }
+        return Ok(());
+    }
+
+    // Open target storage (local or remote)
+    let target_storage = if let Some(endpoint) = &remote_endpoint {
+        println!("Connecting to remote SurrealDB at {}...", endpoint);
+        SurrealDBStorage::new(
+            endpoint,
+            username.as_deref(),
+            password.as_deref(),
+        ).await
+        .map_err(|e| format!("Failed to connect to remote SurrealDB: {}", e))?
+    } else {
+        println!("Opening local SurrealDB at {}...", target.display());
+        SurrealDBStorage::new(target.to_str().unwrap_or_default(), None, None).await
+            .map_err(|e| format!("Failed to open target storage: {}", e))?
+    };
+
+    // Migrate sessions
+    println!();
+    println!("Migrating sessions...");
+    let mut migrated_sessions = 0;
+    let mut migrated_updates = 0;
+
+    for session_id in &sessions {
+        match source_storage.load_session(*session_id).await {
+            Ok(session) => {
+                let name = session.name().clone().unwrap_or_else(|| "Unnamed".to_string());
+
+                // Save session to target
+                if let Err(e) = target_storage.save_session(&session).await {
+                    println!("  [ERROR] {} - {}: {}", session_id, name, e);
+                    continue;
+                }
+
+                // Get and save updates
+                let update_count = match source_storage.load_session_updates(*session_id).await {
+                    Ok(updates) => {
+                        let count = updates.len();
+                        if !updates.is_empty() {
+                            if let Err(e) = target_storage.batch_save_updates(*session_id, updates).await {
+                                println!("  [WARN] {} - {}: Failed to save updates: {}", session_id, name, e);
+                            } else {
+                                migrated_updates += count;
+                            }
+                        }
+                        count
+                    }
+                    Err(e) => {
+                        println!("  [WARN] {} - {}: Failed to load updates: {}", session_id, name, e);
+                        0
+                    }
+                };
+
+                println!("  [OK] {} - {} ({} updates)", session_id, name, update_count);
+                migrated_sessions += 1;
+            }
+            Err(e) => {
+                println!("  [ERROR] {} - Failed to load: {}", session_id, e);
+            }
+        }
+    }
+
+    // Migrate workspaces
+    println!();
+    println!("Migrating workspaces...");
+    let mut migrated_workspaces = 0;
+
+    for ws in &workspaces {
+        let session_ids: Vec<Uuid> = ws.sessions.iter().map(|(id, _)| *id).collect();
+        if let Err(e) = target_storage
+            .save_workspace_metadata(ws.id, &ws.name, &ws.description, &session_ids)
+            .await
+        {
+            println!("  [ERROR] {} - {}: {}", ws.id, ws.name, e);
+            continue;
+        }
+        println!("  [OK] {} - {} ({} sessions)", ws.id, ws.name, ws.sessions.len());
+        migrated_workspaces += 1;
+    }
+
+    // Migrate checkpoints
+    println!();
+    println!("Migrating checkpoints...");
+    let mut migrated_checkpoints = 0;
+
+    for checkpoint in &checkpoints {
+        if let Err(e) = target_storage.save_checkpoint(checkpoint).await {
+            println!("  [ERROR] {} - {}", checkpoint.id, e);
+            continue;
+        }
+        println!("  [OK] {} (session: {})", checkpoint.id, checkpoint.session_id);
+        migrated_checkpoints += 1;
+    }
+
+    // Summary
+    println!();
+    println!("Migration complete!");
+    println!("  Sessions migrated:    {}/{}", migrated_sessions, sessions.len());
+    println!("  Updates migrated:     {}", migrated_updates);
+    println!("  Workspaces migrated:  {}/{}", migrated_workspaces, workspaces.len());
+    println!("  Checkpoints migrated: {}/{}", migrated_checkpoints, checkpoints.len());
 
     Ok(())
 }

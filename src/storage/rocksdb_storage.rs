@@ -20,7 +20,10 @@
 use crate::core::context_update::ContextUpdate;
 use crate::core::structured_context::StructuredContext;
 use crate::session::active_session::{ActiveSession, ChangeRecord, CodeReference};
+use crate::storage::traits::Storage;
+use crate::workspace::SessionRole;
 use anyhow::Result;
+use async_trait::async_trait;
 
 use rocksdb::{DB, Options, WriteBatch};
 use serde::{Deserialize, Serialize};
@@ -723,6 +726,104 @@ impl RealRocksDBStorage {
         })
         .await
         .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+    }
+}
+
+// ============================================================================
+// Storage Trait Implementation
+// ============================================================================
+
+#[async_trait]
+impl Storage for RealRocksDBStorage {
+    async fn save_session(&self, session: &ActiveSession) -> Result<()> {
+        RealRocksDBStorage::save_session(self, session).await
+    }
+
+    async fn load_session(&self, session_id: Uuid) -> Result<ActiveSession> {
+        RealRocksDBStorage::load_session(self, session_id).await
+    }
+
+    async fn delete_session(&self, session_id: Uuid) -> Result<()> {
+        RealRocksDBStorage::delete_session(self, session_id).await
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<Uuid>> {
+        RealRocksDBStorage::list_sessions(self).await
+    }
+
+    async fn session_exists(&self, session_id: Uuid) -> Result<bool> {
+        RealRocksDBStorage::session_exists(self, session_id).await
+    }
+
+    async fn batch_save_updates(
+        &self,
+        session_id: Uuid,
+        updates: Vec<ContextUpdate>,
+    ) -> Result<()> {
+        RealRocksDBStorage::batch_save_updates(self, session_id, updates).await
+    }
+
+    async fn load_session_updates(&self, session_id: Uuid) -> Result<Vec<ContextUpdate>> {
+        RealRocksDBStorage::load_session_updates(self, session_id).await
+    }
+
+    async fn save_checkpoint(&self, checkpoint: &SessionCheckpoint) -> Result<()> {
+        RealRocksDBStorage::save_checkpoint(self, checkpoint).await
+    }
+
+    async fn load_checkpoint(&self, checkpoint_id: Uuid) -> Result<SessionCheckpoint> {
+        RealRocksDBStorage::load_checkpoint(self, checkpoint_id).await
+    }
+
+    async fn list_checkpoints(&self) -> Result<Vec<SessionCheckpoint>> {
+        RealRocksDBStorage::list_checkpoints(self).await
+    }
+
+    async fn save_workspace_metadata(
+        &self,
+        workspace_id: Uuid,
+        name: &str,
+        description: &str,
+        session_ids: &[Uuid],
+    ) -> Result<()> {
+        RealRocksDBStorage::save_workspace_metadata(self, workspace_id, name, description, session_ids).await
+    }
+
+    async fn delete_workspace(&self, workspace_id: Uuid) -> Result<()> {
+        RealRocksDBStorage::delete_workspace(self, workspace_id).await
+    }
+
+    async fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>> {
+        RealRocksDBStorage::list_workspaces(self).await
+    }
+
+    async fn add_session_to_workspace(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+        role: SessionRole,
+    ) -> Result<()> {
+        RealRocksDBStorage::add_session_to_workspace(self, workspace_id, session_id, role).await
+    }
+
+    async fn remove_session_from_workspace(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<()> {
+        RealRocksDBStorage::remove_session_from_workspace(self, workspace_id, session_id).await
+    }
+
+    async fn compact(&self) -> Result<()> {
+        RealRocksDBStorage::compact(self).await
+    }
+
+    async fn get_key_count(&self) -> Result<usize> {
+        RealRocksDBStorage::get_key_count(self).await
+    }
+
+    async fn get_stats(&self) -> Result<String> {
+        RealRocksDBStorage::get_stats(self).await
     }
 }
 
