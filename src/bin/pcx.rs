@@ -333,8 +333,7 @@ fn init_logging(to_file: bool, also_stderr: bool) {
     if to_file {
         let file_appender = RollingFileAppender::new(Rotation::DAILY, log_dir, "daemon.log");
         // Use RUST_LOG if set, otherwise default to "info"
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info"));
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
         if also_stderr {
             // Log to both file and stderr (foreground daemon mode)
@@ -352,8 +351,7 @@ fn init_logging(to_file: bool, also_stderr: bool) {
         }
     } else {
         // Log to stderr only (CLI commands)
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info"));
+        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
         tracing_subscriber::registry()
             .with(fmt::layer().with_writer(std::io::stderr))
             .with(filter)
@@ -1169,7 +1167,9 @@ async fn handle_export(
         } else if let Some(session_ids) = session {
             let uuids: Result<Vec<Uuid>, _> = session_ids
                 .iter()
-                .map(|s| Uuid::parse_str(s).map_err(|e| format!("Invalid session UUID {}: {}", s, e)))
+                .map(|s| {
+                    Uuid::parse_str(s).map_err(|e| format!("Invalid session UUID {}: {}", s, e))
+                })
                 .collect();
             let uuids = uuids?;
             println!("Exporting {} session(s)...", uuids.len());
@@ -1540,9 +1540,15 @@ async fn handle_migrate(
     // Open target storage (local or remote)
     let target_storage = if let Some(endpoint) = &remote_endpoint {
         println!("Connecting to remote SurrealDB at {}...", endpoint);
-        SurrealDBStorage::new(endpoint, username.as_deref(), password.as_deref(), None, None)
-            .await
-            .map_err(|e| format!("Failed to connect to remote SurrealDB: {}", e))?
+        SurrealDBStorage::new(
+            endpoint,
+            username.as_deref(),
+            password.as_deref(),
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| format!("Failed to connect to remote SurrealDB: {}", e))?
     } else {
         println!("Opening local SurrealDB at {}...", target.display());
         SurrealDBStorage::new(target.to_str().unwrap_or_default(), None, None, None, None)

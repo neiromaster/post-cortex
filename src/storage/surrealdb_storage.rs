@@ -130,6 +130,18 @@ struct EmbeddingRecord {
     metadata: HashMap<String, String>,
 }
 
+/// KNN search result with distance from HNSW index
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
+struct KnnResult {
+    content_id: String,
+    session_id: String,
+    text: String,
+    content_type: String,
+    timestamp: String,
+    metadata: HashMap<String, String>,
+    distance: f32,
+}
+
 /// Workspace record for SurrealDB
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct WorkspaceRecord {
@@ -291,6 +303,8 @@ impl SurrealDBStorage {
             DEFINE INDEX IF NOT EXISTS idx_update_id ON context_update FIELDS update_id UNIQUE;
             DEFINE INDEX IF NOT EXISTS idx_update_session ON context_update FIELDS session_id;
             DEFINE INDEX IF NOT EXISTS idx_update_timestamp ON context_update FIELDS timestamp;
+            -- Composite index for efficient session queries with ORDER BY timestamp
+            DEFINE INDEX IF NOT EXISTS idx_update_session_time ON context_update FIELDS session_id, timestamp;
 
             -- Entities table (graph nodes)
             DEFINE TABLE IF NOT EXISTS entity SCHEMAFULL;
@@ -306,6 +320,8 @@ impl SurrealDBStorage {
             DEFINE INDEX IF NOT EXISTS idx_entity_session ON entity FIELDS session_id;
             DEFINE INDEX IF NOT EXISTS idx_entity_type ON entity FIELDS entity_type;
             DEFINE INDEX IF NOT EXISTS idx_entity_importance ON entity FIELDS importance_score;
+            -- Composite index for efficient entity queries with ORDER BY importance_score
+            DEFINE INDEX IF NOT EXISTS idx_entity_session_importance ON entity FIELDS session_id, importance_score;
 
             -- Relation tables for graph edges (schemaless for flexibility)
             DEFINE TABLE IF NOT EXISTS required_by SCHEMALESS;
@@ -344,6 +360,9 @@ impl SurrealDBStorage {
             DEFINE INDEX IF NOT EXISTS idx_embedding_content ON embedding FIELDS content_id UNIQUE;
             DEFINE INDEX IF NOT EXISTS idx_embedding_session ON embedding FIELDS session_id;
             DEFINE INDEX IF NOT EXISTS idx_embedding_type ON embedding FIELDS content_type;
+            -- HNSW vector index for fast similarity search (384-dim MiniLM embeddings)
+            -- This enables O(log n) KNN instead of O(n) full scan!
+            DEFINE INDEX IF NOT EXISTS idx_embedding_hnsw ON embedding FIELDS vector HNSW DIMENSION 384 DIST COSINE;
 
             -- Workspaces table
             DEFINE TABLE IF NOT EXISTS workspace SCHEMAFULL;
@@ -1743,31 +1762,27 @@ impl VectorStorage for SurrealDBStorage {
             ));
         }
 
-        debug!("SurrealDBStorage: Searching for {} nearest vectors", k);
+        debug!("SurrealDBStorage: HNSW search for {} nearest vectors", k);
 
-        // Fetch all vectors using pagination
-        let mut matches = Vec::new();
-        let limit = 1000;
-        let mut start = 0;
+        // Use native HNSW KNN search - O(log n) instead of O(n)!
+        // The <|K|> operator uses the HNSW index for fast approximate nearest neighbor search
+        let query_vec: Vec<f32> = query.to_vec();
+        let mut response = self
+            .db
+            .query("SELECT *, vector::distance::knn() AS distance FROM embedding WHERE vector <|$k|> $query_vec")
+            .bind(("k", k as i64))
+            .bind(("query_vec", query_vec))
+            .await?;
 
-        loop {
-            let mut response = self
-                .db
-                .query("SELECT * FROM embedding LIMIT $limit START $start")
-                .bind(("limit", limit))
-                .bind(("start", start))
-                .await?;
+        let records: Vec<KnnResult> = response.take(0)?;
 
-            let records: Vec<EmbeddingRecord> = response.take(0)?;
-
-            if records.is_empty() {
-                break;
-            }
-
-            for r in records {
-                let similarity = cosine_similarity(query, &r.vector);
-                matches.push(SearchMatch {
-                    vector_id: 0, // Not used with SurrealDB
+        let matches: Vec<SearchMatch> = records
+            .into_iter()
+            .map(|r| {
+                // Convert distance to similarity (cosine distance -> similarity)
+                let similarity = 1.0 - r.distance.min(1.0);
+                SearchMatch {
+                    vector_id: 0,
                     similarity,
                     metadata: VectorMetadata {
                         id: r.content_id,
@@ -1777,19 +1792,11 @@ impl VectorStorage for SurrealDBStorage {
                         timestamp: Self::parse_datetime(&r.timestamp),
                         metadata: r.metadata,
                     },
-                });
-            }
+                }
+            })
+            .collect();
 
-            start += limit;
-        }
-
-        // Sort by similarity descending
-        matches.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap());
-
-        // Take top k
-        matches.truncate(k);
-
-        debug!("SurrealDBStorage: Found {} matches", matches.len());
+        debug!("SurrealDBStorage: HNSW found {} matches", matches.len());
 
         Ok(matches)
     }
@@ -1809,32 +1816,32 @@ impl VectorStorage for SurrealDBStorage {
         }
 
         debug!(
-            "SurrealDBStorage: Searching for {} nearest vectors in session {}",
+            "SurrealDBStorage: HNSW search for {} nearest vectors in session {}",
             k, session_id
         );
 
-        let mut matches = Vec::new();
-        let limit = 1000;
-        let mut start = 0;
+        // Use HNSW with post-filtering: fetch more results, filter by session
+        // This is more efficient than full table scan for large datasets
+        let fetch_count = (k * 5).max(50); // Fetch 5x more to ensure enough after filtering
+        let query_vec: Vec<f32> = query.to_vec();
 
-        loop {
-            let mut response = self
-                .db
-                .query("SELECT * FROM embedding WHERE session_id = $session_id LIMIT $limit START $start")
-                .bind(("session_id", session_id.to_string()))
-                .bind(("limit", limit))
-                .bind(("start", start))
-                .await?;
+        let mut response = self
+            .db
+            .query("SELECT *, vector::distance::knn() AS distance FROM embedding WHERE vector <|$fetch_count|> $query_vec")
+            .bind(("fetch_count", fetch_count as i64))
+            .bind(("query_vec", query_vec))
+            .await?;
 
-            let records: Vec<EmbeddingRecord> = response.take(0)?;
+        let records: Vec<KnnResult> = response.take(0)?;
 
-            if records.is_empty() {
-                break;
-            }
-
-            for r in records {
-                let similarity = cosine_similarity(query, &r.vector);
-                matches.push(SearchMatch {
+        // Post-filter by session and convert to SearchMatch
+        let matches: Vec<SearchMatch> = records
+            .into_iter()
+            .filter(|r| r.session_id == session_id)
+            .take(k)
+            .map(|r| {
+                let similarity = 1.0 - r.distance.min(1.0);
+                SearchMatch {
                     vector_id: 0,
                     similarity,
                     metadata: VectorMetadata {
@@ -1845,14 +1852,14 @@ impl VectorStorage for SurrealDBStorage {
                         timestamp: Self::parse_datetime(&r.timestamp),
                         metadata: r.metadata,
                     },
-                });
-            }
+                }
+            })
+            .collect();
 
-            start += limit;
-        }
-
-        matches.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap());
-        matches.truncate(k);
+        debug!(
+            "SurrealDBStorage: HNSW found {} matches in session",
+            matches.len()
+        );
 
         Ok(matches)
     }
@@ -1871,28 +1878,32 @@ impl VectorStorage for SurrealDBStorage {
             ));
         }
 
-        let mut matches = Vec::new();
-        let limit = 1000;
-        let mut start = 0;
+        debug!(
+            "SurrealDBStorage: HNSW search for {} nearest vectors of type {}",
+            k, content_type
+        );
 
-        loop {
-            let mut response = self
-                .db
-                .query("SELECT * FROM embedding WHERE content_type = $content_type LIMIT $limit START $start")
-                .bind(("content_type", content_type.to_string()))
-                .bind(("limit", limit))
-                .bind(("start", start))
-                .await?;
+        // Use HNSW with post-filtering by content type
+        let fetch_count = (k * 5).max(50);
+        let query_vec: Vec<f32> = query.to_vec();
 
-            let records: Vec<EmbeddingRecord> = response.take(0)?;
+        let mut response = self
+            .db
+            .query("SELECT *, vector::distance::knn() AS distance FROM embedding WHERE vector <|$fetch_count|> $query_vec")
+            .bind(("fetch_count", fetch_count as i64))
+            .bind(("query_vec", query_vec))
+            .await?;
 
-            if records.is_empty() {
-                break;
-            }
+        let records: Vec<KnnResult> = response.take(0)?;
 
-            for r in records {
-                let similarity = cosine_similarity(query, &r.vector);
-                matches.push(SearchMatch {
+        // Post-filter by content_type
+        let matches: Vec<SearchMatch> = records
+            .into_iter()
+            .filter(|r| r.content_type == content_type)
+            .take(k)
+            .map(|r| {
+                let similarity = 1.0 - r.distance.min(1.0);
+                SearchMatch {
                     vector_id: 0,
                     similarity,
                     metadata: VectorMetadata {
@@ -1903,14 +1914,15 @@ impl VectorStorage for SurrealDBStorage {
                         timestamp: Self::parse_datetime(&r.timestamp),
                         metadata: r.metadata,
                     },
-                });
-            }
+                }
+            })
+            .collect();
 
-            start += limit;
-        }
-
-        matches.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap());
-        matches.truncate(k);
+        debug!(
+            "SurrealDBStorage: HNSW found {} matches of type {}",
+            matches.len(),
+            content_type
+        );
 
         Ok(matches)
     }
@@ -2537,7 +2549,8 @@ impl SurrealDBStorage {
 // Helper Functions
 // ============================================================================
 
-/// Compute cosine similarity between two vectors
+/// Compute cosine similarity between two vectors (used in tests)
+#[cfg(test)]
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() {
         return 0.0;

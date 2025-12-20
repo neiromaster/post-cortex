@@ -818,7 +818,7 @@ impl LockFreeConversationMemorySystem {
     }
 
     /// Add incremental update - compatibility wrapper
-    #[instrument(skip(self, session_id, description))]
+    #[instrument(skip(self, session_id, description, metadata))]
     pub async fn add_incremental_update(
         &self,
         session_id: Uuid,
