@@ -21,6 +21,8 @@ async fn setup_test_app() -> (TestApp, TempDir) {
         surrealdb_endpoint: Some("ws://localhost:8000".to_string()),
         surrealdb_username: Some("root".to_string()),
         surrealdb_password: Some("root".to_string()),
+        surrealdb_namespace: "post_cortex".to_string(),
+        surrealdb_database: "main".to_string(),
     };
 
     let server = LockFreeDaemonServer::new(config).await.unwrap();
@@ -47,6 +49,8 @@ async fn start_real_daemon() -> (u16, TempDir) {
         surrealdb_endpoint: Some("ws://localhost:8000".to_string()),
         surrealdb_username: Some("root".to_string()),
         surrealdb_password: Some("root".to_string()),
+        surrealdb_namespace: "post_cortex".to_string(),
+        surrealdb_database: "main".to_string(),
     };
 
     let server = LockFreeDaemonServer::new(config).await.unwrap();

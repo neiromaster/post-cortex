@@ -111,8 +111,9 @@ enum Commands {
     Export {
         /// Output file path. Extension determines compression:
         /// .json (none), .json.gz (gzip), .json.zst (zstd)
+        /// If not specified, generates: export-YYYY-MM-DD_HH-MM-SS.json.gz
         #[arg(short, long, value_name = "FILE")]
-        output: String,
+        output: Option<String>,
 
         /// Compression type: none, gzip, zstd.
         /// Auto-detected from file extension if not specified.
@@ -1031,7 +1032,7 @@ async fn export_from_rocksdb(
 }
 
 async fn handle_export(
-    output: String,
+    output: Option<String>,
     compress: Option<String>,
     session: Option<Vec<String>>,
     workspace: Option<String>,
@@ -1041,6 +1042,12 @@ async fn handle_export(
 ) -> Result<(), String> {
     use std::io::{self, Write};
     use std::path::Path;
+
+    // Generate default filename if not provided
+    let output = output.unwrap_or_else(|| {
+        let now = chrono::Local::now();
+        format!("export-{}.json.gz", now.format("%Y-%m-%d_%H-%M-%S"))
+    });
 
     let path = Path::new(&output);
 

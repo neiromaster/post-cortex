@@ -2068,7 +2068,7 @@ impl SurrealDBStorage {
         &self,
         options: &crate::storage::export_import::ExportOptions,
     ) -> Result<crate::storage::export_import::ExportData> {
-        use crate::storage::export_import::{ExportData, ExportType, ExportedSession, ExportedWorkspace};
+        use crate::storage::export_import::{ExportData, ExportType, ExportedWorkspace};
 
         info!("SurrealDBStorage: Starting full database export");
 
@@ -2082,20 +2082,32 @@ impl SurrealDBStorage {
             match self.export_session_data(session_id).await {
                 Ok(session_data) => export.sessions.push(session_data),
                 Err(e) => {
-                    info!("SurrealDBStorage: Warning: Failed to export session {}: {}", session_id, e);
+                    info!(
+                        "SurrealDBStorage: Warning: Failed to export session {}: {}",
+                        session_id, e
+                    );
                 }
             }
         }
 
         // Export all workspaces
         let workspaces = self.list_workspaces().await?;
-        info!("SurrealDBStorage: Exporting {} workspaces", workspaces.len());
-        export.workspaces = workspaces.into_iter().map(ExportedWorkspace::from).collect();
+        info!(
+            "SurrealDBStorage: Exporting {} workspaces",
+            workspaces.len()
+        );
+        export.workspaces = workspaces
+            .into_iter()
+            .map(ExportedWorkspace::from)
+            .collect();
 
         // Export checkpoints if requested
         if options.include_checkpoints {
             export.checkpoints = self.list_checkpoints().await?;
-            info!("SurrealDBStorage: Exported {} checkpoints", export.checkpoints.len());
+            info!(
+                "SurrealDBStorage: Exported {} checkpoints",
+                export.checkpoints.len()
+            );
         }
 
         export.update_counts();
@@ -2117,7 +2129,10 @@ impl SurrealDBStorage {
     ) -> Result<crate::storage::export_import::ExportData> {
         use crate::storage::export_import::{ExportData, ExportType};
 
-        info!("SurrealDBStorage: Starting selective export of {} sessions", session_ids.len());
+        info!(
+            "SurrealDBStorage: Starting selective export of {} sessions",
+            session_ids.len()
+        );
 
         let mut export = ExportData::new(
             ExportType::SelectiveSessions {
@@ -2151,7 +2166,10 @@ impl SurrealDBStorage {
     ) -> Result<crate::storage::export_import::ExportData> {
         use crate::storage::export_import::{ExportData, ExportType, ExportedWorkspace};
 
-        info!("SurrealDBStorage: Starting workspace export for {}", workspace_id);
+        info!(
+            "SurrealDBStorage: Starting workspace export for {}",
+            workspace_id
+        );
 
         let mut export = ExportData::new(
             ExportType::SelectiveWorkspace { workspace_id },
@@ -2166,7 +2184,9 @@ impl SurrealDBStorage {
             .ok_or_else(|| anyhow::anyhow!("Workspace {} not found", workspace_id))?;
 
         // Export the workspace
-        export.workspaces.push(ExportedWorkspace::from(workspace.clone()));
+        export
+            .workspaces
+            .push(ExportedWorkspace::from(workspace.clone()));
 
         // Export all sessions in the workspace
         for (session_id, _role) in &workspace.sessions {
@@ -2186,7 +2206,10 @@ impl SurrealDBStorage {
     }
 
     /// Export a single session with its updates
-    async fn export_session_data(&self, session_id: Uuid) -> Result<crate::storage::export_import::ExportedSession> {
+    async fn export_session_data(
+        &self,
+        session_id: Uuid,
+    ) -> Result<crate::storage::export_import::ExportedSession> {
         use crate::storage::export_import::ExportedSession;
 
         let session = self.load_session(session_id).await?;
@@ -2328,9 +2351,10 @@ mod tests {
     #[ignore = "Requires running Docker SurrealDB at localhost:8000"]
     async fn test_remote_surrealdb_connection() {
         // Connect to Docker SurrealDB (default: root/root)
-        let storage = SurrealDBStorage::new("localhost:8000", Some("root"), Some("root"), None, None)
-            .await
-            .expect("Failed to connect to remote SurrealDB");
+        let storage =
+            SurrealDBStorage::new("localhost:8000", Some("root"), Some("root"), None, None)
+                .await
+                .expect("Failed to connect to remote SurrealDB");
 
         // Create test session
         let session_id = Uuid::new_v4();
