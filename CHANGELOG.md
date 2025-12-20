@@ -5,6 +5,54 @@ All notable changes to Post-Cortex will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.13] - 2025-12-21
+
+### Added
+
+- **Graph-RAG Enrichment**: Semantic search results now include structural insights from the entity graph
+  - `[System Knowledge Map]` shows entity relationships in search results
+  - `[Structural Insight]` displays paths between top result entities
+  - Automatic entity extraction from search queries
+  - Direct graph access for O(1) entity lookups (no async message passing)
+
+- **HNSW Vector Index**: Native approximate nearest neighbor search in SurrealDB
+  - `idx_embedding_hnsw` - 384-dimensional COSINE distance index
+  - O(log n) KNN queries instead of O(n) full table scan
+  - Post-filtering for session/content_type scoped searches
+
+- **Composite Database Indexes**: Optimized ORDER BY queries
+  - `idx_update_session_time` - (session_id, timestamp) for context_update
+  - `idx_entity_session_importance` - (session_id, importance_score) for entity
+
+- **Explicit Entity/Relationship Parsing**: MCP tool now parses entities from content
+  - `entities` field: comma/space separated entity names
+  - `relationships` field: "A RELATION B" format (DEPENDS_ON, IMPLEMENTS, CAUSES, etc.)
+
+### Improved
+
+- **Vector Search Performance**: Replaced Rust-side cosine similarity with SurrealDB native KNN
+  - `search()` - uses HNSW index directly
+  - `search_in_session()` - HNSW with post-filtering (5x overfetch)
+  - `search_by_content_type()` - HNSW with post-filtering
+
+- **Case-Insensitive Entity Lookup**: Graph queries now support case-insensitive matching
+  - `find_related_entities()` - O(1) exact match with O(n) fallback
+  - `find_related_entities_by_type()` - case-insensitive entity names
+  - `find_shortest_path()` - case-insensitive from/to nodes
+
+### Fixed
+
+- **Relationship Noise Cleanup**: Removed auto-generated "Co-mentioned in:" relationships
+  - Deleted `auto_generate_relationships()` function
+  - Deleted `infer_relationship_type()` function
+  - Only explicit relationships from MCP content are now stored
+
+- **RUST_LOG Environment Variable**: Now properly respects RUST_LOG settings
+  - Uses `EnvFilter::try_from_default_env()` with "info" fallback
+  - Fixed duplicate directive issue
+
+- **Verbose Logging**: Reduced noise from `add_incremental_update` instrument
+
 ## [0.1.12] - 2025-12-20
 
 ### Added
