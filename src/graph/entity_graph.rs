@@ -27,10 +27,84 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use tracing::warn;
 
 /// Edge data containing relation type and context
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Supports backwards-compatible deserialization from v1.0.0 format (RelationType only)
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct EdgeData {
     pub relation_type: RelationType,
+    #[serde(default)]
     pub context: String,
+}
+
+impl EdgeData {
+    /// Create new EdgeData with context
+    pub fn new(relation_type: RelationType, context: String) -> Self {
+        Self { relation_type, context }
+    }
+
+    /// Create EdgeData from just RelationType (for v1.0.0 compatibility)
+    pub fn from_relation_type(relation_type: RelationType) -> Self {
+        Self { relation_type, context: String::new() }
+    }
+}
+
+/// Custom deserializer for EdgeData - handles both v1.0.0 (RelationType) and v1.1.0 (EdgeData) formats
+impl<'de> serde::Deserialize<'de> for EdgeData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, MapAccess, Visitor};
+
+        struct EdgeDataVisitor;
+
+        impl<'de> Visitor<'de> for EdgeDataVisitor {
+            type Value = EdgeData;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("EdgeData object or RelationType string (v1.0.0 format)")
+            }
+
+            // v1.1.0 format: {"relation_type": "...", "context": "..."}
+            fn visit_map<M>(self, mut map: M) -> Result<EdgeData, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut relation_type: Option<RelationType> = None;
+                let mut context: Option<String> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "relation_type" => relation_type = Some(map.next_value()?),
+                        "context" => context = Some(map.next_value()?),
+                        _ => { let _: serde::de::IgnoredAny = map.next_value()?; }
+                    }
+                }
+
+                let relation_type = relation_type
+                    .ok_or_else(|| de::Error::missing_field("relation_type"))?;
+
+                Ok(EdgeData {
+                    relation_type,
+                    context: context.unwrap_or_default(),
+                })
+            }
+
+            // v1.0.0 format: just "RelationType" string
+            fn visit_str<E>(self, value: &str) -> Result<EdgeData, E>
+            where
+                E: de::Error,
+            {
+                let relation_type: RelationType = value.parse()
+                    .map_err(|_| de::Error::unknown_variant(value, &[
+                        "RequiredBy", "LeadsTo", "RelatedTo", "ConflictsWith",
+                        "DependsOn", "Implements", "CausedBy", "Solves"
+                    ]))?;
+                Ok(EdgeData::from_relation_type(relation_type))
+            }
+        }
+
+        deserializer.deserialize_any(EdgeDataVisitor)
+    }
 }
 
 /// Enhanced entity graph using petgraph for efficient relationship operations

@@ -43,10 +43,16 @@ use tracing::info;
 use uuid::Uuid;
 
 /// Current export format version
-pub const EXPORT_FORMAT_VERSION: &str = "1.0.0";
+/// v1.0.0 - Initial format (RelationType only in graph edges)
+/// v1.1.0 - Added EdgeData with context field in graph edges
+pub const EXPORT_FORMAT_VERSION: &str = "1.1.0";
 
-/// Schema URL for validation
-pub const EXPORT_SCHEMA_URL: &str = "https://post-cortex.dev/schemas/export/v1.json";
+/// Supported legacy versions for import
+pub const SUPPORTED_IMPORT_VERSIONS: &[&str] = &["1.0.0", "1.1.0"];
+
+/// Schema URL for validation (GitHub raw URL)
+pub const EXPORT_SCHEMA_URL: &str =
+    "https://raw.githubusercontent.com/JuliusDeGroot/post-cortex/main/schemas/export/v1.1.0.json";
 
 /// Compression type for export
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

@@ -1187,7 +1187,71 @@ async fn handle_import(
 
     println!("Initializing import...");
     let daemon_config = DaemonConfig::load();
+
+    // Check storage backend configuration
+    #[cfg(feature = "surrealdb-storage")]
+    let use_surrealdb = daemon_config.storage_backend == "surrealdb";
+    #[cfg(not(feature = "surrealdb-storage"))]
+    let use_surrealdb = false;
+
+    #[cfg(feature = "surrealdb-storage")]
+    if use_surrealdb {
+        // Import to SurrealDB
+        let endpoint = daemon_config
+            .surrealdb_endpoint
+            .as_ref()
+            .ok_or("SurrealDB endpoint not configured in daemon.toml")?;
+
+        println!("Target: SurrealDB at {}", endpoint);
+        println!(
+            "  Namespace: {}, Database: {}",
+            daemon_config.surrealdb_namespace, daemon_config.surrealdb_database
+        );
+
+        let storage = SurrealDBStorage::new(
+            endpoint,
+            daemon_config.surrealdb_username.as_deref(),
+            daemon_config.surrealdb_password.as_deref(),
+            Some(&daemon_config.surrealdb_namespace),
+            Some(&daemon_config.surrealdb_database),
+        )
+        .await
+        .map_err(|e| format!("Failed to connect to SurrealDB: {}", e))?;
+
+        println!("Importing data to SurrealDB...");
+        let result = storage
+            .import_data(export_data, &options)
+            .await
+            .map_err(|e| format!("Import failed: {}", e))?;
+
+        println!();
+        println!("Import complete!");
+        println!("  Sessions imported:   {}", result.sessions_imported);
+        println!("  Sessions skipped:    {}", result.sessions_skipped);
+        println!("  Workspaces imported: {}", result.workspaces_imported);
+        println!("  Workspaces skipped:  {}", result.workspaces_skipped);
+        println!("  Updates imported:    {}", result.updates_imported);
+        println!("  Checkpoints:         {}", result.checkpoints_imported);
+
+        if !result.errors.is_empty() {
+            println!();
+            println!("Errors ({}):", result.errors.len());
+            for err in &result.errors {
+                println!("  - {}", err);
+            }
+        }
+
+        return Ok(());
+    }
+
+    // Import to RocksDB (default)
+    if use_surrealdb {
+        return Err("SurrealDB storage backend requires surrealdb-storage feature".to_string());
+    }
+
     let data_dir = daemon_config.data_directory;
+    println!("Target: RocksDB at {}", data_dir);
+
     let storage = RealRocksDBStorage::new(&data_dir).await.map_err(|e| {
         let err_str = e.to_string();
         if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
@@ -1209,7 +1273,7 @@ async fn handle_import(
         }
     })?;
 
-    println!("Importing data...");
+    println!("Importing data to RocksDB...");
     let result = storage
         .import_data(export_data, &options)
         .await

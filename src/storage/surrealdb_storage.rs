@@ -1888,6 +1888,183 @@ impl VectorStorage for SurrealDBStorage {
 }
 
 // ============================================================================
+// Import Functions
+// ============================================================================
+
+impl SurrealDBStorage {
+    /// Import data from an ExportData structure
+    pub async fn import_data(
+        &self,
+        data: crate::storage::export_import::ExportData,
+        options: &crate::storage::export_import::ImportOptions,
+    ) -> Result<crate::storage::export_import::ImportResult> {
+        use crate::storage::export_import::{ImportResult, SUPPORTED_IMPORT_VERSIONS};
+
+        info!(
+            "SurrealDBStorage: Starting import: {} sessions, {} workspaces",
+            data.sessions.len(),
+            data.workspaces.len()
+        );
+
+        // Check format version compatibility
+        if !SUPPORTED_IMPORT_VERSIONS.contains(&data.format_version.as_str()) {
+            return Err(anyhow::anyhow!(
+                "Incompatible export format version: {}. Supported: {:?}",
+                data.format_version,
+                SUPPORTED_IMPORT_VERSIONS
+            ));
+        }
+
+        let mut result = ImportResult::default();
+
+        // Import sessions
+        for exported_session in data.sessions {
+            let session_id = exported_session.session.id();
+
+            // Apply filter if specified
+            if let Some(ref filter) = options.session_filter {
+                if !filter.contains(&session_id) {
+                    continue;
+                }
+            }
+
+            // Check if session exists
+            let exists = self.session_exists(session_id).await?;
+
+            if exists {
+                if options.skip_existing {
+                    result.sessions_skipped += 1;
+                    continue;
+                } else if !options.overwrite {
+                    result.errors.push(format!(
+                        "Session {} already exists (use --overwrite or --skip-existing)",
+                        session_id
+                    ));
+                    continue;
+                }
+            }
+
+            // Import session
+            match self.save_session(&exported_session.session).await {
+                Ok(()) => {
+                    result.sessions_imported += 1;
+
+                    // Import updates
+                    if !exported_session.updates.is_empty() {
+                        match self
+                            .batch_save_updates(session_id, exported_session.updates.clone())
+                            .await
+                        {
+                            Ok(()) => {
+                                result.updates_imported += exported_session.updates.len();
+                            }
+                            Err(e) => {
+                                result.errors.push(format!(
+                                    "Failed to import updates for session {}: {}",
+                                    session_id, e
+                                ));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    result
+                        .errors
+                        .push(format!("Failed to import session {}: {}", session_id, e));
+                }
+            }
+        }
+
+        // Import workspaces
+        for workspace in data.workspaces {
+            // Apply filter if specified
+            if let Some(ref filter) = options.workspace_filter {
+                if !filter.contains(&workspace.id) {
+                    continue;
+                }
+            }
+
+            // Check if workspace exists
+            let existing = self.list_workspaces().await?;
+            let exists = existing.iter().any(|w| w.id == workspace.id);
+
+            if exists {
+                if options.skip_existing {
+                    result.workspaces_skipped += 1;
+                    continue;
+                } else if !options.overwrite {
+                    result.errors.push(format!(
+                        "Workspace {} already exists (use --overwrite or --skip-existing)",
+                        workspace.id
+                    ));
+                    continue;
+                } else {
+                    // Delete existing workspace before reimporting
+                    self.delete_workspace(workspace.id).await?;
+                }
+            }
+
+            // Import workspace
+            let session_ids: Vec<Uuid> = workspace.sessions.iter().map(|(id, _)| *id).collect();
+            match self
+                .save_workspace_metadata(
+                    workspace.id,
+                    &workspace.name,
+                    &workspace.description,
+                    &session_ids,
+                )
+                .await
+            {
+                Ok(()) => {
+                    // Add session associations with roles
+                    for (session_id, role) in &workspace.sessions {
+                        if let Err(e) = self
+                            .add_session_to_workspace(workspace.id, *session_id, role.clone())
+                            .await
+                        {
+                            result.errors.push(format!(
+                                "Failed to add session {} to workspace {}: {}",
+                                session_id, workspace.id, e
+                            ));
+                        }
+                    }
+                    result.workspaces_imported += 1;
+                }
+                Err(e) => {
+                    result.errors.push(format!(
+                        "Failed to import workspace {}: {}",
+                        workspace.id, e
+                    ));
+                }
+            }
+        }
+
+        // Import checkpoints
+        for checkpoint in data.checkpoints {
+            match self.save_checkpoint(&checkpoint).await {
+                Ok(()) => result.checkpoints_imported += 1,
+                Err(e) => {
+                    result.errors.push(format!(
+                        "Failed to import checkpoint {}: {}",
+                        checkpoint.id, e
+                    ));
+                }
+            }
+        }
+
+        info!(
+            "SurrealDBStorage: Import complete: {} sessions, {} workspaces, {} updates, {} errors",
+            result.sessions_imported,
+            result.workspaces_imported,
+            result.updates_imported,
+            result.errors.len()
+        );
+
+        Ok(result)
+    }
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
