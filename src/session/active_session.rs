@@ -17,7 +17,7 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use crate::core::context_update::{ContextUpdate, EntityType, RelationType, UpdateType};
+use crate::core::context_update::{ContextUpdate, EntityType, UpdateType};
 use crate::core::structured_context::StructuredContext;
 use crate::graph::entity_graph::SimpleEntityGraph;
 use crate::session::session_components::{HotContext, SessionMetadata};
@@ -1181,15 +1181,7 @@ impl ActiveSession {
             Vec::new()
         };
 
-        // Pre-calculate auto-generated relationships (heuristic/co-occurrence)
-        // Note: auto_generate_relationships modifies entity_graph, so we can't fully pre-calc it easily without duplication
-        // BUT, auto_generate_relationships ALSO calls self.infer_relationship_type which borrows self.
-        // We need to inline or pre-calc that too.
-
-        let auto_rel_type = self.infer_relationship_type(&update.update_type);
-        let auto_context = format!("Co-mentioned in: {}", update.content.title);
-
-        // NOW we can take the mutable borrow of entity_graph
+        // Take mutable borrow of entity_graph using CoW semantics
         let entity_graph = Arc::make_mut(&mut self.entity_graph);
 
         // Add extracted entities to graph
@@ -1253,38 +1245,10 @@ impl ActiveSession {
             entity_graph.add_relationship(rel);
         }
 
-        // Auto-generate relationships (inline implementation to avoid borrowing self)
-        use crate::core::context_update::EntityRelationship;
-        let max_entities = 10;
-        let limited_created: Vec<_> = extracted_entities.iter().take(max_entities).collect();
-
-        let mut relationship_count = 0;
-        let max_relationships = 15;
-
-        info!("DEBUG: Auto-generating relationships (inline)");
-        for (i, entity1) in limited_created.iter().enumerate() {
-            if relationship_count >= max_relationships {
-                break;
-            }
-            for entity2 in limited_created.iter().skip(i + 1) {
-                if relationship_count >= max_relationships {
-                    break;
-                }
-                if entity1.is_empty() || entity2.is_empty() || entity1 == entity2 {
-                    continue;
-                }
-
-                let relationship = EntityRelationship {
-                    from_entity: entity1.to_string(),
-                    to_entity: entity2.to_string(),
-                    relation_type: auto_rel_type.clone(),
-                    context: auto_context.clone(),
-                };
-                entity_graph.add_relationship(relationship);
-                relationship_count += 1;
-            }
-        }
-        info!("DEBUG: Auto-generate relationships completed");
+        // NOTE: Removed auto-generation of "Co-mentioned" relationships.
+        // This was creating noise (99%+ useless relations) by linking ALL entities
+        // from the same update. Only explicit relationships from text analysis
+        // (extracted_rels above) are now added.
 
         info!("DEBUG: add_incremental_update completed successfully, returning Ok");
         Ok(())
@@ -2366,66 +2330,9 @@ impl ActiveSession {
         (ranked_entities, truncated_count)
     }
 
-    fn auto_generate_relationships(
-        &mut self,
-        created_entities: &[String],
-        referenced_entities: &[String],
-        update: &ContextUpdate,
-    ) -> anyhow::Result<()> {
-        use crate::core::context_update::EntityRelationship;
-
-        // Limit entities to prevent excessive relationship generation
-        let max_entities = 10;
-        let limited_created: Vec<_> = created_entities.iter().take(max_entities).collect();
-        let _limited_referenced: Vec<_> = referenced_entities.iter().take(max_entities).collect();
-
-        // Pre-compute relationship type before taking mutable borrow
-        let relation_type = self.infer_relationship_type(&update.update_type);
-        let context = format!("Co-mentioned in: {}", update.content.title);
-
-        // Use Arc::make_mut for CoW semantics on entity_graph
-        let entity_graph = Arc::make_mut(&mut self.entity_graph);
-
-        // Create relationships between entities in the same update (limit pairs)
-        let mut relationship_count = 0;
-        let max_relationships = 15;
-
-        for (i, entity1) in limited_created.iter().enumerate() {
-            if relationship_count >= max_relationships {
-                break;
-            }
-            for entity2 in limited_created.iter().skip(i + 1) {
-                if relationship_count >= max_relationships {
-                    break;
-                }
-                // Safe relationship creation with validation
-                if entity1.is_empty() || entity2.is_empty() || entity1 == entity2 {
-                    continue;
-                }
-
-                let relationship = EntityRelationship {
-                    from_entity: entity1.to_string(),
-                    to_entity: entity2.to_string(),
-                    relation_type: relation_type.clone(),
-                    context: context.clone(),
-                };
-                entity_graph.add_relationship(relationship);
-                relationship_count += 1;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn infer_relationship_type(&self, update_type: &UpdateType) -> RelationType {
-        match update_type {
-            UpdateType::ProblemSolved => RelationType::Solves,
-            UpdateType::CodeChanged => RelationType::Implements,
-            UpdateType::DecisionMade => RelationType::LeadsTo,
-            UpdateType::RequirementAdded => RelationType::RequiredBy,
-            _ => RelationType::RelatedTo,
-        }
-    }
+    // NOTE: Removed auto_generate_relationships and infer_relationship_type functions.
+    // They were creating "Co-mentioned" noise relationships (99%+ useless).
+    // Only explicit relationships from text pattern analysis are now used.
 
     async fn add_code_reference(&mut self, code_ref: &CodeReference) -> anyhow::Result<()> {
         // Use Arc::make_mut for CoW semantics on code_references
