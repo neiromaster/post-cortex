@@ -297,6 +297,17 @@ pub enum StorageMessage {
         updates: Vec<crate::core::context_update::ContextUpdate>,
         response_tx: Sender<Result<(), String>>,
     },
+    FindRelatedEntities {
+        session_id: Uuid,
+        entity_name: String,
+        response_tx: Sender<Result<Vec<String>, String>>,
+    },
+    FindShortestPath {
+        session_id: Uuid,
+        from_entity: String,
+        to_entity: String,
+        response_tx: Sender<Result<Option<Vec<String>>, String>>,
+    },
     Shutdown,
 }
 
@@ -1941,6 +1952,37 @@ impl StorageActor {
                     .map_err(|e| e.to_string());
                 let _ = response_tx.send(result).await;
             }
+            StorageMessage::FindRelatedEntities {
+                session_id,
+                entity_name,
+                response_tx,
+            } => {
+                // Load session and access its entity graph
+                let result = match self.storage.load_session(session_id).await {
+                    Ok(session) => {
+                        let related = session.entity_graph.find_related_entities(&entity_name);
+                        Ok(related)
+                    }
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = response_tx.send(result).await;
+            }
+            StorageMessage::FindShortestPath {
+                session_id,
+                from_entity,
+                to_entity,
+                response_tx,
+            } => {
+                // Load session and access its entity graph
+                let result = match self.storage.load_session(session_id).await {
+                    Ok(session) => {
+                        let path = session.entity_graph.find_shortest_path(&from_entity, &to_entity);
+                        Ok(path)
+                    }
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = response_tx.send(result).await;
+            }
             StorageMessage::Shutdown => {} // Handled in main loop
         }
     }
@@ -2547,7 +2589,131 @@ impl LockFreeConversationMemorySystem {
             .semantic_search(query, limit.unwrap_or(20), Some(session_id), date_range)
             .await
         {
-            Ok(results) => Ok(results),
+            Ok(results) => {
+                // Helper to extract entities from text
+                let extract_entities = |text: &str| -> Vec<String> {
+                    text.split_whitespace()
+                        .filter(|w| {
+                            let clean = w.trim_matches(|c: char| !c.is_alphanumeric());
+                            clean.len() > 3 && (
+                                clean.chars().next().map_or(false, |c| c.is_uppercase()) ||
+                                clean.contains('_') || clean.contains('-')
+                            )
+                        })
+                        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+                        .collect()
+                };
+
+                // ADVANCED GRAPH-RAG LOGIC
+                
+                // 1. Identify core concepts in the QUERY
+                let query_entities = extract_entities(query);
+                let mut global_graph_map = std::collections::HashMap::new();
+                
+                // 2. Expand Query Context via Graph Traversal
+                for q_entity in &query_entities {
+                    let (tx, mut rx) = channel(1);
+                    if self.storage_actor.sender.send(StorageMessage::FindRelatedEntities {
+                        session_id,
+                        entity_name: q_entity.clone(),
+                        response_tx: tx,
+                    }).is_ok() {
+                        if let Ok(Some(Ok(relations))) = tokio::time::timeout(
+                            std::time::Duration::from_millis(50), 
+                            rx.recv()
+                        ).await {
+                            if !relations.is_empty() {
+                                global_graph_map.insert(q_entity.clone(), relations);
+                            }
+                        }
+                    }
+                }
+
+                // 3. Synthesize Global Insights
+                let mut graph_insights = String::new();
+                if !global_graph_map.is_empty() {
+                    graph_insights.push_str("\n[System Knowledge Map]:\n");
+                    for (entity, rels) in &global_graph_map {
+                        graph_insights.push_str(&format!("- {} is central to: {}\n", entity, rels.join(", ")));
+                    }
+                }
+
+                // 4. Enrich results and analyze cross-references
+                let mut enriched_results = Vec::new();
+                for mut result in results.into_iter() {
+                    // Local enrichment (neighbors of entities in this specific chunk)
+                    let chunk_entities = extract_entities(&result.text_content);
+                    // De-duplicate
+                    let mut unique_chunk_entities = chunk_entities.clone();
+                    unique_chunk_entities.sort();
+                    unique_chunk_entities.dedup();
+
+                    let mut local_rels = Vec::new();
+                    for entity in unique_chunk_entities.iter().take(2) {
+                        // Skip if already in global map
+                        if global_graph_map.contains_key(entity) { continue; }
+                        
+                        let (tx, mut rx) = channel(1);
+                        if self.storage_actor.sender.send(StorageMessage::FindRelatedEntities {
+                            session_id,
+                            entity_name: entity.clone(),
+                            response_tx: tx,
+                        }).is_ok() {
+                            if let Ok(Some(Ok(relations))) = tokio::time::timeout(
+                                std::time::Duration::from_millis(20), 
+                                rx.recv()
+                            ).await {
+                                if !relations.is_empty() {
+                                    // Limit relations
+                                    let limited_rels: Vec<_> = relations.iter().take(5).cloned().collect();
+                                    local_rels.push(format!("{}: {}", entity, limited_rels.join(", ")));
+                                }
+                            }
+                        }
+                    }
+
+                    if !local_rels.is_empty() {
+                        result.text_content = format!("{}\n(Graph expansion: {})", result.text_content, local_rels.join(" | "));
+                    }
+                    
+                    enriched_results.push(result);
+                }
+
+                // 5. Deep Graph Analysis (Pathfinding between top results)
+                // If we have at least 2 results, check if they are connected
+                if enriched_results.len() >= 2 {
+                    let top1_entities = extract_entities(&enriched_results[0].text_content);
+                    let top2_entities = extract_entities(&enriched_results[1].text_content);
+
+                    if let (Some(e1), Some(e2)) = (top1_entities.first(), top2_entities.first()) {
+                        if e1 != e2 {
+                             let (tx, mut rx) = channel(1);
+                             if self.storage_actor.sender.send(StorageMessage::FindShortestPath {
+                                 session_id,
+                                 from_entity: e1.clone(),
+                                 to_entity: e2.clone(),
+                                 response_tx: tx,
+                             }).is_ok() {
+                                 if let Ok(Some(Ok(Some(path)))) = tokio::time::timeout(
+                                     std::time::Duration::from_millis(100), // Longer timeout for pathfinding
+                                     rx.recv()
+                                 ).await {
+                                     if path.len() > 2 { // Valid path found (more than just start/end)
+                                         graph_insights.push_str(&format!("\n[Structural Insight]: Found connection: {}\n", path.join(" -> ")));
+                                     }
+                                 }
+                             }
+                        }
+                    }
+                }
+
+                // Prepend insights to the first result
+                if !graph_insights.is_empty() && !enriched_results.is_empty() {
+                    enriched_results[0].text_content = format!("{}{}\n---\n", graph_insights, enriched_results[0].text_content);
+                }
+                
+                Ok(enriched_results)
+            },
             Err(e) => Err(format!("Session semantic search failed: {e}")),
         }
     }

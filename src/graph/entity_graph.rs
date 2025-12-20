@@ -272,6 +272,11 @@ impl SimpleEntityGraph {
         self.entities.contains_key(name)
     }
 
+    /// Get the number of entities in the graph
+    pub fn entity_count(&self) -> usize {
+        self.entities.len()
+    }
+
     /// Update entity timestamp without changing other properties
     pub fn update_entity_timestamp(&mut self, name: &str, timestamp: DateTime<Utc>) {
         if let Some(entity) = self.entities.get_mut(name) {
