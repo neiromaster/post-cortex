@@ -541,11 +541,26 @@ fn init_config() -> Result<(), String> {
 
 async fn init_admin_system() -> Result<LockFreeConversationMemorySystem, String> {
     let daemon_config = DaemonConfig::load();
-    let config = SystemConfig {
+    let mut config = SystemConfig {
         enable_embeddings: false,
         data_directory: daemon_config.data_directory,
         ..SystemConfig::default()
     };
+
+    // Configure storage backend from daemon config
+    #[cfg(feature = "surrealdb-storage")]
+    {
+        config.storage_backend = match daemon_config.storage_backend.as_str() {
+            "surrealdb" => StorageBackendType::SurrealDB,
+            _ => StorageBackendType::RocksDB,
+        };
+        config.surrealdb_endpoint = daemon_config.surrealdb_endpoint;
+        config.surrealdb_username = daemon_config.surrealdb_username;
+        config.surrealdb_password = daemon_config.surrealdb_password;
+        config.surrealdb_namespace = Some(daemon_config.surrealdb_namespace);
+        config.surrealdb_database = Some(daemon_config.surrealdb_database);
+    }
+
     LockFreeConversationMemorySystem::new(config).await
 }
 
