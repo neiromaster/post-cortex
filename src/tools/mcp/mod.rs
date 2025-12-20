@@ -359,7 +359,59 @@ pub async fn update_conversation_context_with_system(
         };
 
         debug!("Converting interaction to ContextUpdate...");
-        let update = interaction_to_context_update(interaction, code_reference)?;
+        let mut update = interaction_to_context_update(interaction, code_reference)?;
+
+        // Parse explicit entities from content (comma or space separated)
+        if let Some(entities_str) = content.get("entities") {
+            let entities: Vec<String> = entities_str
+                .split(|c| c == ',' || c == ' ')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && s.len() > 2)
+                .collect();
+            if !entities.is_empty() {
+                info!("Parsed {} explicit entities: {:?}", entities.len(), entities);
+                update.creates_entities = entities;
+            }
+        }
+
+        // Parse explicit relationships from content (format: "A RELATION B, C RELATION D")
+        if let Some(rels_str) = content.get("relationships") {
+            use crate::core::context_update::{EntityRelationship, RelationType};
+
+            let mut relationships = Vec::new();
+            for rel_part in rels_str.split(',') {
+                let parts: Vec<&str> = rel_part.trim().split_whitespace().collect();
+                // Expected format: "entity1 RELATION entity2"
+                if parts.len() >= 3 {
+                    let from = parts[0].to_string();
+                    let rel_type_str = parts[1].to_uppercase();
+                    let to = parts[2..].join(" ");
+
+                    let relation_type = match rel_type_str.as_str() {
+                        "DEPENDS_ON" => RelationType::DependsOn,
+                        "IMPLEMENTS" => RelationType::Implements,
+                        "CAUSES" | "CAUSED_BY" => RelationType::CausedBy,
+                        "SOLVES" => RelationType::Solves,
+                        "LEADS_TO" => RelationType::LeadsTo,
+                        "REQUIRED_BY" => RelationType::RequiredBy,
+                        "CONFLICTS_WITH" => RelationType::ConflictsWith,
+                        _ => RelationType::RelatedTo, // Default for IMPROVES, USES, ENABLES, etc.
+                    };
+
+                    relationships.push(EntityRelationship {
+                        from_entity: from,
+                        to_entity: to,
+                        relation_type,
+                        context: update.content.title.clone(),
+                    });
+                }
+            }
+            if !relationships.is_empty() {
+                info!("Parsed {} explicit relationships", relationships.len());
+                update.creates_relationships = relationships;
+            }
+        }
+
         info!(
             "Created ContextUpdate with {} entities and {} relationships",
             update.creates_entities.len(),

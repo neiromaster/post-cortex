@@ -272,6 +272,11 @@ impl SimpleEntityGraph {
         self.entities.contains_key(name)
     }
 
+    /// Get the number of entities in the graph
+    pub fn entity_count(&self) -> usize {
+        self.entities.len()
+    }
+
     /// Update entity timestamp without changing other properties
     pub fn update_entity_timestamp(&mut self, name: &str, timestamp: DateTime<Utc>) {
         if let Some(entity) = self.entities.get_mut(name) {
@@ -394,12 +399,20 @@ impl SimpleEntityGraph {
 
     /// Find related entities - now O(degree) instead of O(n)!
     /// Uses BTreeSet for automatic sorting, avoiding explicit sort() call
+    /// Supports case-insensitive lookup with fallback
     pub fn find_related_entities(&self, entity_name: &str) -> Vec<String> {
         use std::collections::BTreeSet;
 
-        let node = match self.entity_to_node.get(entity_name) {
-            Some(&node) => node,
-            None => return Vec::new(),
+        // First try exact match (fast O(1))
+        let node = if let Some(&node) = self.entity_to_node.get(entity_name) {
+            node
+        } else {
+            // Fallback: case-insensitive lookup (O(n) but rare)
+            let entity_lower = entity_name.to_lowercase();
+            match self.entity_to_node.iter().find(|(k, _)| k.to_lowercase() == entity_lower) {
+                Some((_, &node)) => node,
+                None => return Vec::new(),
+            }
         };
 
         // BTreeSet maintains sorted order automatically
@@ -425,6 +438,7 @@ impl SimpleEntityGraph {
 
     /// Find related entities by specific relation type - also now O(degree) instead of O(n)
     /// Uses BTreeSet for automatic sorting, avoiding explicit sort() call
+    /// Supports case-insensitive lookup with fallback
     pub fn find_related_entities_by_type(
         &self,
         entity_name: &str,
@@ -432,9 +446,16 @@ impl SimpleEntityGraph {
     ) -> Vec<String> {
         use std::collections::BTreeSet;
 
-        let node = match self.entity_to_node.get(entity_name) {
-            Some(&node) => node,
-            None => return Vec::new(),
+        // First try exact match (fast O(1))
+        let node = if let Some(&node) = self.entity_to_node.get(entity_name) {
+            node
+        } else {
+            // Fallback: case-insensitive lookup (O(n) but rare)
+            let entity_lower = entity_name.to_lowercase();
+            match self.entity_to_node.iter().find(|(k, _)| k.to_lowercase() == entity_lower) {
+                Some((_, &node)) => node,
+                None => return Vec::new(),
+            }
         };
 
         // BTreeSet maintains sorted order automatically
@@ -806,8 +827,18 @@ impl SimpleEntityGraph {
     pub fn find_shortest_path(&self, from: &str, to: &str) -> Option<Vec<String>> {
         use petgraph::algo::astar;
 
-        let from_node = self.entity_to_node.get(from)?;
-        let to_node = self.entity_to_node.get(to)?;
+        // Case-insensitive node lookup helper
+        let find_node = |name: &str| -> Option<&NodeIndex> {
+            self.entity_to_node.get(name).or_else(|| {
+                let lower = name.to_lowercase();
+                self.entity_to_node.iter()
+                    .find(|(k, _)| k.to_lowercase() == lower)
+                    .map(|(_, v)| v)
+            })
+        };
+
+        let from_node = find_node(from)?;
+        let to_node = find_node(to)?;
 
         // Use A* with uniform edge cost (1) and zero heuristic (becomes Dijkstra)
         let result = astar(

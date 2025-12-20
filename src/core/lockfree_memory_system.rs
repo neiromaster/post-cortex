@@ -297,6 +297,17 @@ pub enum StorageMessage {
         updates: Vec<crate::core::context_update::ContextUpdate>,
         response_tx: Sender<Result<(), String>>,
     },
+    FindRelatedEntities {
+        session_id: Uuid,
+        entity_name: String,
+        response_tx: Sender<Result<Vec<String>, String>>,
+    },
+    FindShortestPath {
+        session_id: Uuid,
+        from_entity: String,
+        to_entity: String,
+        response_tx: Sender<Result<Option<Vec<String>>, String>>,
+    },
     Shutdown,
 }
 
@@ -807,7 +818,7 @@ impl LockFreeConversationMemorySystem {
     }
 
     /// Add incremental update - compatibility wrapper
-    #[instrument(skip(self, session_id, description))]
+    #[instrument(skip(self, session_id, description, metadata))]
     pub async fn add_incremental_update(
         &self,
         session_id: Uuid,
@@ -1941,6 +1952,37 @@ impl StorageActor {
                     .map_err(|e| e.to_string());
                 let _ = response_tx.send(result).await;
             }
+            StorageMessage::FindRelatedEntities {
+                session_id,
+                entity_name,
+                response_tx,
+            } => {
+                // Load session and access its entity graph
+                let result = match self.storage.load_session(session_id).await {
+                    Ok(session) => {
+                        let related = session.entity_graph.find_related_entities(&entity_name);
+                        Ok(related)
+                    }
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = response_tx.send(result).await;
+            }
+            StorageMessage::FindShortestPath {
+                session_id,
+                from_entity,
+                to_entity,
+                response_tx,
+            } => {
+                // Load session and access its entity graph
+                let result = match self.storage.load_session(session_id).await {
+                    Ok(session) => {
+                        let path = session.entity_graph.find_shortest_path(&from_entity, &to_entity);
+                        Ok(path)
+                    }
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = response_tx.send(result).await;
+            }
             StorageMessage::Shutdown => {} // Handled in main loop
         }
     }
@@ -2526,7 +2568,8 @@ impl LockFreeConversationMemorySystem {
 
         // Auto-load session if not already loaded (get_session_internal handles this)
         // This ensures the session is in memory before vectorization
-        let _session = self.get_session_internal(session_id).await?;
+        // We keep a reference to use for Graph-RAG enrichment
+        let session_arc = self.get_session_internal(session_id).await?;
 
         // Auto-vectorize if session hasn't been vectorized yet
         if !vectorizer.is_session_vectorized(session_id) {
@@ -2547,7 +2590,117 @@ impl LockFreeConversationMemorySystem {
             .semantic_search(query, limit.unwrap_or(20), Some(session_id), date_range)
             .await
         {
-            Ok(results) => Ok(results),
+            Ok(results) => {
+                // Helper to extract potential entity names from text
+                // Extract all words > 3 chars (will be validated against graph)
+                let extract_entities = |text: &str| -> Vec<String> {
+                    text.split_whitespace()
+                        .filter_map(|w| {
+                            let clean = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+                            if clean.len() > 3 {
+                                Some(clean.to_lowercase())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                };
+
+                // ADVANCED GRAPH-RAG LOGIC
+                // Use the already-loaded session's entity graph directly (no async message passing)
+                let session = session_arc.load();
+                let entity_graph = &session.entity_graph;
+                let graph_size = entity_graph.entity_count();
+
+                tracing::debug!("Graph-RAG: Starting enrichment for {} results (graph has {} entities)",
+                    results.len(), graph_size);
+
+                // 1. Identify core concepts in the QUERY
+                let query_entities = extract_entities(query);
+                tracing::debug!("Graph-RAG: Extracted {} query entities: {:?}", query_entities.len(), query_entities);
+                let mut global_graph_map = std::collections::HashMap::new();
+
+                // 2. Expand Query Context via Graph Traversal (direct graph access - O(degree) per entity)
+                for q_entity in &query_entities {
+                    let relations = entity_graph.find_related_entities(q_entity);
+                    if !relations.is_empty() {
+                        tracing::debug!("Graph-RAG: Entity '{}' -> {} relations: {:?}",
+                            q_entity, relations.len(), relations.iter().take(3).collect::<Vec<_>>());
+                        global_graph_map.insert(q_entity.clone(), relations);
+                    } else {
+                        tracing::debug!("Graph-RAG: Entity '{}' not found in graph", q_entity);
+                    }
+                }
+
+                // 3. Synthesize Global Insights
+                let mut graph_insights = String::new();
+                if !global_graph_map.is_empty() {
+                    graph_insights.push_str("\n[System Knowledge Map]:\n");
+                    for (entity, rels) in &global_graph_map {
+                        graph_insights.push_str(&format!("- {} is central to: {}\n", entity, rels.join(", ")));
+                    }
+                }
+
+                // 4. Enrich results and analyze cross-references (direct graph access)
+                let mut enriched_results = Vec::new();
+                for mut result in results.into_iter() {
+                    // Local enrichment (neighbors of entities in this specific chunk)
+                    let chunk_entities = extract_entities(&result.text_content);
+                    // De-duplicate
+                    let mut unique_chunk_entities = chunk_entities.clone();
+                    unique_chunk_entities.sort();
+                    unique_chunk_entities.dedup();
+
+                    let mut local_rels = Vec::new();
+                    for entity in unique_chunk_entities.iter().take(2) {
+                        // Skip if already in global map
+                        if global_graph_map.contains_key(entity) { continue; }
+
+                        // Direct graph access instead of async message
+                        let relations = entity_graph.find_related_entities(entity);
+                        if !relations.is_empty() {
+                            // Limit relations
+                            let limited_rels: Vec<_> = relations.iter().take(5).cloned().collect();
+                            local_rels.push(format!("{}: {}", entity, limited_rels.join(", ")));
+                        }
+                    }
+
+                    if !local_rels.is_empty() {
+                        result.text_content = format!("{}\n(Graph expansion: {})", result.text_content, local_rels.join(" | "));
+                    }
+
+                    enriched_results.push(result);
+                }
+
+                // 5. Deep Graph Analysis (Pathfinding between top results) - direct graph access
+                // If we have at least 2 results, check if they are connected
+                if enriched_results.len() >= 2 {
+                    let top1_entities = extract_entities(&enriched_results[0].text_content);
+                    let top2_entities = extract_entities(&enriched_results[1].text_content);
+
+                    if let (Some(e1), Some(e2)) = (top1_entities.first(), top2_entities.first()) {
+                        if e1 != e2 {
+                            // Direct pathfinding call
+                            if let Some(path) = entity_graph.find_shortest_path(e1, e2) {
+                                if path.len() > 2 { // Valid path found (more than just start/end)
+                                    tracing::debug!("Graph-RAG: Found path {} -> {}: {:?}", e1, e2, path);
+                                    graph_insights.push_str(&format!("\n[Structural Insight]: Found connection: {}\n", path.join(" -> ")));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Prepend insights to the first result
+                if !graph_insights.is_empty() && !enriched_results.is_empty() {
+                    tracing::debug!("Graph-RAG: Adding insights to first result: {} chars", graph_insights.len());
+                    enriched_results[0].text_content = format!("{}{}\n---\n", graph_insights, enriched_results[0].text_content);
+                } else {
+                    tracing::debug!("Graph-RAG: No insights generated (global_map: {} entries)", global_graph_map.len());
+                }
+
+                Ok(enriched_results)
+            },
             Err(e) => Err(format!("Session semantic search failed: {e}")),
         }
     }
