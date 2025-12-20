@@ -59,11 +59,15 @@ pub async fn start_rmcp_daemon(config: DaemonConfig) -> Result<(), String> {
         system_config.surrealdb_endpoint = config.surrealdb_endpoint.clone();
         system_config.surrealdb_username = config.surrealdb_username.clone();
         system_config.surrealdb_password = config.surrealdb_password.clone();
+        system_config.surrealdb_namespace = Some(config.surrealdb_namespace.clone());
+        system_config.surrealdb_database = Some(config.surrealdb_database.clone());
 
         if system_config.storage_backend == StorageBackendType::SurrealDB {
             info!(
-                "Using SurrealDB storage backend: {}",
-                system_config.surrealdb_endpoint.as_deref().unwrap_or("not configured")
+                "Using SurrealDB storage backend: {} (ns: {}, db: {})",
+                system_config.surrealdb_endpoint.as_deref().unwrap_or("not configured"),
+                config.surrealdb_namespace,
+                config.surrealdb_database
             );
         } else {
             info!("Using RocksDB storage backend");

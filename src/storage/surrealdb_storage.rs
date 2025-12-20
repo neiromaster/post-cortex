@@ -178,12 +178,14 @@ impl SurrealDBStorage {
     /// docker run -d -p 8000:8000 surrealdb/surrealdb:latest start --user root --pass root
     /// ```
     /// ```rust
-    /// let storage = SurrealDBStorage::new("localhost:8000", Some("root"), Some("root")).await?;
+    /// let storage = SurrealDBStorage::new("localhost:8000", Some("root"), Some("root"), None, None).await?;
     /// ```
     pub async fn new(
         endpoint: &str,
         username: Option<&str>,
         password: Option<&str>,
+        namespace: Option<&str>,
+        database: Option<&str>,
     ) -> Result<Self> {
         // Normalize endpoint (add ws:// if not present and not using other engines)
         let endpoint = if endpoint.contains("://") {
@@ -210,8 +212,13 @@ impl SurrealDBStorage {
             info!("SurrealDBStorage: Authenticated as {}", user);
         }
 
-        let namespace = "post_cortex".to_string();
-        let database = "main".to_string();
+        let namespace = namespace.unwrap_or("post_cortex").to_string();
+        let database = database.unwrap_or("main").to_string();
+
+        info!(
+            "SurrealDBStorage: Using namespace '{}', database '{}'",
+            namespace, database
+        );
 
         // Select namespace and database
         db.use_ns(&namespace).use_db(&database).await?;
@@ -1907,7 +1914,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_surrealdb_session_operations() {
-        let storage = SurrealDBStorage::new("mem://", None, None)
+        let storage = SurrealDBStorage::new("mem://", None, None, None, None)
             .await
             .expect("Failed to create SurrealDB storage");
 
@@ -1945,7 +1952,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_entity_operations() {
-        let storage = SurrealDBStorage::new("mem://", None, None)
+        let storage = SurrealDBStorage::new("mem://", None, None, None, None)
             .await
             .expect("Failed to create SurrealDB storage");
 
@@ -2012,7 +2019,7 @@ mod tests {
     #[ignore = "Requires running Docker SurrealDB at localhost:8000"]
     async fn test_remote_surrealdb_connection() {
         // Connect to Docker SurrealDB (default: root/root)
-        let storage = SurrealDBStorage::new("localhost:8000", Some("root"), Some("root"))
+        let storage = SurrealDBStorage::new("localhost:8000", Some("root"), Some("root"), None, None)
             .await
             .expect("Failed to connect to remote SurrealDB");
 
@@ -2095,7 +2102,7 @@ mod tests {
     async fn test_normalized_context_updates_roundtrip() {
         use crate::core::context_update::{UpdateContent, UpdateType};
 
-        let storage = SurrealDBStorage::new("mem://", None, None)
+        let storage = SurrealDBStorage::new("mem://", None, None, None, None)
             .await
             .expect("Failed to create SurrealDB storage");
 
@@ -2190,7 +2197,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_normalized_entities_and_relationships() {
-        let storage = SurrealDBStorage::new("mem://", None, None)
+        let storage = SurrealDBStorage::new("mem://", None, None, None, None)
             .await
             .expect("Failed to create SurrealDB storage");
 
@@ -2527,7 +2534,7 @@ mod tests {
             CodeReference as CoreCodeRef, UpdateContent, UpdateType,
         };
 
-        let storage = SurrealDBStorage::new("mem://", None, None)
+        let storage = SurrealDBStorage::new("mem://", None, None, None, None)
             .await
             .expect("Failed to create SurrealDB storage");
 

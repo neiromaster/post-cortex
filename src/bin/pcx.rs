@@ -1351,12 +1351,12 @@ async fn handle_migrate(
     // Open target storage (local or remote)
     let target_storage = if let Some(endpoint) = &remote_endpoint {
         println!("Connecting to remote SurrealDB at {}...", endpoint);
-        SurrealDBStorage::new(endpoint, username.as_deref(), password.as_deref())
+        SurrealDBStorage::new(endpoint, username.as_deref(), password.as_deref(), None, None)
             .await
             .map_err(|e| format!("Failed to connect to remote SurrealDB: {}", e))?
     } else {
         println!("Opening local SurrealDB at {}...", target.display());
-        SurrealDBStorage::new(target.to_str().unwrap_or_default(), None, None)
+        SurrealDBStorage::new(target.to_str().unwrap_or_default(), None, None, None, None)
             .await
             .map_err(|e| format!("Failed to open target storage: {}", e))?
     };

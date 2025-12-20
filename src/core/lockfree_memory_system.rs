@@ -346,6 +346,10 @@ pub struct SystemConfig {
     pub surrealdb_username: Option<String>,
     #[cfg(feature = "surrealdb-storage")]
     pub surrealdb_password: Option<String>,
+    #[cfg(feature = "surrealdb-storage")]
+    pub surrealdb_namespace: Option<String>,
+    #[cfg(feature = "surrealdb-storage")]
+    pub surrealdb_database: Option<String>,
 }
 
 impl Default for SystemConfig {
@@ -382,6 +386,10 @@ impl Default for SystemConfig {
             surrealdb_username: None,
             #[cfg(feature = "surrealdb-storage")]
             surrealdb_password: None,
+            #[cfg(feature = "surrealdb-storage")]
+            surrealdb_namespace: None,
+            #[cfg(feature = "surrealdb-storage")]
+            surrealdb_database: None,
         }
     }
 }
@@ -405,6 +413,8 @@ impl LockFreeConversationMemorySystem {
                     endpoint,
                     config.surrealdb_username.as_deref(),
                     config.surrealdb_password.as_deref(),
+                    config.surrealdb_namespace.as_deref(),
+                    config.surrealdb_database.as_deref(),
                 ).await
                 .map_err(|e| format!("Failed to initialize SurrealDB: {e}"))?;
 
