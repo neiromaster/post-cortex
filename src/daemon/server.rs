@@ -85,11 +85,39 @@ impl LockFreeDaemonServer {
             config.host, config.port
         );
 
-        // Create memory system
-        let system_config = crate::SystemConfig {
+        // Create memory system with storage backend from config
+        #[allow(unused_mut)]
+        let mut system_config = crate::SystemConfig {
             data_directory: config.data_directory.clone(),
             ..Default::default()
         };
+
+        // Configure storage backend if surrealdb-storage feature is enabled
+        #[cfg(feature = "surrealdb-storage")]
+        {
+            use crate::storage::traits::StorageBackendType;
+
+            system_config.storage_backend = match config.storage_backend.as_str() {
+                "surrealdb" => StorageBackendType::SurrealDB,
+                _ => StorageBackendType::RocksDB,
+            };
+            system_config.surrealdb_endpoint = config.surrealdb_endpoint.clone();
+            system_config.surrealdb_username = config.surrealdb_username.clone();
+            system_config.surrealdb_password = config.surrealdb_password.clone();
+            system_config.surrealdb_namespace = Some(config.surrealdb_namespace.clone());
+            system_config.surrealdb_database = Some(config.surrealdb_database.clone());
+
+            if system_config.storage_backend == StorageBackendType::SurrealDB {
+                info!(
+                    "Using SurrealDB storage backend: {} (ns: {}, db: {})",
+                    system_config.surrealdb_endpoint.as_deref().unwrap_or("not configured"),
+                    config.surrealdb_namespace,
+                    config.surrealdb_database
+                );
+            } else {
+                info!("Using RocksDB storage backend");
+            }
+        }
 
         let memory_system = Arc::new(
             ConversationMemorySystem::new(system_config)
@@ -364,7 +392,7 @@ fn handle_tools_list(_server: &Arc<LockFreeDaemonServer>) -> Result<serde_json::
                     "type": "object",
                     "properties": {
                         "session_id": {"type": "string", "description": "UUID of the session"},
-                        "interaction_type": {"type": "string", "description": "Type: qa, code_change, problem_solved, decision_made"},
+                        "interaction_type": {"type": "string", "description": "Type: qa, code_change, problem_solved, decision_made, requirement_added, concept_defined"},
                         "content": {"type": "object", "description": "Content object with interaction data"}
                     },
                     "required": ["session_id", "interaction_type", "content"]
@@ -1502,6 +1530,12 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .to_string(),
+            storage_backend: "rocksdb".to_string(),
+            surrealdb_endpoint: None,
+            surrealdb_username: None,
+            surrealdb_password: None,
+            surrealdb_namespace: "post_cortex".to_string(),
+            surrealdb_database: "main".to_string(),
         };
 
         let server = LockFreeDaemonServer::new(config).await;
@@ -1523,6 +1557,12 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .to_string(),
+            storage_backend: "rocksdb".to_string(),
+            surrealdb_endpoint: None,
+            surrealdb_username: None,
+            surrealdb_password: None,
+            surrealdb_namespace: "post_cortex".to_string(),
+            surrealdb_database: "main".to_string(),
         };
 
         let server = LockFreeDaemonServer::new(config).await.unwrap();

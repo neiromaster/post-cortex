@@ -407,6 +407,65 @@ impl ActiveSession {
         }
     }
 
+    /// Reconstruct an ActiveSession from individual components (used for SurrealDB native storage)
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_components(
+        id: Uuid,
+        name: Option<String>,
+        description: Option<String>,
+        created_at: DateTime<Utc>,
+        last_updated: DateTime<Utc>,
+        user_preferences: UserPreferences,
+        hot_context_vec: Vec<ContextUpdate>,
+        warm_context: Vec<CompressedUpdate>,
+        cold_context: Vec<StructuredSummary>,
+        current_state: StructuredContext,
+        incremental_updates: Vec<ContextUpdate>,
+        code_references: HashMap<String, Vec<CodeReference>>,
+        change_history: Vec<ChangeRecord>,
+        entity_graph: SimpleEntityGraph,
+        max_extracted_entities: usize,
+        max_referenced_entities: usize,
+        enable_smart_entity_ranking: bool,
+        total_entity_truncations: usize,
+        total_entities_truncated: usize,
+        vectorized_update_ids: Vec<Uuid>,
+    ) -> Self {
+        let max_hot_size = user_preferences.max_hot_context_size;
+
+        let mut metadata = SessionMetadata::new(id, name, description, user_preferences);
+        metadata.created_at = created_at;
+
+        let hot_context = HotContext::from_deque(
+            VecDeque::from(hot_context_vec),
+            max_hot_size,
+        );
+
+        let vectorized_ids = Arc::new(DashSet::new());
+        for vid in vectorized_update_ids {
+            vectorized_ids.insert(vid);
+        }
+
+        Self {
+            metadata: Arc::new(metadata),
+            last_updated,
+            hot_context: Arc::new(hot_context),
+            warm_context: Arc::new(warm_context),
+            cold_context: Arc::new(cold_context),
+            current_state: Arc::new(current_state),
+            incremental_updates: Arc::new(incremental_updates),
+            code_references: Arc::new(code_references),
+            change_history: Arc::new(change_history),
+            entity_graph: Arc::new(entity_graph),
+            max_extracted_entities,
+            max_referenced_entities,
+            enable_smart_entity_ranking,
+            total_entity_truncations,
+            total_entities_truncated,
+            vectorized_update_ids: vectorized_ids,
+        }
+    }
+
     // Convenience getters for metadata fields
     pub fn id(&self) -> Uuid {
         self.metadata.id

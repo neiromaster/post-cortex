@@ -18,10 +18,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 use crate::core::context_update::ContextUpdate;
+use crate::core::lockfree_vector_db::{SearchMatch, VectorMetadata};
 use crate::core::structured_context::StructuredContext;
 use crate::session::active_session::{ActiveSession, ChangeRecord, CodeReference};
+use crate::storage::traits::{Storage, VectorStorage};
+use crate::workspace::SessionRole;
 use anyhow::Result;
-
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use rocksdb::{DB, Options, WriteBatch};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -723,6 +727,422 @@ impl RealRocksDBStorage {
         })
         .await
         .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+    }
+}
+
+// ============================================================================
+// Storage Trait Implementation
+// ============================================================================
+
+#[async_trait]
+impl Storage for RealRocksDBStorage {
+    async fn save_session(&self, session: &ActiveSession) -> Result<()> {
+        RealRocksDBStorage::save_session(self, session).await
+    }
+
+    async fn load_session(&self, session_id: Uuid) -> Result<ActiveSession> {
+        RealRocksDBStorage::load_session(self, session_id).await
+    }
+
+    async fn delete_session(&self, session_id: Uuid) -> Result<()> {
+        RealRocksDBStorage::delete_session(self, session_id).await
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<Uuid>> {
+        RealRocksDBStorage::list_sessions(self).await
+    }
+
+    async fn session_exists(&self, session_id: Uuid) -> Result<bool> {
+        RealRocksDBStorage::session_exists(self, session_id).await
+    }
+
+    async fn batch_save_updates(
+        &self,
+        session_id: Uuid,
+        updates: Vec<ContextUpdate>,
+    ) -> Result<()> {
+        RealRocksDBStorage::batch_save_updates(self, session_id, updates).await
+    }
+
+    async fn load_session_updates(&self, session_id: Uuid) -> Result<Vec<ContextUpdate>> {
+        RealRocksDBStorage::load_session_updates(self, session_id).await
+    }
+
+    async fn save_checkpoint(&self, checkpoint: &SessionCheckpoint) -> Result<()> {
+        RealRocksDBStorage::save_checkpoint(self, checkpoint).await
+    }
+
+    async fn load_checkpoint(&self, checkpoint_id: Uuid) -> Result<SessionCheckpoint> {
+        RealRocksDBStorage::load_checkpoint(self, checkpoint_id).await
+    }
+
+    async fn list_checkpoints(&self) -> Result<Vec<SessionCheckpoint>> {
+        RealRocksDBStorage::list_checkpoints(self).await
+    }
+
+    async fn save_workspace_metadata(
+        &self,
+        workspace_id: Uuid,
+        name: &str,
+        description: &str,
+        session_ids: &[Uuid],
+    ) -> Result<()> {
+        RealRocksDBStorage::save_workspace_metadata(self, workspace_id, name, description, session_ids).await
+    }
+
+    async fn delete_workspace(&self, workspace_id: Uuid) -> Result<()> {
+        RealRocksDBStorage::delete_workspace(self, workspace_id).await
+    }
+
+    async fn list_workspaces(&self) -> Result<Vec<StoredWorkspace>> {
+        RealRocksDBStorage::list_workspaces(self).await
+    }
+
+    async fn add_session_to_workspace(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+        role: SessionRole,
+    ) -> Result<()> {
+        RealRocksDBStorage::add_session_to_workspace(self, workspace_id, session_id, role).await
+    }
+
+    async fn remove_session_from_workspace(
+        &self,
+        workspace_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<()> {
+        RealRocksDBStorage::remove_session_from_workspace(self, workspace_id, session_id).await
+    }
+
+    async fn compact(&self) -> Result<()> {
+        RealRocksDBStorage::compact(self).await
+    }
+
+    async fn get_key_count(&self) -> Result<usize> {
+        RealRocksDBStorage::get_key_count(self).await
+    }
+
+    async fn get_stats(&self) -> Result<String> {
+        RealRocksDBStorage::get_stats(self).await
+    }
+}
+
+// ============================================================================
+// VectorStorage Trait Implementation - Embedding Persistence
+// ============================================================================
+
+/// Stored embedding record for RocksDB persistence
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StoredEmbedding {
+    pub content_id: String,
+    pub session_id: String,
+    pub vector: Vec<f32>,
+    pub text: String,
+    pub content_type: String,
+    pub timestamp: DateTime<Utc>,
+    pub metadata: HashMap<String, String>,
+}
+
+impl StoredEmbedding {
+    /// Create from vector and metadata
+    pub fn new(vector: Vec<f32>, metadata: VectorMetadata) -> Self {
+        Self {
+            content_id: metadata.id,
+            session_id: metadata.source,
+            vector,
+            text: metadata.text,
+            content_type: metadata.content_type,
+            timestamp: metadata.timestamp,
+            metadata: metadata.metadata,
+        }
+    }
+
+    /// Convert to VectorMetadata
+    pub fn to_metadata(&self) -> VectorMetadata {
+        VectorMetadata {
+            id: self.content_id.clone(),
+            text: self.text.clone(),
+            source: self.session_id.clone(),
+            content_type: self.content_type.clone(),
+            timestamp: self.timestamp,
+            metadata: self.metadata.clone(),
+        }
+    }
+}
+
+impl RealRocksDBStorage {
+    /// Save an embedding to RocksDB
+    pub async fn save_embedding(&self, embedding: &StoredEmbedding) -> Result<()> {
+        let db = self.db.clone();
+        let embedding = embedding.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let key = format!("embedding:{}:{}", embedding.session_id, embedding.content_id);
+            let data = bincode::serde::encode_to_vec(&embedding, bincode::config::standard())
+                .map_err(|e| anyhow::anyhow!("Failed to serialize embedding: {}", e))?;
+            db.put(key.as_bytes(), &data)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+
+        Ok(())
+    }
+
+    /// Load all embeddings for a session
+    pub async fn load_session_embeddings(&self, session_id: &str) -> Result<Vec<StoredEmbedding>> {
+        let db = self.db.clone();
+        let prefix = format!("embedding:{}:", session_id);
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<StoredEmbedding>> {
+            let mut embeddings = Vec::new();
+            let iter = db.iterator(rocksdb::IteratorMode::From(
+                prefix.as_bytes(),
+                rocksdb::Direction::Forward,
+            ));
+
+            for item in iter {
+                let (key, value) = item?;
+                let key_str = String::from_utf8_lossy(&key);
+
+                if !key_str.starts_with(&prefix) {
+                    break;
+                }
+
+                if let Ok((embedding, _)) =
+                    bincode::serde::decode_from_slice::<StoredEmbedding, _>(
+                        &value,
+                        bincode::config::standard(),
+                    )
+                {
+                    embeddings.push(embedding);
+                }
+            }
+
+            Ok(embeddings)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+    }
+
+    /// Load all embeddings from storage
+    pub async fn load_all_embeddings(&self) -> Result<Vec<StoredEmbedding>> {
+        let db = self.db.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<StoredEmbedding>> {
+            let mut embeddings = Vec::new();
+            let iter = db.iterator(rocksdb::IteratorMode::From(
+                b"embedding:",
+                rocksdb::Direction::Forward,
+            ));
+
+            for item in iter {
+                let (key, value) = item?;
+                let key_str = String::from_utf8_lossy(&key);
+
+                if !key_str.starts_with("embedding:") {
+                    break;
+                }
+
+                if let Ok((embedding, _)) =
+                    bincode::serde::decode_from_slice::<StoredEmbedding, _>(
+                        &value,
+                        bincode::config::standard(),
+                    )
+                {
+                    embeddings.push(embedding);
+                }
+            }
+
+            Ok(embeddings)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+    }
+
+    /// Delete an embedding
+    pub async fn delete_embedding(&self, session_id: &str, content_id: &str) -> Result<bool> {
+        let db = self.db.clone();
+        let key = format!("embedding:{}:{}", session_id, content_id);
+
+        tokio::task::spawn_blocking(move || -> Result<bool> {
+            let existed = db.get(key.as_bytes())?.is_some();
+            db.delete(key.as_bytes())?;
+            Ok(existed)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+    }
+
+    /// Count embeddings for a session
+    pub async fn count_embeddings(&self, session_id: &str) -> usize {
+        self.load_session_embeddings(session_id)
+            .await
+            .map(|e| e.len())
+            .unwrap_or(0)
+    }
+}
+
+/// Compute cosine similarity between two vectors
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+
+    let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+    if norm_a == 0.0 || norm_b == 0.0 {
+        0.0
+    } else {
+        dot_product / (norm_a * norm_b)
+    }
+}
+
+#[async_trait]
+impl VectorStorage for RealRocksDBStorage {
+    async fn add_vector(&self, vector: Vec<f32>, metadata: VectorMetadata) -> Result<String> {
+        let id = metadata.id.clone();
+        let embedding = StoredEmbedding::new(vector, metadata);
+        self.save_embedding(&embedding).await?;
+        Ok(id)
+    }
+
+    async fn add_vectors_batch(
+        &self,
+        vectors: Vec<(Vec<f32>, VectorMetadata)>,
+    ) -> Result<Vec<String>> {
+        let mut ids = Vec::new();
+        for (vector, metadata) in vectors {
+            let id = self.add_vector(vector, metadata).await?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    async fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchMatch>> {
+        let embeddings = self.load_all_embeddings().await?;
+
+        let mut matches: Vec<SearchMatch> = embeddings
+            .into_iter()
+            .map(|e| {
+                let similarity = cosine_similarity(query, &e.vector);
+                SearchMatch {
+                    vector_id: 0,
+                    similarity,
+                    metadata: e.to_metadata(),
+                }
+            })
+            .collect();
+
+        matches.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+        matches.truncate(k);
+
+        Ok(matches)
+    }
+
+    async fn search_in_session(
+        &self,
+        query: &[f32],
+        k: usize,
+        session_id: &str,
+    ) -> Result<Vec<SearchMatch>> {
+        let embeddings = self.load_session_embeddings(session_id).await?;
+
+        let mut matches: Vec<SearchMatch> = embeddings
+            .into_iter()
+            .map(|e| {
+                let similarity = cosine_similarity(query, &e.vector);
+                SearchMatch {
+                    vector_id: 0,
+                    similarity,
+                    metadata: e.to_metadata(),
+                }
+            })
+            .collect();
+
+        matches.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+        matches.truncate(k);
+
+        Ok(matches)
+    }
+
+    async fn search_by_content_type(
+        &self,
+        query: &[f32],
+        k: usize,
+        content_type: &str,
+    ) -> Result<Vec<SearchMatch>> {
+        let embeddings = self.load_all_embeddings().await?;
+
+        let mut matches: Vec<SearchMatch> = embeddings
+            .into_iter()
+            .filter(|e| e.content_type == content_type)
+            .map(|e| {
+                let similarity = cosine_similarity(query, &e.vector);
+                SearchMatch {
+                    vector_id: 0,
+                    similarity,
+                    metadata: e.to_metadata(),
+                }
+            })
+            .collect();
+
+        matches.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+        matches.truncate(k);
+
+        Ok(matches)
+    }
+
+    async fn remove_vector(&self, id: &str) -> Result<bool> {
+        // Parse id to find session_id:content_id
+        // The id format is typically the content_id, we need to search for it
+        let embeddings = self.load_all_embeddings().await?;
+        for e in embeddings {
+            if e.content_id == id {
+                return self.delete_embedding(&e.session_id, &e.content_id).await;
+            }
+        }
+        Ok(false)
+    }
+
+    async fn has_session_embeddings(&self, session_id: &str) -> bool {
+        self.count_embeddings(session_id).await > 0
+    }
+
+    async fn count_session_embeddings(&self, session_id: &str) -> usize {
+        self.count_embeddings(session_id).await
+    }
+
+    async fn total_count(&self) -> usize {
+        self.load_all_embeddings()
+            .await
+            .map(|e| e.len())
+            .unwrap_or(0)
+    }
+
+    async fn get_session_vectors(&self, session_id: &str) -> Result<Vec<(Vec<f32>, VectorMetadata)>> {
+        let embeddings = self.load_session_embeddings(session_id).await?;
+        Ok(embeddings
+            .into_iter()
+            .map(|e| {
+                let metadata = e.to_metadata();
+                (e.vector, metadata)
+            })
+            .collect())
+    }
+
+    async fn get_all_vectors(&self) -> Result<Vec<(Vec<f32>, VectorMetadata)>> {
+        let embeddings = self.load_all_embeddings().await?;
+        Ok(embeddings
+            .into_iter()
+            .map(|e| {
+                let metadata = e.to_metadata();
+                (e.vector, metadata)
+            })
+            .collect())
     }
 }
 

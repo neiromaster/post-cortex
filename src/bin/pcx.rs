@@ -18,9 +18,12 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 use clap::{Parser, Subcommand};
 use post_cortex::daemon::{DaemonConfig, is_daemon_running, run_stdio_proxy, start_rmcp_daemon};
+#[cfg(feature = "surrealdb-storage")]
+use post_cortex::storage::SurrealDBStorage;
 use post_cortex::storage::{
-    CompressionType, ExportOptions, ImportOptions, RealRocksDBStorage,
-    read_export_file, write_export_file, list_export_sessions, preview_export_file,
+    CompressionType, ExportOptions, GraphStorage, ImportOptions, RealRocksDBStorage, Storage,
+    StorageBackendType, list_export_sessions, preview_export_file, read_export_file,
+    write_export_file,
 };
 use post_cortex::workspace::SessionRole;
 use post_cortex::{LockFreeConversationMemorySystem, SystemConfig};
@@ -87,8 +90,7 @@ enum Commands {
     },
 
     /// Export data to JSON file
-    #[command(
-        long_about = "Export sessions and workspaces to a JSON file.\n\n\
+    #[command(long_about = "Export sessions and workspaces to a JSON file.\n\n\
         Supports optional compression (gzip, zstd) for smaller file sizes.\n\
         The compression type is auto-detected from the file extension.\n\n\
         EXAMPLES:\n\n\
@@ -105,13 +107,13 @@ enum Commands {
         Pretty-printed JSON for debugging:\n\
         $ pcx export --output backup.json --pretty\n\n\
         Force overwrite without asking:\n\
-        $ pcx export --output backup.json.gz --force"
-    )]
+        $ pcx export --output backup.json.gz --force")]
     Export {
         /// Output file path. Extension determines compression:
         /// .json (none), .json.gz (gzip), .json.zst (zstd)
+        /// If not specified, generates: export-YYYY-MM-DD_HH-MM-SS.json.gz
         #[arg(short, long, value_name = "FILE")]
-        output: String,
+        output: Option<String>,
 
         /// Compression type: none, gzip, zstd.
         /// Auto-detected from file extension if not specified.
@@ -140,8 +142,7 @@ enum Commands {
     },
 
     /// Import data from JSON file
-    #[command(
-        long_about = "Import sessions and workspaces from an export file.\n\n\
+    #[command(long_about = "Import sessions and workspaces from an export file.\n\n\
         Supports automatic decompression based on file extension.\n\
         Use --list to preview contents before importing.\n\n\
         EXAMPLES:\n\n\
@@ -156,8 +157,7 @@ enum Commands {
         Import and skip existing (no errors):\n\
         $ pcx import --input backup.json --skip-existing\n\n\
         Import and overwrite existing:\n\
-        $ pcx import --input backup.json --overwrite"
-    )]
+        $ pcx import --input backup.json --overwrite")]
     Import {
         /// Input file path (.json, .json.gz, or .json.zst)
         #[arg(short, long, value_name = "FILE")]
@@ -183,6 +183,53 @@ enum Commands {
         #[arg(long)]
         list: bool,
     },
+
+    /// Migrate data between storage backends
+    #[cfg(feature = "surrealdb-storage")]
+    #[command(long_about = "Migrate data from one storage backend to another.\n\n\
+        Currently supports migration from RocksDB to SurrealDB (local or remote).\n\n\
+        EXAMPLES:\n\n\
+        Migrate to local SurrealDB:\n\
+        $ pcx migrate --from rocksdb --to surrealdb\n\n\
+        Migrate to remote SurrealDB (Docker):\n\
+        $ pcx migrate --from rocksdb --to surrealdb \\\n\
+            --remote-endpoint localhost:8000 \\\n\
+            --username root --password root\n\n\
+        Dry run (show what would be migrated):\n\
+        $ pcx migrate --from rocksdb --to surrealdb --dry-run")]
+    Migrate {
+        /// Source storage backend (rocksdb)
+        #[arg(long, value_name = "BACKEND")]
+        from: String,
+
+        /// Target storage backend (surrealdb)
+        #[arg(long, value_name = "BACKEND")]
+        to: String,
+
+        /// Source data path (default: ~/.post-cortex/data)
+        #[arg(long, value_name = "PATH")]
+        source_path: Option<String>,
+
+        /// Target data path for local SurrealDB (default: ~/.post-cortex/surrealdb)
+        #[arg(long, value_name = "PATH")]
+        target_path: Option<String>,
+
+        /// Remote SurrealDB endpoint (e.g., localhost:8000 or ws://host:port)
+        #[arg(long, value_name = "ENDPOINT")]
+        remote_endpoint: Option<String>,
+
+        /// Username for remote SurrealDB authentication
+        #[arg(long, value_name = "USER")]
+        username: Option<String>,
+
+        /// Password for remote SurrealDB authentication
+        #[arg(long, value_name = "PASS")]
+        password: Option<String>,
+
+        /// Dry run - show what would be migrated without actually migrating
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -203,12 +250,10 @@ enum WorkspaceAction {
     },
 
     /// Delete a workspace
-    #[command(
-        long_about = "Delete a workspace by ID.\n\n\
+    #[command(long_about = "Delete a workspace by ID.\n\n\
         Note: This does NOT delete the sessions in the workspace.\n\n\
         EXAMPLES:\n\n\
-        $ pcx workspace delete <uuid>"
-    )]
+        $ pcx workspace delete <uuid>")]
     Delete {
         /// Workspace ID (UUID)
         #[arg(value_name = "UUID")]
@@ -264,12 +309,10 @@ enum SessionAction {
     },
 
     /// Delete a session
-    #[command(
-        long_about = "Delete a session and all its data.\n\n\
+    #[command(long_about = "Delete a session and all its data.\n\n\
         WARNING: This permanently deletes all context updates in the session.\n\n\
         EXAMPLES:\n\n\
-        $ pcx session delete <uuid>"
-    )]
+        $ pcx session delete <uuid>")]
     Delete {
         /// Session ID (UUID)
         #[arg(value_name = "UUID")]
@@ -281,19 +324,30 @@ enum SessionAction {
     List,
 }
 
-fn init_logging(to_file: bool) {
+fn init_logging(to_file: bool, also_stderr: bool) {
     let log_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".post-cortex/logs");
     std::fs::create_dir_all(&log_dir).ok();
 
     if to_file {
-        let file_appender = RollingFileAppender::new(Rotation::DAILY, log_dir, "pcx.log");
-        tracing_subscriber::registry()
-            .with(fmt::layer().with_writer(file_appender))
-            .with(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
-            .init();
+        let file_appender = RollingFileAppender::new(Rotation::DAILY, log_dir, "daemon.log");
+        if also_stderr {
+            // Log to both file and stderr (foreground daemon mode)
+            tracing_subscriber::registry()
+                .with(fmt::layer().with_writer(file_appender))
+                .with(fmt::layer().with_writer(std::io::stderr))
+                .with(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+                .init();
+        } else {
+            // Log to file only (background daemon mode)
+            tracing_subscriber::registry()
+                .with(fmt::layer().with_writer(file_appender))
+                .with(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+                .init();
+        }
     } else {
+        // Log to stderr only (CLI commands)
         tracing_subscriber::registry()
             .with(fmt::layer().with_writer(std::io::stderr))
             .with(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
@@ -309,7 +363,7 @@ async fn main() -> Result<(), String> {
         // No command = stdio proxy mode (default for MCP clients)
         None => {
             // Minimal logging for stdio mode (to stderr only)
-            init_logging(false);
+            init_logging(false, false);
 
             let config = DaemonConfig::load();
             run_stdio_proxy(config).await
@@ -322,11 +376,11 @@ async fn main() -> Result<(), String> {
 
             if daemon {
                 // Background daemon mode - log to file only
-                init_logging(true);
+                init_logging(true, false);
                 info!("Starting pcx daemon in background mode");
             } else {
-                // Foreground mode - log to both
-                init_logging(false);
+                // Foreground mode - log to file AND stderr
+                init_logging(true, true);
                 println!("Starting Post-Cortex daemon...");
                 println!("Version: {}", VERSION);
                 println!();
@@ -348,17 +402,17 @@ async fn main() -> Result<(), String> {
         Some(Commands::Init) => init_config(),
 
         Some(Commands::VectorizeAll) => {
-            init_logging(false);
+            init_logging(false, false);
             vectorize_all().await
         }
 
         Some(Commands::Workspace { action }) => {
-            init_logging(false);
+            init_logging(false, false);
             handle_workspace_action(action).await
         }
 
         Some(Commands::Session { action }) => {
-            init_logging(false);
+            init_logging(false, false);
             handle_session_action(action).await
         }
 
@@ -371,8 +425,17 @@ async fn main() -> Result<(), String> {
             pretty,
             force,
         }) => {
-            init_logging(false);
-            handle_export(output, compress, session, workspace, checkpoints, pretty, force).await
+            init_logging(false, false);
+            handle_export(
+                output,
+                compress,
+                session,
+                workspace,
+                checkpoints,
+                pretty,
+                force,
+            )
+            .await
         }
 
         Some(Commands::Import {
@@ -383,8 +446,33 @@ async fn main() -> Result<(), String> {
             overwrite,
             list,
         }) => {
-            init_logging(false);
+            init_logging(false, false);
             handle_import(input, session, workspace, skip_existing, overwrite, list).await
+        }
+
+        #[cfg(feature = "surrealdb-storage")]
+        Some(Commands::Migrate {
+            from,
+            to,
+            source_path,
+            target_path,
+            remote_endpoint,
+            username,
+            password,
+            dry_run,
+        }) => {
+            init_logging(false, false);
+            handle_migrate(
+                from,
+                to,
+                source_path,
+                target_path,
+                remote_endpoint,
+                username,
+                password,
+                dry_run,
+            )
+            .await
         }
     }
 }
@@ -453,11 +541,26 @@ fn init_config() -> Result<(), String> {
 
 async fn init_admin_system() -> Result<LockFreeConversationMemorySystem, String> {
     let daemon_config = DaemonConfig::load();
-    let config = SystemConfig {
+    let mut config = SystemConfig {
         enable_embeddings: false,
         data_directory: daemon_config.data_directory,
         ..SystemConfig::default()
     };
+
+    // Configure storage backend from daemon config
+    #[cfg(feature = "surrealdb-storage")]
+    {
+        config.storage_backend = match daemon_config.storage_backend.as_str() {
+            "surrealdb" => StorageBackendType::SurrealDB,
+            _ => StorageBackendType::RocksDB,
+        };
+        config.surrealdb_endpoint = daemon_config.surrealdb_endpoint;
+        config.surrealdb_username = daemon_config.surrealdb_username;
+        config.surrealdb_password = daemon_config.surrealdb_password;
+        config.surrealdb_namespace = Some(daemon_config.surrealdb_namespace);
+        config.surrealdb_database = Some(daemon_config.surrealdb_database);
+    }
+
     LockFreeConversationMemorySystem::new(config).await
 }
 
@@ -883,44 +986,22 @@ async fn vectorize_all() -> Result<(), String> {
 // Export/Import Handlers
 // ============================================================================
 
-async fn handle_export(
-    output: String,
-    compress: Option<String>,
-    session: Option<Vec<String>>,
+use post_cortex::daemon::DaemonConfig as DaemonConfigAlias;
+
+async fn export_from_rocksdb(
+    daemon_config: &DaemonConfigAlias,
+    options: &ExportOptions,
     workspace: Option<String>,
-    checkpoints: bool,
-    pretty: bool,
-    force: bool,
-) -> Result<(), String> {
-    use std::io::{self, Write};
-    use std::path::Path;
+    session: Option<Vec<String>>,
+) -> Result<post_cortex::storage::export_import::ExportData, String> {
+    let data_dir = &daemon_config.data_directory;
+    println!("Source: RocksDB at {}", data_dir);
 
-    let path = Path::new(&output);
-
-    // Check if file exists and ask for confirmation
-    if path.exists() && !force {
-        print!("File '{}' already exists. Overwrite? [y/N] ", output);
-        io::stdout().flush().ok();
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).map_err(|e| format!("Failed to read input: {}", e))?;
-
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Export cancelled.");
-            return Ok(());
-        }
-    }
-
-    println!("Initializing export...");
-
-    let daemon_config = DaemonConfig::load();
-    let data_dir = daemon_config.data_directory;
-    let storage = RealRocksDBStorage::new(&data_dir).await
-        .map_err(|e| {
-            let err_str = e.to_string();
-            if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
-                format!(
-                    "Database is locked by another process (likely the daemon).\n\
+    let storage = RealRocksDBStorage::new(data_dir).await.map_err(|e| {
+        let err_str = e.to_string();
+        if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
+            format!(
+                "Database is locked by another process (likely the daemon).\n\
                      \n\
                      Please stop the daemon first:\n\
                      \n\
@@ -931,11 +1012,79 @@ async fn handle_export(
                      $ launchctl unload ~/Library/LaunchAgents/com.juliusml.post-cortex.plist\n\
                      \n\
                      Then retry the export command."
-                )
-            } else {
-                format!("Failed to open storage: {}", e)
-            }
-        })?;
+            )
+        } else {
+            format!("Failed to open storage: {}", e)
+        }
+    })?;
+
+    if let Some(workspace_id) = workspace {
+        let uuid =
+            Uuid::parse_str(&workspace_id).map_err(|e| format!("Invalid workspace UUID: {}", e))?;
+        println!("Exporting workspace {}...", workspace_id);
+        storage
+            .export_workspace(uuid, options)
+            .await
+            .map_err(|e| format!("Export failed: {}", e))
+    } else if let Some(session_ids) = session {
+        let uuids: Result<Vec<Uuid>, _> = session_ids
+            .iter()
+            .map(|s| Uuid::parse_str(s).map_err(|e| format!("Invalid session UUID {}: {}", s, e)))
+            .collect();
+        let uuids = uuids?;
+        println!("Exporting {} session(s)...", uuids.len());
+        storage
+            .export_sessions(uuids, options)
+            .await
+            .map_err(|e| format!("Export failed: {}", e))
+    } else {
+        println!("Exporting all data...");
+        storage
+            .export_full(options)
+            .await
+            .map_err(|e| format!("Export failed: {}", e))
+    }
+}
+
+async fn handle_export(
+    output: Option<String>,
+    compress: Option<String>,
+    session: Option<Vec<String>>,
+    workspace: Option<String>,
+    checkpoints: bool,
+    pretty: bool,
+    force: bool,
+) -> Result<(), String> {
+    use std::io::{self, Write};
+    use std::path::Path;
+
+    // Generate default filename if not provided
+    let output = output.unwrap_or_else(|| {
+        let now = chrono::Local::now();
+        format!("export-{}.json.gz", now.format("%Y-%m-%d_%H-%M-%S"))
+    });
+
+    let path = Path::new(&output);
+
+    // Check if file exists and ask for confirmation
+    if path.exists() && !force {
+        print!("File '{}' already exists. Overwrite? [y/N] ", output);
+        io::stdout().flush().ok();
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| format!("Failed to read input: {}", e))?;
+
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Export cancelled.");
+            return Ok(());
+        }
+    }
+
+    println!("Initializing export...");
+
+    let daemon_config = DaemonConfig::load();
 
     // Determine compression
     let compression = if let Some(ref c) = compress {
@@ -951,30 +1100,64 @@ async fn handle_export(
         pretty,
     };
 
-    // Perform export based on options
-    let export_data = if let Some(workspace_id) = workspace {
-        // Export specific workspace
-        let uuid = Uuid::parse_str(&workspace_id)
-            .map_err(|e| format!("Invalid workspace UUID: {}", e))?;
-        println!("Exporting workspace {}...", workspace_id);
-        storage.export_workspace(uuid, &options).await
-            .map_err(|e| format!("Export failed: {}", e))?
-    } else if let Some(session_ids) = session {
-        // Export specific sessions
-        let uuids: Result<Vec<Uuid>, _> = session_ids
-            .iter()
-            .map(|s| Uuid::parse_str(s).map_err(|e| format!("Invalid session UUID {}: {}", s, e)))
-            .collect();
-        let uuids = uuids?;
-        println!("Exporting {} session(s)...", uuids.len());
-        storage.export_sessions(uuids, &options).await
-            .map_err(|e| format!("Export failed: {}", e))?
+    // Check storage backend configuration
+    #[cfg(feature = "surrealdb-storage")]
+    let use_surrealdb = daemon_config.storage_backend == "surrealdb";
+    #[cfg(not(feature = "surrealdb-storage"))]
+    let use_surrealdb = false;
+
+    // Perform export based on storage backend
+    #[cfg(feature = "surrealdb-storage")]
+    let export_data = if use_surrealdb {
+        let endpoint = daemon_config
+            .surrealdb_endpoint
+            .as_ref()
+            .ok_or("SurrealDB endpoint not configured in daemon.toml")?;
+
+        println!("Source: SurrealDB at {}", endpoint);
+
+        let storage = SurrealDBStorage::new(
+            endpoint,
+            daemon_config.surrealdb_username.as_deref(),
+            daemon_config.surrealdb_password.as_deref(),
+            Some(&daemon_config.surrealdb_namespace),
+            Some(&daemon_config.surrealdb_database),
+        )
+        .await
+        .map_err(|e| format!("Failed to connect to SurrealDB: {}", e))?;
+
+        if let Some(workspace_id) = workspace {
+            let uuid = Uuid::parse_str(&workspace_id)
+                .map_err(|e| format!("Invalid workspace UUID: {}", e))?;
+            println!("Exporting workspace {}...", workspace_id);
+            storage
+                .export_workspace(uuid, &options)
+                .await
+                .map_err(|e| format!("Export failed: {}", e))?
+        } else if let Some(session_ids) = session {
+            let uuids: Result<Vec<Uuid>, _> = session_ids
+                .iter()
+                .map(|s| Uuid::parse_str(s).map_err(|e| format!("Invalid session UUID {}: {}", s, e)))
+                .collect();
+            let uuids = uuids?;
+            println!("Exporting {} session(s)...", uuids.len());
+            storage
+                .export_sessions(uuids, &options)
+                .await
+                .map_err(|e| format!("Export failed: {}", e))?
+        } else {
+            println!("Exporting all data...");
+            storage
+                .export_full(&options)
+                .await
+                .map_err(|e| format!("Export failed: {}", e))?
+        }
     } else {
-        // Full export
-        println!("Exporting all data...");
-        storage.export_full(&options).await
-            .map_err(|e| format!("Export failed: {}", e))?
+        export_from_rocksdb(&daemon_config, &options, workspace, session).await?
     };
+
+    #[cfg(not(feature = "surrealdb-storage"))]
+    let export_data = export_from_rocksdb(&daemon_config, &options, workspace, session).await?;
 
     // Write to file
     let path = Path::new(&output);
@@ -995,7 +1178,8 @@ async fn handle_export(
     if compression == CompressionType::None {
         println!("  Size:        {} bytes", stats.file_size);
     } else {
-        let compression_ratio = (1.0 - (stats.file_size as f64 / stats.uncompressed_size as f64)) * 100.0;
+        let compression_ratio =
+            (1.0 - (stats.file_size as f64 / stats.uncompressed_size as f64)) * 100.0;
         println!(
             "  Size:        {} bytes ({:.0}% compression, from {} uncompressed)",
             stats.file_size, compression_ratio, stats.uncompressed_size
@@ -1026,8 +1210,8 @@ async fn handle_import(
         println!("Reading export file: {}", input);
         println!();
 
-        let metadata = preview_export_file(path)
-            .map_err(|e| format!("Failed to read export: {}", e))?;
+        let metadata =
+            preview_export_file(path).map_err(|e| format!("Failed to read export: {}", e))?;
 
         println!("Export Metadata:");
         println!("  Format Version:  {}", metadata.post_cortex_version);
@@ -1039,8 +1223,8 @@ async fn handle_import(
         println!("  Checkpoints:     {}", metadata.checkpoint_count);
         println!();
 
-        let sessions = list_export_sessions(path)
-            .map_err(|e| format!("Failed to list sessions: {}", e))?;
+        let sessions =
+            list_export_sessions(path).map_err(|e| format!("Failed to list sessions: {}", e))?;
 
         if !sessions.is_empty() {
             println!("Sessions in export:");
@@ -1057,8 +1241,8 @@ async fn handle_import(
     // Import mode
     println!("Reading export file: {}", input);
 
-    let export_data = read_export_file(path)
-        .map_err(|e| format!("Failed to read export: {}", e))?;
+    let export_data =
+        read_export_file(path).map_err(|e| format!("Failed to read export: {}", e))?;
 
     println!("  Format:      {}", export_data.format_version);
     println!("  Sessions:    {}", export_data.sessions.len());
@@ -1077,8 +1261,7 @@ async fn handle_import(
     };
 
     let workspace_filter = if let Some(ref id) = workspace {
-        let uuid = Uuid::parse_str(id)
-            .map_err(|e| format!("Invalid workspace UUID: {}", e))?;
+        let uuid = Uuid::parse_str(id).map_err(|e| format!("Invalid workspace UUID: {}", e))?;
         Some(vec![uuid])
     } else {
         None
@@ -1093,13 +1276,76 @@ async fn handle_import(
 
     println!("Initializing import...");
     let daemon_config = DaemonConfig::load();
+
+    // Check storage backend configuration
+    #[cfg(feature = "surrealdb-storage")]
+    let use_surrealdb = daemon_config.storage_backend == "surrealdb";
+    #[cfg(not(feature = "surrealdb-storage"))]
+    let use_surrealdb = false;
+
+    #[cfg(feature = "surrealdb-storage")]
+    if use_surrealdb {
+        // Import to SurrealDB
+        let endpoint = daemon_config
+            .surrealdb_endpoint
+            .as_ref()
+            .ok_or("SurrealDB endpoint not configured in daemon.toml")?;
+
+        println!("Target: SurrealDB at {}", endpoint);
+        println!(
+            "  Namespace: {}, Database: {}",
+            daemon_config.surrealdb_namespace, daemon_config.surrealdb_database
+        );
+
+        let storage = SurrealDBStorage::new(
+            endpoint,
+            daemon_config.surrealdb_username.as_deref(),
+            daemon_config.surrealdb_password.as_deref(),
+            Some(&daemon_config.surrealdb_namespace),
+            Some(&daemon_config.surrealdb_database),
+        )
+        .await
+        .map_err(|e| format!("Failed to connect to SurrealDB: {}", e))?;
+
+        println!("Importing data to SurrealDB...");
+        let result = storage
+            .import_data(export_data, &options)
+            .await
+            .map_err(|e| format!("Import failed: {}", e))?;
+
+        println!();
+        println!("Import complete!");
+        println!("  Sessions imported:   {}", result.sessions_imported);
+        println!("  Sessions skipped:    {}", result.sessions_skipped);
+        println!("  Workspaces imported: {}", result.workspaces_imported);
+        println!("  Workspaces skipped:  {}", result.workspaces_skipped);
+        println!("  Updates imported:    {}", result.updates_imported);
+        println!("  Checkpoints:         {}", result.checkpoints_imported);
+
+        if !result.errors.is_empty() {
+            println!();
+            println!("Errors ({}):", result.errors.len());
+            for err in &result.errors {
+                println!("  - {}", err);
+            }
+        }
+
+        return Ok(());
+    }
+
+    // Import to RocksDB (default)
+    if use_surrealdb {
+        return Err("SurrealDB storage backend requires surrealdb-storage feature".to_string());
+    }
+
     let data_dir = daemon_config.data_directory;
-    let storage = RealRocksDBStorage::new(&data_dir).await
-        .map_err(|e| {
-            let err_str = e.to_string();
-            if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
-                format!(
-                    "Database is locked by another process (likely the daemon).\n\
+    println!("Target: RocksDB at {}", data_dir);
+
+    let storage = RealRocksDBStorage::new(&data_dir).await.map_err(|e| {
+        let err_str = e.to_string();
+        if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
+            format!(
+                "Database is locked by another process (likely the daemon).\n\
                      \n\
                      Please stop the daemon first:\n\
                      \n\
@@ -1110,14 +1356,16 @@ async fn handle_import(
                      $ launchctl unload ~/Library/LaunchAgents/com.juliusml.post-cortex.plist\n\
                      \n\
                      Then retry the import command."
-                )
-            } else {
-                format!("Failed to open storage: {}", e)
-            }
-        })?;
+            )
+        } else {
+            format!("Failed to open storage: {}", e)
+        }
+    })?;
 
-    println!("Importing data...");
-    let result = storage.import_data(export_data, &options).await
+    println!("Importing data to RocksDB...");
+    let result = storage
+        .import_data(export_data, &options)
+        .await
         .map_err(|e| format!("Import failed: {}", e))?;
 
     println!();
@@ -1136,6 +1384,330 @@ async fn handle_import(
             println!("  - {}", err);
         }
     }
+
+    Ok(())
+}
+
+// ============================================================================
+// Migration Handler
+// ============================================================================
+
+#[cfg(feature = "surrealdb-storage")]
+async fn handle_migrate(
+    from: String,
+    to: String,
+    source_path: Option<String>,
+    target_path: Option<String>,
+    remote_endpoint: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    dry_run: bool,
+) -> Result<(), String> {
+    use std::path::PathBuf;
+
+    // Validate backends
+    let from_backend = StorageBackendType::from_str(&from)
+        .ok_or_else(|| format!("Invalid source backend: {}. Use: rocksdb", from))?;
+    let to_backend = StorageBackendType::from_str(&to)
+        .ok_or_else(|| format!("Invalid target backend: {}. Use: surrealdb", to))?;
+
+    if from_backend == to_backend {
+        return Err("Source and target backends must be different".to_string());
+    }
+
+    // Only rocksdb -> surrealdb is supported for now
+    if from_backend != StorageBackendType::RocksDB || to_backend != StorageBackendType::SurrealDB {
+        return Err("Only migration from RocksDB to SurrealDB is currently supported".to_string());
+    }
+
+    // Determine source path
+    let daemon_config = DaemonConfig::load();
+    let source = source_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&daemon_config.data_directory));
+
+    // Determine target (local path or remote endpoint)
+    let is_remote = remote_endpoint.is_some();
+    let target = target_path.map(PathBuf::from).unwrap_or_else(|| {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".post-cortex/surrealdb")
+    });
+
+    println!("Migration: {} -> {}", from, to);
+    println!("  Source path: {}", source.display());
+    if is_remote {
+        println!(
+            "  Target: remote SurrealDB at {}",
+            remote_endpoint.as_ref().unwrap()
+        );
+    } else {
+        println!("  Target path: {}", target.display());
+    }
+    println!();
+
+    // Open source storage
+    println!("Opening source storage (RocksDB)...");
+    let source_storage = RealRocksDBStorage::new(&source).await.map_err(|e| {
+        let err_str = e.to_string();
+        if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
+            format!(
+                "Source database is locked by another process (likely the daemon).\n\
+                     Please stop the daemon first: pkill -f 'pcx start'"
+            )
+        } else {
+            format!("Failed to open source storage: {}", e)
+        }
+    })?;
+
+    // Get source statistics
+    let sessions = source_storage
+        .list_sessions()
+        .await
+        .map_err(|e| format!("Failed to list sessions: {}", e))?;
+    let workspaces = source_storage
+        .list_workspaces()
+        .await
+        .map_err(|e| format!("Failed to list workspaces: {}", e))?;
+    let checkpoints = source_storage
+        .list_checkpoints()
+        .await
+        .map_err(|e| format!("Failed to list checkpoints: {}", e))?;
+
+    println!("Source statistics:");
+    println!("  Sessions:    {}", sessions.len());
+    println!("  Workspaces:  {}", workspaces.len());
+    println!("  Checkpoints: {}", checkpoints.len());
+    println!();
+
+    if dry_run {
+        println!("DRY RUN - No data will be migrated.");
+        println!();
+        println!("Sessions to migrate:");
+        for session_id in &sessions {
+            if let Ok(session) = source_storage.load_session(*session_id).await {
+                let name = session
+                    .name()
+                    .clone()
+                    .unwrap_or_else(|| "Unnamed".to_string());
+                let update_count = source_storage
+                    .load_session_updates(*session_id)
+                    .await
+                    .map(|u| u.len())
+                    .unwrap_or(0);
+                println!("  {} - {} ({} updates)", session_id, name, update_count);
+            }
+        }
+        return Ok(());
+    }
+
+    // Open target storage (local or remote)
+    let target_storage = if let Some(endpoint) = &remote_endpoint {
+        println!("Connecting to remote SurrealDB at {}...", endpoint);
+        SurrealDBStorage::new(endpoint, username.as_deref(), password.as_deref(), None, None)
+            .await
+            .map_err(|e| format!("Failed to connect to remote SurrealDB: {}", e))?
+    } else {
+        println!("Opening local SurrealDB at {}...", target.display());
+        SurrealDBStorage::new(target.to_str().unwrap_or_default(), None, None, None, None)
+            .await
+            .map_err(|e| format!("Failed to open target storage: {}", e))?
+    };
+
+    // Migrate sessions
+    println!();
+    println!("Migrating sessions...");
+    let mut migrated_sessions = 0;
+    let mut migrated_updates = 0;
+    let mut migrated_entities = 0;
+    let mut migrated_relationships = 0;
+
+    for session_id in &sessions {
+        match source_storage.load_session(*session_id).await {
+            Ok(session) => {
+                let name = session
+                    .name()
+                    .clone()
+                    .unwrap_or_else(|| "Unnamed".to_string());
+
+                // Save session to target
+                if let Err(e) = target_storage.save_session(&session).await {
+                    println!("  [ERROR] {} - {}: {}", session_id, name, e);
+                    continue;
+                }
+
+                // Get and save updates
+                let update_count = match source_storage.load_session_updates(*session_id).await {
+                    Ok(updates) => {
+                        let count = updates.len();
+                        if !updates.is_empty() {
+                            if let Err(e) = target_storage
+                                .batch_save_updates(*session_id, updates)
+                                .await
+                            {
+                                println!(
+                                    "  [WARN] {} - {}: Failed to save updates: {}",
+                                    session_id, name, e
+                                );
+                            } else {
+                                migrated_updates += count;
+                            }
+                        }
+                        count
+                    }
+                    Err(e) => {
+                        println!(
+                            "  [WARN] {} - {}: Failed to load updates: {}",
+                            session_id, name, e
+                        );
+                        0
+                    }
+                };
+
+                // Extract and save entities from entity_graph to native SurrealDB graph
+                let entities = session.entity_graph.get_all_entities();
+                let entity_count = entities.len();
+                for entity in &entities {
+                    if let Err(e) = target_storage.upsert_entity(*session_id, entity).await {
+                        println!(
+                            "  [WARN] {} - {}: Failed to save entity '{}': {}",
+                            session_id, name, entity.name, e
+                        );
+                    } else {
+                        migrated_entities += 1;
+                    }
+                }
+
+                // Extract and save relationships to native SurrealDB RELATE
+                let relationships = session.entity_graph.get_all_relationships();
+                let rel_count = relationships.len();
+                for rel in &relationships {
+                    if let Err(e) = target_storage.create_relationship(*session_id, rel).await {
+                        println!(
+                            "  [WARN] {} - {}: Failed to save relationship '{}'->'{}': {}",
+                            session_id, name, rel.from_entity, rel.to_entity, e
+                        );
+                    } else {
+                        migrated_relationships += 1;
+                    }
+                }
+
+                println!(
+                    "  [OK] {} - {} ({} updates, {} entities, {} relations)",
+                    session_id, name, update_count, entity_count, rel_count
+                );
+                migrated_sessions += 1;
+            }
+            Err(e) => {
+                println!("  [ERROR] {} - Failed to load: {}", session_id, e);
+            }
+        }
+    }
+
+    // Migrate workspaces
+    println!();
+    println!("Migrating workspaces...");
+    let mut migrated_workspaces = 0;
+
+    for ws in &workspaces {
+        let session_ids: Vec<Uuid> = ws.sessions.iter().map(|(id, _)| *id).collect();
+        if let Err(e) = target_storage
+            .save_workspace_metadata(ws.id, &ws.name, &ws.description, &session_ids)
+            .await
+        {
+            println!("  [ERROR] {} - {}: {}", ws.id, ws.name, e);
+            continue;
+        }
+        println!(
+            "  [OK] {} - {} ({} sessions)",
+            ws.id,
+            ws.name,
+            ws.sessions.len()
+        );
+        migrated_workspaces += 1;
+    }
+
+    // Migrate checkpoints
+    println!();
+    println!("Migrating checkpoints...");
+    let mut migrated_checkpoints = 0;
+
+    for checkpoint in &checkpoints {
+        if let Err(e) = target_storage.save_checkpoint(checkpoint).await {
+            println!("  [ERROR] {} - {}", checkpoint.id, e);
+            continue;
+        }
+        println!(
+            "  [OK] {} (session: {})",
+            checkpoint.id, checkpoint.session_id
+        );
+        migrated_checkpoints += 1;
+    }
+
+    // Migrate embeddings
+    println!();
+    println!("Migrating embeddings...");
+    let mut migrated_embeddings = 0;
+
+    use post_cortex::storage::traits::VectorStorage;
+    let embeddings = source_storage
+        .load_all_embeddings()
+        .await
+        .map_err(|e| format!("Failed to load embeddings: {}", e))?;
+
+    let total_embeddings = embeddings.len();
+    println!("  Found {} embeddings to migrate", total_embeddings);
+
+    for (i, embedding) in embeddings.into_iter().enumerate() {
+        let metadata = embedding.to_metadata();
+        if let Err(e) = target_storage
+            .add_vector(embedding.vector, metadata.clone())
+            .await
+        {
+            println!(
+                "  [WARN] Failed to migrate embedding {}: {}",
+                metadata.id, e
+            );
+        } else {
+            migrated_embeddings += 1;
+        }
+
+        // Progress every 100 embeddings
+        if (i + 1) % 100 == 0 {
+            println!(
+                "  Progress: {}/{} embeddings migrated",
+                i + 1,
+                total_embeddings
+            );
+        }
+    }
+    println!("  [OK] {} embeddings migrated", migrated_embeddings);
+
+    // Summary
+    println!();
+    println!("Migration complete!");
+    println!(
+        "  Sessions migrated:      {}/{}",
+        migrated_sessions,
+        sessions.len()
+    );
+    println!("  Updates migrated:       {}", migrated_updates);
+    println!("  Entities migrated:      {}", migrated_entities);
+    println!("  Relationships migrated: {}", migrated_relationships);
+    println!(
+        "  Workspaces migrated:    {}/{}",
+        migrated_workspaces,
+        workspaces.len()
+    );
+    println!(
+        "  Checkpoints migrated:   {}/{}",
+        migrated_checkpoints,
+        checkpoints.len()
+    );
+    println!(
+        "  Embeddings migrated:    {}/{}",
+        migrated_embeddings, total_embeddings
+    );
 
     Ok(())
 }

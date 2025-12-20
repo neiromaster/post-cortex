@@ -47,6 +47,33 @@ pub async fn start_rmcp_daemon(config: DaemonConfig) -> Result<(), String> {
         info!("Embeddings enabled in daemon config");
     }
 
+    // Configure storage backend if surrealdb-storage feature is enabled
+    #[cfg(feature = "surrealdb-storage")]
+    {
+        use crate::storage::traits::StorageBackendType;
+
+        system_config.storage_backend = match config.storage_backend.as_str() {
+            "surrealdb" => StorageBackendType::SurrealDB,
+            _ => StorageBackendType::RocksDB,
+        };
+        system_config.surrealdb_endpoint = config.surrealdb_endpoint.clone();
+        system_config.surrealdb_username = config.surrealdb_username.clone();
+        system_config.surrealdb_password = config.surrealdb_password.clone();
+        system_config.surrealdb_namespace = Some(config.surrealdb_namespace.clone());
+        system_config.surrealdb_database = Some(config.surrealdb_database.clone());
+
+        if system_config.storage_backend == StorageBackendType::SurrealDB {
+            info!(
+                "Using SurrealDB storage backend: {} (ns: {}, db: {})",
+                system_config.surrealdb_endpoint.as_deref().unwrap_or("not configured"),
+                config.surrealdb_namespace,
+                config.surrealdb_database
+            );
+        } else {
+            info!("Using RocksDB storage backend");
+        }
+    }
+
     let memory_system = Arc::new(
         ConversationMemorySystem::new(system_config)
             .await

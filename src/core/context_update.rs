@@ -89,6 +89,24 @@ pub enum RelationType {
     Solves,        // A solves B
 }
 
+impl std::str::FromStr for RelationType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "RequiredBy" => Ok(RelationType::RequiredBy),
+            "LeadsTo" => Ok(RelationType::LeadsTo),
+            "RelatedTo" => Ok(RelationType::RelatedTo),
+            "ConflictsWith" => Ok(RelationType::ConflictsWith),
+            "DependsOn" => Ok(RelationType::DependsOn),
+            "Implements" => Ok(RelationType::Implements),
+            "CausedBy" => Ok(RelationType::CausedBy),
+            "Solves" => Ok(RelationType::Solves),
+            _ => Err(format!("Unknown RelationType: {}", s)),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum EntityType {
     Technology,    // Rust, PostgreSQL, etc.

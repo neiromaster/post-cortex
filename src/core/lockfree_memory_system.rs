@@ -92,6 +92,9 @@ pub struct LockFreeConversationMemorySystem {
     /// Storage actor handle
     pub storage_actor: StorageActorHandle,
 
+    /// Direct storage reference for VectorStorage trait
+    pub vector_storage: Arc<dyn crate::storage::traits::VectorStorage>,
+
     /// System configuration - immutable after creation
     pub config: SystemConfig,
 
@@ -196,7 +199,7 @@ pub struct LockFreeSystemMetrics {
 
 /// Storage actor for handling all storage operations asynchronously
 pub struct StorageActor {
-    storage: RealRocksDBStorage,
+    storage: Arc<dyn crate::storage::traits::Storage>,
     receiver: UnboundedReceiver<StorageMessage>,
     performance_monitor: Arc<LockFreePerformanceMonitor>,
     operation_count: AtomicU64,
@@ -289,6 +292,11 @@ pub enum StorageMessage {
     ListAllWorkspaces {
         response_tx: Sender<Result<Vec<crate::storage::rocksdb_storage::StoredWorkspace>, String>>,
     },
+    BatchSaveUpdates {
+        session_id: Uuid,
+        updates: Vec<crate::core::context_update::ContextUpdate>,
+        response_tx: Sender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -329,6 +337,19 @@ pub struct SystemConfig {
     pub semantic_search_threshold: f32,
     pub auto_vectorize_on_update: bool,
     pub cross_session_search_enabled: bool,
+    // Storage backend configuration
+    #[cfg(feature = "surrealdb-storage")]
+    pub storage_backend: crate::storage::traits::StorageBackendType,
+    #[cfg(feature = "surrealdb-storage")]
+    pub surrealdb_endpoint: Option<String>,
+    #[cfg(feature = "surrealdb-storage")]
+    pub surrealdb_username: Option<String>,
+    #[cfg(feature = "surrealdb-storage")]
+    pub surrealdb_password: Option<String>,
+    #[cfg(feature = "surrealdb-storage")]
+    pub surrealdb_namespace: Option<String>,
+    #[cfg(feature = "surrealdb-storage")]
+    pub surrealdb_database: Option<String>,
 }
 
 impl Default for SystemConfig {
@@ -356,32 +377,94 @@ impl Default for SystemConfig {
             semantic_search_threshold: 0.7,
             auto_vectorize_on_update: true,
             cross_session_search_enabled: true,
+            // Storage backend defaults
+            #[cfg(feature = "surrealdb-storage")]
+            storage_backend: crate::storage::traits::StorageBackendType::RocksDB,
+            #[cfg(feature = "surrealdb-storage")]
+            surrealdb_endpoint: None,
+            #[cfg(feature = "surrealdb-storage")]
+            surrealdb_username: None,
+            #[cfg(feature = "surrealdb-storage")]
+            surrealdb_password: None,
+            #[cfg(feature = "surrealdb-storage")]
+            surrealdb_namespace: None,
+            #[cfg(feature = "surrealdb-storage")]
+            surrealdb_database: None,
         }
     }
 }
 
 impl LockFreeConversationMemorySystem {
-    /// Create system from config (backward compatibility)
+    /// Create system from config
     ///
     /// # Errors
     /// Returns an error if storage initialization fails or if system setup encounters any issues
     pub async fn new(config: SystemConfig) -> Result<Self, String> {
-        // Create storage from config
+        // Check storage backend configuration
+        #[cfg(feature = "surrealdb-storage")]
+        {
+            use crate::storage::traits::StorageBackendType;
+
+            if config.storage_backend == StorageBackendType::SurrealDB {
+                let endpoint = config.surrealdb_endpoint.as_ref()
+                    .ok_or_else(|| "SurrealDB endpoint not configured".to_string())?;
+
+                let storage = crate::storage::surrealdb_storage::SurrealDBStorage::new(
+                    endpoint,
+                    config.surrealdb_username.as_deref(),
+                    config.surrealdb_password.as_deref(),
+                    config.surrealdb_namespace.as_deref(),
+                    config.surrealdb_database.as_deref(),
+                ).await
+                .map_err(|e| format!("Failed to initialize SurrealDB: {e}"))?;
+
+                let storage_arc = Arc::new(storage);
+                return Self::new_with_trait_storage(
+                    storage_arc.clone() as Arc<dyn crate::storage::traits::Storage>,
+                    storage_arc as Arc<dyn crate::storage::traits::VectorStorage>,
+                    config,
+                ).await;
+            }
+        }
+
+        // Default: use RocksDB
         let storage = RealRocksDBStorage::new(&config.data_directory)
             .await
             .map_err(|e| format!("Failed to initialize storage: {e}"))?;
 
-        Self::new_with_storage(storage, config).await
+        Self::new_with_rocksdb(storage, config).await
     }
 
-    /// Create system with existing storage
+    /// Create system with RocksDB storage (backward compatibility)
     pub async fn new_with_storage(
         storage: RealRocksDBStorage,
         config: SystemConfig,
     ) -> Result<Self, String> {
+        Self::new_with_rocksdb(storage, config).await
+    }
+
+    /// Create system with RocksDB storage
+    async fn new_with_rocksdb(
+        storage: RealRocksDBStorage,
+        config: SystemConfig,
+    ) -> Result<Self, String> {
+        let storage_arc = Arc::new(storage);
+        Self::new_with_trait_storage(
+            storage_arc.clone() as Arc<dyn crate::storage::traits::Storage>,
+            storage_arc as Arc<dyn crate::storage::traits::VectorStorage>,
+            config,
+        ).await
+    }
+
+    /// Create system with trait object storage (supports both RocksDB and SurrealDB)
+    async fn new_with_trait_storage(
+        storage: Arc<dyn crate::storage::traits::Storage>,
+        vector_storage: Arc<dyn crate::storage::traits::VectorStorage>,
+        config: SystemConfig,
+    ) -> Result<Self, String> {
         let performance_monitor = Arc::new(LockFreePerformanceMonitor::new(None));
 
-        // Create storage actor
+        // Create storage actor with trait object
         let storage_actor = StorageActor::spawn(storage, Arc::clone(&performance_monitor)).await?;
 
         // Create session cache
@@ -518,6 +601,7 @@ impl LockFreeConversationMemorySystem {
             graph_manager,
             workspace_manager,
             storage_actor,
+            vector_storage,
             config,
             performance_monitor,
             circuit_breaker,
@@ -802,54 +886,77 @@ impl LockFreeConversationMemorySystem {
             .await?;
         tracing::info!("Internal: Session obtained successfully");
 
-        // Update session atomically using ArcSwap
+        // Update session atomically using CAS loop to prevent race conditions
         let update_result = {
             let start = std::time::Instant::now();
+            let mut attempts = 0;
 
-            // Load current session
-            tracing::info!("DEBUG: About to load current session");
-            let current_session = session_arc.load();
-            tracing::info!("DEBUG: Loaded current session, about to clone");
-            let mut new_session = (**current_session).clone();
-            tracing::info!("DEBUG: Cloned session, about to call add_context_update_to_session");
+            let result_holder = loop {
+                attempts += 1;
+                if attempts > 100 {
+                    break Err("Failed to update session: high contention (CAS loop exhausted)".to_string());
+                }
 
-            // Add context update
-            let result = Self::add_context_update_to_session(
-                &mut new_session,
-                description.clone(),
-                metadata.clone(),
-            )
-            .await;
+                // Load current session
+                let current_arc = session_arc.load();
+                let mut new_session = (**current_arc).clone();
 
-            tracing::info!("DEBUG: add_context_update_to_session returned, about to store");
-            // Store updated session atomically
-            session_arc.store(Arc::new(new_session));
-            tracing::info!("DEBUG: Stored updated session");
+                // Add context update (async)
+                let result = Self::add_context_update_to_session(
+                    &mut new_session,
+                    description.clone(),
+                    metadata.clone(),
+                ).await;
 
-            // Update processing metrics
-            let processing_time_ns = start.elapsed().as_nanos() as u64;
-            let total_time = self
-                .context_processor
-                .total_processing_time_ns
-                .fetch_add(processing_time_ns, Ordering::Relaxed)
-                + processing_time_ns;
-            let processed_count = self
-                .context_processor
-                .contexts_processed
-                .fetch_add(1, Ordering::Relaxed)
-                + 1;
+                match result {
+                    Ok((uid, update)) => {
+                        // Try to swap atomically
+                        let new_arc = Arc::new(new_session);
+                        let prev_arc = session_arc.compare_and_swap(&current_arc, new_arc);
 
-            // Update cached average
-            let avg_time = total_time / processed_count;
-            self.context_processor
-                .avg_processing_time_ns
-                .store(avg_time, Ordering::Relaxed);
+                        // Check if swap was successful (pointer equality)
+                        if Arc::ptr_eq(&prev_arc, &current_arc) {
+                            // Success
+                            break Ok((uid, update));
+                        }
+                        
+                        // CAS failed, retry
+                        tracing::debug!("CAS failed for session {}, retrying (attempt {})", session_id, attempts);
+                        tokio::task::yield_now().await;
+                    },
+                    Err(e) => {
+                        // Logic error, not contention
+                        break Err(e);
+                    }
+                }
+            };
 
-            result
+            // Update processing metrics if successful
+            if result_holder.is_ok() {
+                let processing_time_ns = start.elapsed().as_nanos() as u64;
+                let total_time = self
+                    .context_processor
+                    .total_processing_time_ns
+                    .fetch_add(processing_time_ns, Ordering::Relaxed)
+                    + processing_time_ns;
+                let processed_count = self
+                    .context_processor
+                    .contexts_processed
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1;
+
+                // Update cached average
+                let avg_time = total_time / processed_count;
+                self.context_processor
+                    .avg_processing_time_ns
+                    .store(avg_time, Ordering::Relaxed);
+            }
+
+            result_holder
         };
 
         match update_result {
-            Ok(update_id) => {
+            Ok((update_id, context_update)) => {
                 // Update graph metrics
                 self.graph_manager
                     .graph_operations
@@ -869,6 +976,24 @@ impl LockFreeConversationMemorySystem {
                     // Continue anyway - session is still updated in memory
                 } else {
                     debug!("Session {} persisted to storage", session_id);
+                }
+
+                // Save context update to normalized storage (for SurrealDB)
+                if let Err(save_error) = self
+                    .storage_actor
+                    .batch_save_updates(session_id, vec![context_update])
+                    .await
+                {
+                    warn!(
+                        "Failed to persist context update to normalized storage: {}",
+                        save_error
+                    );
+                    // Continue anyway - update is already saved in session blob
+                } else {
+                    debug!(
+                        "Context update {} persisted to normalized storage",
+                        update_id
+                    );
                 }
 
                 // Auto-vectorize if embeddings are enabled
@@ -1586,11 +1711,34 @@ impl StorageActorHandle {
         )
         .await
     }
+
+    pub async fn batch_save_updates(
+        &self,
+        session_id: Uuid,
+        updates: Vec<crate::core::context_update::ContextUpdate>,
+    ) -> Result<(), String> {
+        let (response_tx, mut response_rx) = channel::<Result<(), String>>(1);
+
+        self.sender
+            .send(StorageMessage::BatchSaveUpdates {
+                session_id,
+                updates,
+                response_tx,
+            })
+            .map_err(|_| "Storage actor unavailable".to_string())?;
+
+        self.execute_with_timeout(
+            OperationType::Medium,
+            &format!("BatchSaveUpdates {}", session_id),
+            response_rx.recv(),
+        )
+        .await
+    }
 }
 
 impl StorageActor {
     pub async fn spawn(
-        storage: RealRocksDBStorage,
+        storage: Arc<dyn crate::storage::traits::Storage>,
         performance_monitor: Arc<LockFreePerformanceMonitor>,
     ) -> Result<StorageActorHandle, String> {
         let (sender, receiver) = unbounded_channel();
@@ -1781,6 +1929,18 @@ impl StorageActor {
                     .map_err(|e| e.to_string());
                 let _ = response_tx.send(result).await;
             }
+            StorageMessage::BatchSaveUpdates {
+                session_id,
+                updates,
+                response_tx,
+            } => {
+                let result = self
+                    .storage
+                    .batch_save_updates(session_id, updates)
+                    .await
+                    .map_err(|e| e.to_string());
+                let _ = response_tx.send(result).await;
+            }
             StorageMessage::Shutdown => {} // Handled in main loop
         }
     }
@@ -1830,7 +1990,7 @@ impl LockFreeConversationMemorySystem {
         session: &mut ActiveSession,
         description: String,
         metadata: Option<serde_json::Value>,
-    ) -> Result<String, String> {
+    ) -> Result<(String, crate::core::context_update::ContextUpdate), String> {
         use crate::core::context_update::{ContextUpdate, UpdateContent, UpdateType};
 
         tracing::info!(
@@ -1901,13 +2061,14 @@ impl LockFreeConversationMemorySystem {
         // Use the proper add_incremental_update method that handles entity extraction
         tracing::info!("Calling session.add_incremental_update...");
         let update_id = update.id;
+        let update_clone = update.clone(); // Clone for returning to caller
         match session.add_incremental_update(update).await {
             Ok(_) => {
                 tracing::info!(
                     "add_context_update_to_session: Successfully added update {}",
                     update_id
                 );
-                Ok(update_id.to_string())
+                Ok((update_id.to_string(), update_clone))
             }
             Err(e) => {
                 tracing::error!(
@@ -1972,7 +2133,7 @@ impl LockFreeConversationMemorySystem {
         );
 
         // Try to initialize with retry logic
-        let result = self
+        let result: Result<&Arc<ContentVectorizer>, String> = self
             .content_vectorizer
             .get_or_try_init(|| async {
                 let embedding_config = EmbeddingConfig {
@@ -1996,10 +2157,27 @@ impl LockFreeConversationMemorySystem {
                     ..Default::default()
                 };
 
-                ContentVectorizer::new(vectorizer_config)
+                let mut vectorizer = ContentVectorizer::new(vectorizer_config)
                     .await
-                    .map(Arc::new)
-                    .map_err(|e| format!("Failed to initialize content vectorizer: {}", e))
+                    .map_err(|e| format!("Failed to initialize content vectorizer: {}", e))?;
+
+                // Set persistent storage for embedding persistence
+                vectorizer.set_persistent_storage(self.vector_storage.clone());
+
+                // Load persisted embeddings from storage immediately on initialization
+                match vectorizer.load_all_embeddings_from_storage().await {
+                    Ok(count) => {
+                        if count > 0 {
+                            info!("Loaded {} persisted embeddings from storage during initialization", count);
+                        }
+                    }
+                    Err(e) => {
+                        // We fail initialization if we can't load embeddings - this allows retry
+                        return Err(format!("Failed to load persisted embeddings from storage: {}", e));
+                    }
+                }
+
+                Ok(Arc::new(vectorizer))
             })
             .await;
 
@@ -2011,6 +2189,7 @@ impl LockFreeConversationMemorySystem {
                 );
                 // Clear any previous error
                 *self.embedding_config_holder.last_init_error.write() = None;
+
                 Ok(Arc::clone(vectorizer))
             }
             Err(e) => {
@@ -2137,6 +2316,13 @@ impl LockFreeConversationMemorySystem {
                                 "Cache invalidation for session {} (non-critical): {}",
                                 session_id, e
                             );
+                        }
+
+                        // Persist session to save the updated vectorized_update_ids
+                        if let Err(e) = self.storage_actor.save_session((**session).clone()).await {
+                            warn!("Failed to persist session {} after vectorization: {}", session_id, e);
+                        } else {
+                            debug!("Session {} persisted after vectorization", session_id);
                         }
                     }
 

@@ -1083,9 +1083,10 @@ impl LockFreeVectorDB {
             Ok(quantized)
         } else {
             // No quantization parameters available, return raw bytes
+            // Map typical embedding range [-1.0, 1.0] to [0, 255]
             Ok(vector
                 .iter()
-                .map(|&x| (x * 255.0).clamp(0.0, 255.0) as u8)
+                .map(|&x| ((x + 1.0) * 127.5).clamp(0.0, 255.0) as u8)
                 .collect())
         }
     }
@@ -1431,21 +1432,34 @@ impl LockFreeVectorDB {
     where
         F: Fn(&VectorMetadata) -> bool,
     {
-        // Dynamic ef_search to ensure HNSW returns enough candidates for filtering
-        // We need ef_search >= k*2 to get k*2 results before filtering
-        // Using k*3 provides safety margin for session/content_type filtering
-        let dynamic_ef_search = self.config.ef_search.max(k * 3);
+        let total_vectors = self.vectors.len();
 
-        debug!(
-            "search_with_filter: k={}, config.ef_search={}, dynamic_ef_search={}",
-            k, self.config.ef_search, dynamic_ef_search
-        );
+        // For small databases or when filtering, use exact search to ensure we find all matches
+        // This is more accurate for session-scoped queries where filtered results may be sparse
+        let (search_limit, search_mode, ef_override) = if total_vectors <= 100 {
+            // Small database: use exact search for guaranteed accuracy
+            debug!(
+                "search_with_filter: using Exact mode for small database ({} vectors)",
+                total_vectors
+            );
+            (total_vectors, SearchMode::Exact, None)
+        } else {
+            // Large database: use HNSW with increased multiplier for filtered queries
+            // k*10 ensures enough candidates when filtering by session/content_type
+            let search_k = (k * 10).min(total_vectors);
+            let dynamic_ef_search = self.config.ef_search.max(search_k * 2);
+            debug!(
+                "search_with_filter: k={}, search_k={}, dynamic_ef_search={}",
+                k, search_k, dynamic_ef_search
+            );
+            (search_k, SearchMode::Balanced, Some(dynamic_ef_search))
+        };
 
         let all_matches = self.search_with_mode(
             query_vector,
-            k * 2,
-            SearchMode::Balanced,
-            Some(dynamic_ef_search),
+            search_limit,
+            search_mode,
+            ef_override,
         )?;
 
         debug!(

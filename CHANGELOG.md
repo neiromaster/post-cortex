@@ -5,6 +5,44 @@ All notable changes to Post-Cortex will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.11] - 2025-12-20
+
+### Added
+
+- **SurrealDB Storage Backend**: Native graph database support as alternative to RocksDB
+  - Native graph storage for entities and relationships using SurrealDB RELATE
+  - Normalized context storage with separate tables for sessions, updates, entities
+  - Persistent embeddings storage with vector search capabilities
+  - Configurable via `daemon.toml` with `storage_backend = "surrealdb"`
+  - Namespace and database configuration (`surrealdb_namespace`, `surrealdb_database`)
+
+- **Export/Import for SurrealDB**: Full data portability between storage backends
+  - `pcx export` now works with SurrealDB backend
+  - `pcx import` imports directly to configured storage backend
+  - Backwards-compatible import from v1.0.0 format (EdgeData deserialization)
+  - Auto-generated export filenames: `export-YYYY-MM-DD_HH-MM-SS.json.gz`
+
+- **Export Schema Versioning**: JSON Schema definitions for validation
+  - `schemas/export/v1.0.0.json` - Original format (RelationType strings)
+  - `schemas/export/v1.1.0.json` - New format (EdgeData objects with context)
+
+- **New MCP Interaction Types**: Extended context update types
+  - `requirement_added` - Track new requirements
+  - `concept_defined` - Document concept definitions
+
+### Improved
+
+- **CLI Storage Backend Support**: All CLI commands respect `storage_backend` config
+  - `pcx session list/create/delete` uses configured backend
+  - `pcx workspace list/create/delete/attach` uses configured backend
+  - Works both with running daemon (HTTP API) and direct storage access
+
+- **Dual Logging for Daemon**: Logs to both file and stderr in foreground mode
+
+### Fixed
+
+- **Export without output path**: Now auto-generates timestamped filename instead of error
+
 ## [0.1.10] - 2025-12-14
 
 ### Added

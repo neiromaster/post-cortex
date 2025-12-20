@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokenizers::Tokenizer;
 use tokio::time::{sleep, timeout};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Lock-free memory pool using crossbeam's atomic data structures
 #[derive(Debug)]
@@ -480,8 +480,18 @@ impl LockFreeLocalEmbeddingEngine {
 
         // Use static embeddings for non-BERT models (lock-free)
         if !self.config.model_type.is_bert_based() {
+            warn!(
+                "Using STATIC embeddings (non-BERT) for model_type: {:?} - semantic search will NOT work correctly!",
+                self.config.model_type
+            );
             return self.encode_batch_static(&texts).await;
         }
+
+        info!(
+            "Using BERT embeddings for model_type: {:?}, encoding {} texts",
+            self.config.model_type,
+            texts.len()
+        );
 
         // BERT models use lock-free concurrent processing
         let total_start_time = std::time::Instant::now();
@@ -665,6 +675,8 @@ impl LockFreeLocalEmbeddingEngine {
             }
         }
 
+
+
         // Create tensors (lock-free)
         // Convert u32 to i64 for BERT model compatibility.
         // Performance note: This O(n) conversion is negligible compared to BERT's
@@ -677,14 +689,30 @@ impl LockFreeLocalEmbeddingEngine {
             Tensor::from_vec(attention_mask_i64, (texts.len(), max_len), &self.device)?;
 
         // Forward pass through BERT model (lock-free)
-        // All tensors now use consistent i64 type
-        let token_type_ids = Tensor::zeros(input_tensor.shape(), DType::I64, &self.device)?;
+        // Pass None for token_type_ids as XLM-R/MiniLM often don't use them or learn to ignore them
         let outputs = self
             .model
-            .forward(&input_tensor, &mask_tensor, Some(&token_type_ids))?;
+            .forward(&input_tensor, &mask_tensor, None)?;
 
-        // Extract embeddings (lock-free)
-        let embeddings = outputs.mean(1)?; // Mean pooling over sequence dimension - returns [batch_size, 384]
+        // MASKED Mean Pooling - standard for Sentence Transformers
+        // We use the attention mask to zero out padding tokens before averaging
+        
+        let mask_f32 = mask_tensor.to_dtype(DType::F32)?;
+        // mask_f32 is [batch, seq_len] -> expand to [batch, seq_len, hidden_size]
+        let mask_expanded = mask_f32.unsqueeze(2)?.broadcast_as(outputs.shape())?;
+        
+        // Zero out padding embeddings
+        let masked_outputs = outputs.broadcast_mul(&mask_expanded)?;
+        
+        // Sum along sequence dimension (dim 1) -> [batch, hidden_size]
+        let sum_embeddings = masked_outputs.sum(1)?;
+        
+        // Count non-padding tokens -> [batch, 1]
+        let token_counts = mask_f32.sum(1)?.unsqueeze(1)?;
+        let token_counts_safe = token_counts.clamp(1e-9f64, f64::MAX)?;
+        
+        // Divide sum by count to get mean
+        let embeddings = sum_embeddings.broadcast_div(&token_counts_safe)?;
 
         // L2 normalize embeddings for correct cosine similarity calculation
         let embeddings_normalized = self.l2_normalize_embeddings(&embeddings)?;

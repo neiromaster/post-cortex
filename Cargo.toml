@@ -1,6 +1,6 @@
 [package]
 name = "post-cortex"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2024"
 authors = ["Julius ML"]
 description = "An intelligent conversation memory system for AI assistants that provides persistent knowledge storage, semantic search, and automatic relationship mapping with lock-free concurrency guarantees"
@@ -49,6 +49,12 @@ candle-nn = { version = "0.9", optional = true }
 candle-transformers = { version = "0.9", optional = true }
 tokenizers = { version = "0.22", optional = true }
 hf-hub = { version = "0.4", optional = true }
+async-trait = "0.1"
+
+# SurrealDB storage backend (optional) - using kv-mem for local tests, protocol-ws for remote
+# NOTE: kv-rocksdb conflicts with our direct rocksdb dependency, so we use kv-mem or remote only
+surrealdb = { version = "3.0.0-beta", optional = true, features = ["kv-mem", "protocol-ws"] }
+surrealdb-types = { version = "3.0.0-beta", optional = true }
 
 ordered-float = "5.0.0"
 
@@ -82,3 +88,8 @@ default = ["embeddings"]
 vector-search = ["qdrant-client"]
 llm-integration = []
 embeddings = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "hf-hub"]
+
+# SurrealDB storage backend
+surrealdb-storage = ["dep:surrealdb", "dep:surrealdb-types"]
+# SurrealDB with TiKV for distributed storage (future)
+surrealdb-tikv = ["dep:surrealdb", "surrealdb/kv-tikv"]

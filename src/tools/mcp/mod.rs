@@ -288,12 +288,21 @@ pub async fn update_conversation_context_with_system(
                 }
             }
             "code_change" => {
-                let description = content.get("description").cloned().unwrap_or_default();
-                let change_type = content.get("change_type").cloned().unwrap_or_default();
-                let extras = extract_extras(&["description", "change_type"]);
+                // Accept: file_path/file/description, changes/diff/change_type
+                let file_path = content.get("file_path")
+                    .or_else(|| content.get("file"))
+                    .or_else(|| content.get("description"))
+                    .cloned()
+                    .unwrap_or_default();
+                let changes = content.get("changes")
+                    .or_else(|| content.get("diff"))
+                    .or_else(|| content.get("change_type"))
+                    .cloned()
+                    .unwrap_or_default();
+                let extras = extract_extras(&["file_path", "file", "description", "changes", "diff", "change_type"]);
                 Interaction::CodeChange {
-                    file_path: description,
-                    diff: change_type,
+                    file_path,
+                    diff: changes,
                     details: extras,
                 }
             }
@@ -314,6 +323,29 @@ pub async fn update_conversation_context_with_system(
                 Interaction::DecisionMade {
                     decision,
                     rationale,
+                    details: extras,
+                }
+            }
+            "requirement_added" => {
+                let requirement = content.get("requirement").cloned().unwrap_or_default();
+                let priority = content
+                    .get("priority")
+                    .cloned()
+                    .unwrap_or_else(|| "medium".to_string());
+                let extras = extract_extras(&["requirement", "priority"]);
+                Interaction::RequirementAdded {
+                    requirement,
+                    priority,
+                    details: extras,
+                }
+            }
+            "concept_defined" => {
+                let concept = content.get("concept").cloned().unwrap_or_default();
+                let definition = content.get("definition").cloned().unwrap_or_default();
+                let extras = extract_extras(&["concept", "definition"]);
+                Interaction::ConceptDefined {
+                    concept,
+                    definition,
                     details: extras,
                 }
             }
@@ -616,6 +648,16 @@ pub enum Interaction {
         rationale: String,
         details: Vec<String>,
     },
+    RequirementAdded {
+        requirement: String,
+        priority: String,
+        details: Vec<String>,
+    },
+    ConceptDefined {
+        concept: String,
+        definition: String,
+        details: Vec<String>,
+    },
 }
 
 // pub struct LLMClient {
@@ -767,6 +809,42 @@ pub async fn bulk_update_conversation_context(
                     details: extras,
                 }
             }
+            "requirement_added" => {
+                let requirement = update_item
+                    .content
+                    .get("requirement")
+                    .cloned()
+                    .unwrap_or_default();
+                let priority = update_item
+                    .content
+                    .get("priority")
+                    .cloned()
+                    .unwrap_or_else(|| "medium".to_string());
+                let extras = extract_extras(&["requirement", "priority"]);
+                Interaction::RequirementAdded {
+                    requirement,
+                    priority,
+                    details: extras,
+                }
+            }
+            "concept_defined" => {
+                let concept = update_item
+                    .content
+                    .get("concept")
+                    .cloned()
+                    .unwrap_or_default();
+                let definition = update_item
+                    .content
+                    .get("definition")
+                    .cloned()
+                    .unwrap_or_default();
+                let extras = extract_extras(&["concept", "definition"]);
+                Interaction::ConceptDefined {
+                    concept,
+                    definition,
+                    details: extras,
+                }
+            }
             _ => {
                 error_count += 1;
                 errors.push(format!(
@@ -860,151 +938,19 @@ pub async fn update_conversation_context(
     code_reference: Option<CodeReference>,
     session_id: Uuid,
 ) -> Result<MCPToolResult> {
-    info!("MCP-TOOLS: Getting memory system for create_session");
     info!("MCP-TOOLS: Getting memory system for update_conversation_context");
     let system = get_memory_system().await?;
-    info!("MCP-TOOLS: Got memory system for update_conversation_context");
-    info!("MCP-TOOLS: Got memory system, creating session");
+    info!("MCP-TOOLS: Got memory system, delegating to update_conversation_context_with_system");
 
-    // Extract extra fields from content HashMap for details/implications
-    let extract_extras = |exclude_keys: &[&str]| -> Vec<String> {
-        content
-            .iter()
-            .filter(|(k, _)| !exclude_keys.contains(&k.as_str()))
-            .map(|(k, v)| format!("{}: {}", k, v))
-            .collect()
-    };
-
-    // Helper to get first matching field from multiple alternatives
-    let get_field = |keys: &[&str]| -> Option<String> {
-        for key in keys {
-            if let Some(val) = content.get(*key) {
-                if !val.is_empty() {
-                    return Some(val.clone());
-                }
-            }
-        }
-        None
-    };
-
-    // Helper to get field with fallback to first non-empty value from any field
-    let get_field_or_first = |primary_keys: &[&str], exclude_keys: &[&str]| -> String {
-        // Try primary keys first
-        if let Some(val) = get_field(primary_keys) {
-            return val;
-        }
-        // Fallback: get first non-empty value from any field not in exclude list
-        for (k, v) in content.iter() {
-            if !exclude_keys.contains(&k.as_str()) && !v.is_empty() {
-                return v.clone();
-            }
-        }
-        String::new()
-    };
-
-    let interaction = match interaction_type.as_str() {
-        "qa" => {
-            // Accept: question/title, answer/response/explanation
-            let question = get_field(&["question", "title", "query"]).unwrap_or_default();
-            let answer = get_field(&["answer", "response", "explanation"]).unwrap_or_default();
-            let primary_keys = ["question", "title", "query", "answer", "response", "explanation"];
-            let extras = extract_extras(&primary_keys);
-            Interaction::QA {
-                question,
-                answer,
-                details: extras,
-            }
-        }
-        "code_change" => {
-            // Accept multiple field name variations for better UX
-            // file_path/title: file_path, file, path, description, change_description, title
-            // diff/changes: diff, changes, change_type, changes_made, details
-            let file_path_keys = [
-                "file_path",
-                "file",
-                "path",
-                "description",
-                "change_description",
-                "title",
-                "file_references",
-            ];
-            let diff_keys = [
-                "diff",
-                "changes",
-                "change_type",
-                "changes_made",
-                "details",
-                "technical_details",
-            ];
-
-            let file_path = get_field_or_first(&file_path_keys, &diff_keys);
-            let diff = get_field_or_first(&diff_keys, &file_path_keys);
-
-            // Build exclude list for extras
-            let mut exclude: Vec<&str> = file_path_keys.to_vec();
-            exclude.extend(diff_keys.to_vec());
-            let extras = extract_extras(&exclude);
-
-            Interaction::CodeChange {
-                file_path,
-                diff,
-                details: extras,
-            }
-        }
-        "problem_solved" => {
-            // Accept: problem/issue/bug, solution/fix/resolution
-            let problem = get_field(&["problem", "issue", "bug", "error", "title"]).unwrap_or_default();
-            let solution = get_field(&["solution", "fix", "resolution", "answer"]).unwrap_or_default();
-            let primary_keys = [
-                "problem", "issue", "bug", "error", "title", "solution", "fix", "resolution", "answer",
-            ];
-            let extras = extract_extras(&primary_keys);
-            Interaction::ProblemSolved {
-                problem,
-                solution,
-                details: extras,
-            }
-        }
-        "decision_made" => {
-            // Accept: decision/choice/title, rationale/reason/why/justification
-            let decision = get_field(&["decision", "choice", "title"]).unwrap_or_default();
-            let rationale = get_field(&["rationale", "reason", "why", "justification"]).unwrap_or_default();
-            let primary_keys = [
-                "decision", "choice", "title", "rationale", "reason", "why", "justification",
-            ];
-            let extras = extract_extras(&primary_keys);
-            Interaction::DecisionMade {
-                decision,
-                rationale,
-                details: extras,
-            }
-        }
-        _ => {
-            return Ok(MCPToolResult::error(format!(
-                "Unknown interaction type: {}",
-                interaction_type
-            )));
-        }
-    };
-
-    // Convert to ContextUpdate
-    let update = interaction_to_context_update(interaction, code_reference)?;
-
-    // Add to session - combine title and description for full context
-    let text = format!("{}\n{}", update.content.title, update.content.description);
-    let metadata = Some(
-        serde_json::to_value(&update)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize update metadata: {}", e))?,
-    );
-    system
-        .add_incremental_update(session_id, text, metadata)
-        .await
-        .map_err(string_to_anyhow)?;
-
-    Ok(MCPToolResult::success(
-        "Context updated successfully".to_string(),
-        None,
-    ))
+    // Delegate to the single implementation with timeout handling
+    update_conversation_context_with_system(
+        interaction_type,
+        content,
+        code_reference,
+        session_id,
+        &system,
+    )
+    .await
 }
 
 pub async fn query_conversation_context(
@@ -1513,10 +1459,12 @@ pub async fn semantic_search(
                     .await
             }
             "global" => engine.semantic_search_global(&query, None, None).await,
-            _ => return Ok(MCPToolResult::error(format!(
-                "Invalid search scope type: {}",
-                scope_type
-            ))),
+            _ => {
+                return Ok(MCPToolResult::error(format!(
+                    "Invalid search scope type: {}",
+                    scope_type
+                )));
+            }
         };
 
         match results {
@@ -1664,6 +1612,34 @@ fn interaction_to_context_update(
                 details,
                 examples: vec![],
                 implications: vec!["Decision recorded".to_string()],
+            },
+        ),
+        Interaction::RequirementAdded {
+            requirement,
+            priority,
+            details,
+        } => (
+            UpdateType::RequirementAdded,
+            crate::core::context_update::UpdateContent {
+                title: requirement.clone(),
+                description: format!("Priority: {}", priority),
+                details,
+                examples: vec![],
+                implications: vec!["Requirement added".to_string()],
+            },
+        ),
+        Interaction::ConceptDefined {
+            concept,
+            definition,
+            details,
+        } => (
+            UpdateType::ConceptDefined,
+            crate::core::context_update::UpdateContent {
+                title: concept.clone(),
+                description: definition.clone(),
+                details,
+                examples: vec![],
+                implications: vec!["Concept defined".to_string()],
             },
         ),
     };
@@ -2213,7 +2189,7 @@ pub async fn get_tool_catalog() -> Result<MCPToolResult> {
                         "name": "update_conversation_context",
                         "description": "Add knowledge: QA, decisions, problems solved, code changes",
                         "use_when": "Storing information for future retrieval and learning",
-                        "interaction_types": ["qa", "decision_made", "problem_solved", "code_change"]
+                        "interaction_types": ["qa", "decision_made", "problem_solved", "code_change", "requirement_added", "concept_defined"]
                     },
                     {
                         "name": "query_conversation_context",
@@ -2379,6 +2355,8 @@ fn interaction_type_to_content_type(interaction_type: &str) -> Option<ContentTyp
         "code_change" => Some(ContentType::CodeSnippet),
         "decision_made" => Some(ContentType::DecisionPoint),
         "problem_solved" => Some(ContentType::ProblemSolution),
+        "requirement_added" => Some(ContentType::UpdateContent),
+        "concept_defined" => Some(ContentType::EntityDescription),
         _ => None,
     }
 }
@@ -3005,15 +2983,15 @@ pub fn get_all_tool_schemas() -> Vec<serde_json::Value> {
         // Context Operations (3 tools)
         json!({
             "name": "update_conversation_context",
-            "description": "Add new knowledge to the conversation: QA, decisions, problems solved, or code changes. Content fields vary by interaction_type: qa={question,answer}, decision_made={decision,rationale}, problem_solved={problem,solution}, code_change={file_path|description,changes|diff}. Extra fields become details.",
+            "description": "Add new knowledge to the conversation: QA, decisions, problems solved, code changes, requirements, or concepts. Content fields vary by interaction_type: qa={question,answer}, decision_made={decision,rationale}, problem_solved={problem,solution}, code_change={file_path|description,changes|diff}, requirement_added={requirement,priority}, concept_defined={concept,definition}. Extra fields become details.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "session_id": {"type": "string", "description": "UUID of the session"},
-                    "interaction_type": {"type": "string", "description": "Type: qa, decision_made, problem_solved, code_change"},
+                    "interaction_type": {"type": "string", "description": "Type: qa, decision_made, problem_solved, code_change, requirement_added, concept_defined"},
                     "content": {
                         "type": "object",
-                        "description": "Content object. Expected fields by type: qa={question,answer}, decision_made={decision,rationale}, problem_solved={problem,solution}, code_change={file_path,changes}. Accepts variations: question/title/query, answer/response, problem/issue/bug, solution/fix, decision/choice, rationale/reason/why, file_path/file/description, changes/diff/changes_made. Extra fields become details array."
+                        "description": "Content object. Expected fields by type: qa={question,answer}, decision_made={decision,rationale}, problem_solved={problem,solution}, code_change={file_path,changes}, requirement_added={requirement,priority}, concept_defined={concept,definition}. Accepts variations: question/title/query, answer/response, problem/issue/bug, solution/fix, decision/choice, rationale/reason/why, file_path/file/description, changes/diff/changes_made. Extra fields become details array."
                     },
                     "code_reference": {"type": "object", "description": "Optional code reference with file paths and line numbers"}
                 },

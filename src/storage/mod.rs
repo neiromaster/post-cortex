@@ -19,10 +19,24 @@
 // SOFTWARE.
 pub mod export_import;
 pub mod rocksdb_storage;
+pub mod traits;
+
+// SurrealDB storage backend (optional)
+#[cfg(feature = "surrealdb-storage")]
+pub mod surrealdb_storage;
 
 // Re-export RealRocksDBStorage as the main storage type
 pub use rocksdb_storage::RealRocksDBStorage;
 pub use rocksdb_storage::SessionCheckpoint;
+
+// Re-export storage traits
+pub use traits::{GraphStorage, Storage, StorageBackend, StorageBackendType, StorageConfig, VectorStorage};
+
+// Re-export SurrealDB storage when enabled
+#[cfg(feature = "surrealdb-storage")]
+pub use surrealdb_storage::SurrealDBStorage;
+#[cfg(feature = "surrealdb-storage")]
+pub use traits::SurrealDBConfig;
 
 // Re-export export/import types
 pub use export_import::{

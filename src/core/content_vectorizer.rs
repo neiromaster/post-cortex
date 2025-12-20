@@ -174,6 +174,8 @@ pub struct ContentVectorizer {
     vector_db: Arc<FastVectorDB>,
     config: ContentVectorizerConfig,
     query_cache: Option<Arc<QueryCache>>,
+    /// Optional persistent storage for embeddings (RocksDB/SurrealDB)
+    persistent_storage: Option<Arc<dyn crate::storage::traits::VectorStorage>>,
 }
 
 impl ContentVectorizer {
@@ -211,7 +213,135 @@ impl ContentVectorizer {
             vector_db: Arc::new(vector_db),
             config,
             query_cache: query_cache.map(Arc::new),
+            persistent_storage: None,
         })
+    }
+
+    /// Set persistent storage for embedding persistence
+    /// Embeddings will be saved to this storage when added
+    pub fn with_persistent_storage(
+        mut self,
+        storage: Arc<dyn crate::storage::traits::VectorStorage>,
+    ) -> Self {
+        self.persistent_storage = Some(storage);
+        self
+    }
+
+    /// Set persistent storage (mutable version)
+    pub fn set_persistent_storage(
+        &mut self,
+        storage: Arc<dyn crate::storage::traits::VectorStorage>,
+    ) {
+        self.persistent_storage = Some(storage);
+    }
+
+    /// Persist a vector to storage if configured
+    async fn persist_vector(&self, vector: Vec<f32>, metadata: VectorMetadata) -> Result<()> {
+        if let Some(storage) = &self.persistent_storage {
+            storage
+                .add_vector(vector, metadata.clone())
+                .await
+                .context(format!("Failed to persist embedding {}", metadata.id))?;
+        }
+        Ok(())
+    }
+
+    /// Load embeddings from persistent storage into the in-memory vector database
+    /// Call this after creating the vectorizer to restore persisted embeddings
+    pub async fn load_embeddings_from_storage(&self, session_id: &str) -> Result<usize> {
+        let storage = match &self.persistent_storage {
+            Some(s) => s,
+            None => {
+                debug!("No persistent storage configured, skipping embedding load");
+                return Ok(0);
+            }
+        };
+
+        // Check if session has any embeddings
+        if !storage.has_session_embeddings(session_id).await {
+            debug!("No embeddings found in storage for session {}", session_id);
+            return Ok(0);
+        }
+
+        // Load vectors from storage
+        let vectors = storage.get_session_vectors(session_id).await?;
+        let count = vectors.len();
+
+        if count == 0 {
+            debug!("No vectors returned from storage for session {}", session_id);
+            return Ok(0);
+        }
+
+        info!("Loading {} embeddings from storage for session {}", count, session_id);
+
+        // Add vectors to in-memory vector database
+        let mut loaded = 0;
+        for (vector, metadata) in vectors {
+            match self.vector_db.add_vector(vector, metadata.clone()) {
+                Ok(_) => loaded += 1,
+                Err(e) => {
+                    warn!("Failed to load vector {} into memory: {}", metadata.id, e);
+                }
+            }
+        }
+
+        info!("Successfully loaded {} embeddings into memory for session {}", loaded, session_id);
+        Ok(loaded)
+    }
+
+    /// Load all embeddings from persistent storage into the in-memory vector database
+    /// Call this on startup to restore all persisted embeddings
+    pub async fn load_all_embeddings_from_storage(&self) -> Result<usize> {
+        let storage = match &self.persistent_storage {
+            Some(s) => s,
+            None => {
+                debug!("No persistent storage configured, skipping embedding load");
+                return Ok(0);
+            }
+        };
+
+        // Load all vectors from storage
+        let vectors = storage.get_all_vectors().await?;
+        let count = vectors.len();
+
+        if count == 0 {
+            debug!("No vectors found in storage");
+            return Ok(0);
+        }
+
+        info!("Loading {} embeddings from storage into memory", count);
+
+        // Add vectors to in-memory vector database
+        let mut loaded = 0;
+        for (vector, metadata) in vectors {
+            match self.vector_db.add_vector(vector, metadata.clone()) {
+                Ok(_) => loaded += 1,
+                Err(e) => {
+                    warn!("Failed to load vector {} into memory: {}", metadata.id, e);
+                }
+            }
+        }
+
+        info!("Successfully loaded {} embeddings into memory", loaded);
+        Ok(loaded)
+    }
+
+    /// Check if persistent storage has embeddings for a session
+    pub async fn has_persisted_embeddings(&self, session_id: &str) -> bool {
+        if let Some(storage) = &self.persistent_storage {
+            storage.has_session_embeddings(session_id).await
+        } else {
+            false
+        }
+    }
+
+    /// Get count of persisted embeddings for a session
+    pub async fn count_persisted_embeddings(&self, session_id: &str) -> usize {
+        if let Some(storage) = &self.persistent_storage {
+            storage.count_session_embeddings(session_id).await
+        } else {
+            0
+        }
     }
 
     /// Vectorize all content in a session
@@ -283,15 +413,23 @@ impl ContentVectorizer {
                 format!("{content_type:?}"),
             );
 
-            match self.vector_db.add_vector(embedding, metadata) {
+            // Add to in-memory DB first
+            match self.vector_db.add_vector(embedding.clone(), metadata.clone()) {
                 Ok(_) => {
-                    debug!("Successfully vectorized latest update {}", update.id);
-                    // Mark update as vectorized
-                    session.vectorized_update_ids.insert(update.id);
-                    Ok(1)
+                    // CRITICAL: Only mark as vectorized if persistence succeeds
+                    if let Err(e) = self.persist_vector(embedding, metadata).await {
+                         warn!("Failed to persist vector for update {}: {}. Will NOT mark as vectorized.", update.id, e);
+                         // We don't remove from in-memory DB here as it's fine for current session, 
+                         // but we don't mark as persisted so it retries next time.
+                         Ok(0)
+                    } else {
+                        debug!("Successfully vectorized and persisted latest update {}", update.id);
+                        session.vectorized_update_ids.insert(update.id);
+                        Ok(1)
+                    }
                 }
                 Err(e) => {
-                    warn!("Failed to vectorize latest update: {}", e);
+                    warn!("Failed to vectorize latest update (in-memory): {}", e);
                     Ok(0)
                 }
             }
@@ -364,12 +502,20 @@ impl ContentVectorizer {
         // Add to vector database and track successfully vectorized IDs
         let mut added_count = 0;
         for (embedding, metadata) in embeddings.into_iter().zip(metadata_list.iter()) {
-            match self.vector_db.add_vector(embedding, metadata.clone()) {
+            match self.vector_db.add_vector(embedding.clone(), metadata.clone()) {
                 Ok(_) => {
-                    added_count += 1;
-                    // Mark update as vectorized
-                    if let Ok(update_id) = Uuid::parse_str(&metadata.id) {
-                        session.vectorized_update_ids.insert(update_id);
+                    // Only mark as vectorized if persistence succeeds
+                    match self.persist_vector(embedding, metadata.clone()).await {
+                        Ok(_) => {
+                             added_count += 1;
+                             // Mark update as vectorized
+                             if let Ok(update_id) = Uuid::parse_str(&metadata.id) {
+                                 session.vectorized_update_ids.insert(update_id);
+                             }
+                        }
+                        Err(e) => {
+                            warn!("Failed to persist vector {}: {}. Skipping metadata update.", metadata.id, e);
+                        }
                     }
                 }
                 Err(e) => warn!("Failed to add vector to database: {}", e),
@@ -503,8 +649,14 @@ impl ContentVectorizer {
         // Add to vector database
         let mut added_count = 0;
         for (embedding, metadata) in embeddings.into_iter().zip(metadata_list) {
-            match self.vector_db.add_vector(embedding, metadata) {
-                Ok(_) => added_count += 1,
+            match self.vector_db.add_vector(embedding.clone(), metadata.clone()) {
+                Ok(_) => {
+                    if let Err(e) = self.persist_vector(embedding, metadata).await {
+                        warn!("Failed to persist entity vector: {}", e);
+                    } else {
+                        added_count += 1;
+                    }
+                }
                 Err(e) => warn!("Failed to add entity vector to database: {}", e),
             }
         }

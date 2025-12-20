@@ -53,7 +53,7 @@ pub struct SessionRequest {
 
 #[derive(Deserialize, JsonSchema, Debug, Clone)]
 pub struct ContextUpdateItem {
-    #[schemars(description = "Type of interaction: qa, decision_made, problem_solved, code_change")]
+    #[schemars(description = "Type of interaction: qa, decision_made, problem_solved, code_change, requirement_added, concept_defined")]
     pub interaction_type: String,
     #[schemars(description = "Content as key-value pairs")]
     pub content: std::collections::HashMap<String, String>,
@@ -65,7 +65,7 @@ pub struct ContextUpdateItem {
 pub struct UpdateConversationContextRequest {
     #[schemars(description = "Session ID")]
     pub session_id: String,
-    #[schemars(description = "Type of interaction: qa, decision_made, problem_solved, code_change (for single update)")]
+    #[schemars(description = "Type of interaction: qa, decision_made, problem_solved, code_change, requirement_added, concept_defined (for single update)")]
     pub interaction_type: Option<String>,
     #[schemars(description = "Content as key-value pairs (for single update)")]
     pub content: Option<std::collections::HashMap<String, String>>,

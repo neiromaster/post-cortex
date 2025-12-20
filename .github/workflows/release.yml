@@ -31,7 +31,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build pcx binary
-        run: cargo build --release --bin pcx --target ${{ matrix.target }} --features embeddings
+        run: cargo build --release --bin pcx --target ${{ matrix.target }} --features "embeddings,surrealdb-storage"
 
       - name: Strip pcx binary
         run: strip target/${{ matrix.target }}/release/pcx
@@ -89,7 +89,7 @@ jobs:
 
             ### Cargo
             ```bash
-            cargo install --git https://github.com/julymetodiev/post-cortex --features embeddings
+            cargo install --git https://github.com/julymetodiev/post-cortex --features "embeddings,surrealdb-storage"
             ```
 
             ## Usage

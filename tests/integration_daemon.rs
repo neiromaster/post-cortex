@@ -17,6 +17,12 @@ async fn setup_test_app() -> (TestApp, TempDir) {
         host: "127.0.0.1".to_string(),
         port: 0, // Unused in testing
         data_directory: temp_dir.path().to_str().unwrap().to_string(),
+        storage_backend: "surrealdb".to_string(),
+        surrealdb_endpoint: Some("ws://localhost:8000".to_string()),
+        surrealdb_username: Some("root".to_string()),
+        surrealdb_password: Some("root".to_string()),
+        surrealdb_namespace: "post_cortex".to_string(),
+        surrealdb_database: "main".to_string(),
     };
 
     let server = LockFreeDaemonServer::new(config).await.unwrap();
@@ -39,6 +45,12 @@ async fn start_real_daemon() -> (u16, TempDir) {
         host: "127.0.0.1".to_string(),
         port,
         data_directory: temp_dir.path().to_str().unwrap().to_string(),
+        storage_backend: "surrealdb".to_string(),
+        surrealdb_endpoint: Some("ws://localhost:8000".to_string()),
+        surrealdb_username: Some("root".to_string()),
+        surrealdb_password: Some("root".to_string()),
+        surrealdb_namespace: "post_cortex".to_string(),
+        surrealdb_database: "main".to_string(),
     };
 
     let server = LockFreeDaemonServer::new(config).await.unwrap();
