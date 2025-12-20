@@ -2052,11 +2052,24 @@ impl SurrealDBStorage {
             }
         }
 
+        // Import embeddings (v1.2.0+)
+        if !data.embeddings.is_empty() {
+            match self.import_embeddings(&data.embeddings).await {
+                Ok(count) => result.embeddings_imported = count,
+                Err(e) => {
+                    result
+                        .errors
+                        .push(format!("Failed to import embeddings: {}", e));
+                }
+            }
+        }
+
         info!(
-            "SurrealDBStorage: Import complete: {} sessions, {} workspaces, {} updates, {} errors",
+            "SurrealDBStorage: Import complete: {} sessions, {} workspaces, {} updates, {} embeddings, {} errors",
             result.sessions_imported,
             result.workspaces_imported,
             result.updates_imported,
+            result.embeddings_imported,
             result.errors.len()
         );
 
@@ -2110,12 +2123,20 @@ impl SurrealDBStorage {
             );
         }
 
+        // Export all embeddings
+        export.embeddings = self.export_all_embeddings().await?;
+        info!(
+            "SurrealDBStorage: Exported {} embeddings",
+            export.embeddings.len()
+        );
+
         export.update_counts();
         info!(
-            "SurrealDBStorage: Export complete: {} sessions, {} workspaces, {} updates",
+            "SurrealDBStorage: Export complete: {} sessions, {} workspaces, {} updates, {} embeddings",
             export.metadata.session_count,
             export.metadata.workspace_count,
-            export.metadata.update_count
+            export.metadata.update_count,
+            export.metadata.embedding_count
         );
 
         Ok(export)
@@ -2141,8 +2162,8 @@ impl SurrealDBStorage {
             options.compression,
         );
 
-        for session_id in session_ids {
-            match self.export_session_data(session_id).await {
+        for session_id in &session_ids {
+            match self.export_session_data(*session_id).await {
                 Ok(session_data) => export.sessions.push(session_data),
                 Err(e) => {
                     return Err(anyhow::anyhow!(
@@ -2153,6 +2174,9 @@ impl SurrealDBStorage {
                 }
             }
         }
+
+        // Export embeddings for these sessions
+        export.embeddings = self.export_session_embeddings(&session_ids).await?;
 
         export.update_counts();
         Ok(export)
@@ -2189,7 +2213,8 @@ impl SurrealDBStorage {
             .push(ExportedWorkspace::from(workspace.clone()));
 
         // Export all sessions in the workspace
-        for (session_id, _role) in &workspace.sessions {
+        let session_ids: Vec<Uuid> = workspace.sessions.iter().map(|(id, _)| *id).collect();
+        for session_id in &session_ids {
             match self.export_session_data(*session_id).await {
                 Ok(session_data) => export.sessions.push(session_data),
                 Err(e) => {
@@ -2200,6 +2225,9 @@ impl SurrealDBStorage {
                 }
             }
         }
+
+        // Export embeddings for workspace sessions
+        export.embeddings = self.export_session_embeddings(&session_ids).await?;
 
         export.update_counts();
         Ok(export)
@@ -2216,6 +2244,86 @@ impl SurrealDBStorage {
         let updates = self.load_session_updates(session_id).await?;
 
         Ok(ExportedSession { session, updates })
+    }
+
+    /// Export all embeddings from the database
+    async fn export_all_embeddings(&self) -> Result<Vec<crate::storage::export_import::ExportedEmbedding>> {
+        use crate::storage::export_import::ExportedEmbedding;
+
+        let result: Vec<EmbeddingRecord> = self
+            .db
+            .query("SELECT * FROM embedding")
+            .await?
+            .take(0)?;
+
+        Ok(result
+            .into_iter()
+            .map(|r| ExportedEmbedding {
+                content_id: r.content_id,
+                session_id: r.session_id,
+                vector: r.vector,
+                text: r.text,
+                content_type: r.content_type,
+                timestamp: r.timestamp,
+                metadata: r.metadata,
+            })
+            .collect())
+    }
+
+    /// Export embeddings for specific sessions
+    async fn export_session_embeddings(
+        &self,
+        session_ids: &[Uuid],
+    ) -> Result<Vec<crate::storage::export_import::ExportedEmbedding>> {
+        use crate::storage::export_import::ExportedEmbedding;
+
+        let session_id_strs: Vec<String> = session_ids.iter().map(|id| id.to_string()).collect();
+        let result: Vec<EmbeddingRecord> = self
+            .db
+            .query("SELECT * FROM embedding WHERE session_id IN $session_ids")
+            .bind(("session_ids", session_id_strs))
+            .await?
+            .take(0)?;
+
+        Ok(result
+            .into_iter()
+            .map(|r| ExportedEmbedding {
+                content_id: r.content_id,
+                session_id: r.session_id,
+                vector: r.vector,
+                text: r.text,
+                content_type: r.content_type,
+                timestamp: r.timestamp,
+                metadata: r.metadata,
+            })
+            .collect())
+    }
+
+    /// Import embeddings from export data
+    async fn import_embeddings(
+        &self,
+        embeddings: &[crate::storage::export_import::ExportedEmbedding],
+    ) -> Result<usize> {
+        let mut count = 0;
+        for emb in embeddings {
+            let record = EmbeddingRecord {
+                content_id: emb.content_id.clone(),
+                session_id: emb.session_id.clone(),
+                vector: emb.vector.clone(),
+                text: emb.text.clone(),
+                content_type: emb.content_type.clone(),
+                timestamp: emb.timestamp.clone(),
+                metadata: emb.metadata.clone(),
+            };
+
+            let _: Option<EmbeddingRecord> = self
+                .db
+                .create(("embedding", emb.content_id.as_str()))
+                .content(record)
+                .await?;
+            count += 1;
+        }
+        Ok(count)
     }
 }
 

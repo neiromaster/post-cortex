@@ -5,6 +5,22 @@ All notable changes to Post-Cortex will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.12] - 2025-12-20
+
+### Added
+
+- **Embeddings Export/Import**: Full backup and restore of semantic search embeddings
+  - Export format v1.2.0 includes embeddings array with vectors, text, and metadata
+  - `ExportedEmbedding` struct: content_id, session_id, vector (384-dim), text, content_type, timestamp
+  - Backwards-compatible import (v1.0.0, v1.1.0, v1.2.0 formats supported)
+  - JSON Schema `schemas/export/v1.2.0.json` with embeddings definition
+
+### Fixed
+
+- **vectorize-all with SurrealDB**: Now respects `storage_backend` configuration
+  - Previously always used RocksDB regardless of daemon.toml settings
+  - Now properly connects to SurrealDB when configured
+
 ## [0.1.11] - 2025-12-20
 
 ### Added

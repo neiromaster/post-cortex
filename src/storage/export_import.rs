@@ -45,14 +45,15 @@ use uuid::Uuid;
 /// Current export format version
 /// v1.0.0 - Initial format (RelationType only in graph edges)
 /// v1.1.0 - Added EdgeData with context field in graph edges
-pub const EXPORT_FORMAT_VERSION: &str = "1.1.0";
+/// v1.2.0 - Added embeddings export/import
+pub const EXPORT_FORMAT_VERSION: &str = "1.2.0";
 
 /// Supported legacy versions for import
-pub const SUPPORTED_IMPORT_VERSIONS: &[&str] = &["1.0.0", "1.1.0"];
+pub const SUPPORTED_IMPORT_VERSIONS: &[&str] = &["1.0.0", "1.1.0", "1.2.0"];
 
 /// Schema URL for validation (GitHub raw URL)
 pub const EXPORT_SCHEMA_URL: &str =
-    "https://raw.githubusercontent.com/JuliusDeGroot/post-cortex/main/schemas/export/v1.1.0.json";
+    "https://raw.githubusercontent.com/JuliusDeGroot/post-cortex/main/schemas/export/v1.2.0.json";
 
 /// Compression type for export
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -125,6 +126,9 @@ pub struct ExportMetadata {
     pub update_count: usize,
     /// Total number of checkpoints exported
     pub checkpoint_count: usize,
+    /// Total number of embeddings exported (v1.2.0+)
+    #[serde(default)]
+    pub embedding_count: usize,
 }
 
 /// Exported session data
@@ -144,6 +148,19 @@ pub struct ExportedWorkspace {
     pub description: String,
     pub sessions: Vec<(Uuid, SessionRole)>,
     pub created_at: u64,
+}
+
+/// Exported embedding data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedEmbedding {
+    pub content_id: String,
+    pub session_id: String,
+    pub vector: Vec<f32>,
+    pub text: String,
+    pub content_type: String,
+    pub timestamp: String,
+    #[serde(default)]
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 impl From<StoredWorkspace> for ExportedWorkspace {
@@ -186,6 +203,9 @@ pub struct ExportData {
     pub workspaces: Vec<ExportedWorkspace>,
     /// Exported checkpoints
     pub checkpoints: Vec<SessionCheckpoint>,
+    /// Exported embeddings (v1.2.0+)
+    #[serde(default)]
+    pub embeddings: Vec<ExportedEmbedding>,
 }
 
 impl ExportData {
@@ -203,10 +223,12 @@ impl ExportData {
                 workspace_count: 0,
                 update_count: 0,
                 checkpoint_count: 0,
+                embedding_count: 0,
             },
             sessions: Vec::new(),
             workspaces: Vec::new(),
             checkpoints: Vec::new(),
+            embeddings: Vec::new(),
         }
     }
 
@@ -216,6 +238,7 @@ impl ExportData {
         self.metadata.workspace_count = self.workspaces.len();
         self.metadata.update_count = self.sessions.iter().map(|s| s.updates.len()).sum();
         self.metadata.checkpoint_count = self.checkpoints.len();
+        self.metadata.embedding_count = self.embeddings.len();
     }
 
     /// Get list of session IDs in this export
@@ -262,6 +285,7 @@ pub struct ImportResult {
     pub workspaces_skipped: usize,
     pub updates_imported: usize,
     pub checkpoints_imported: usize,
+    pub embeddings_imported: usize,
     pub errors: Vec<String>,
 }
 

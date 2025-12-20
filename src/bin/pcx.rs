@@ -949,12 +949,38 @@ async fn vectorize_all() -> Result<(), String> {
     println!("Starting vectorization of all sessions...");
 
     let daemon_config = DaemonConfig::load();
-    let config = SystemConfig {
+    let mut config = SystemConfig {
         enable_embeddings: true,
         auto_vectorize_on_update: false,
-        data_directory: daemon_config.data_directory,
+        data_directory: daemon_config.data_directory.clone(),
         ..SystemConfig::default()
     };
+
+    // Configure storage backend from daemon config
+    #[cfg(feature = "surrealdb-storage")]
+    {
+        config.storage_backend = match daemon_config.storage_backend.as_str() {
+            "surrealdb" => StorageBackendType::SurrealDB,
+            _ => StorageBackendType::RocksDB,
+        };
+        config.surrealdb_endpoint = daemon_config.surrealdb_endpoint.clone();
+        config.surrealdb_username = daemon_config.surrealdb_username.clone();
+        config.surrealdb_password = daemon_config.surrealdb_password.clone();
+        config.surrealdb_namespace = Some(daemon_config.surrealdb_namespace.clone());
+        config.surrealdb_database = Some(daemon_config.surrealdb_database.clone());
+
+        if config.storage_backend == StorageBackendType::SurrealDB {
+            println!(
+                "Target: SurrealDB at {}",
+                config.surrealdb_endpoint.as_deref().unwrap_or("default")
+            );
+        } else {
+            println!("Target: RocksDB at {}", config.data_directory);
+        }
+    }
+
+    #[cfg(not(feature = "surrealdb-storage"))]
+    println!("Target: RocksDB at {}", config.data_directory);
 
     let system = LockFreeConversationMemorySystem::new(config)
         .await
@@ -1173,6 +1199,7 @@ async fn handle_export(
     println!("  Workspaces:  {}", export_data.metadata.workspace_count);
     println!("  Updates:     {}", export_data.metadata.update_count);
     println!("  Checkpoints: {}", export_data.metadata.checkpoint_count);
+    println!("  Embeddings:  {}", export_data.metadata.embedding_count);
 
     // Show size info based on compression
     if compression == CompressionType::None {
@@ -1221,6 +1248,7 @@ async fn handle_import(
         println!("  Workspaces:      {}", metadata.workspace_count);
         println!("  Updates:         {}", metadata.update_count);
         println!("  Checkpoints:     {}", metadata.checkpoint_count);
+        println!("  Embeddings:      {}", metadata.embedding_count);
         println!();
 
         let sessions =
@@ -1321,6 +1349,7 @@ async fn handle_import(
         println!("  Workspaces skipped:  {}", result.workspaces_skipped);
         println!("  Updates imported:    {}", result.updates_imported);
         println!("  Checkpoints:         {}", result.checkpoints_imported);
+        println!("  Embeddings:          {}", result.embeddings_imported);
 
         if !result.errors.is_empty() {
             println!();
@@ -1376,6 +1405,7 @@ async fn handle_import(
     println!("  Workspaces skipped:  {}", result.workspaces_skipped);
     println!("  Updates imported:    {}", result.updates_imported);
     println!("  Checkpoints:         {}", result.checkpoints_imported);
+    println!("  Embeddings:          {}", result.embeddings_imported);
 
     if !result.errors.is_empty() {
         println!();
