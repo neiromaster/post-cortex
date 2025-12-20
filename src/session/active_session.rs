@@ -23,13 +23,13 @@ use crate::graph::entity_graph::SimpleEntityGraph;
 use crate::session::session_components::{HotContext, SessionMetadata};
 
 use chrono::DateTime;
-use dashmap::DashSet;
 use chrono::Utc;
+use dashmap::DashSet;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, LazyLock};
 #[cfg(feature = "embeddings")]
 use std::sync::OnceLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, info, instrument, warn};
@@ -45,73 +45,320 @@ static GLOBAL_NER_ENGINE: OnceLock<Arc<LockFreeNEREngine>> = OnceLock::new();
 // Global stop word sets for O(1) lookup (lazy initialized)
 static ENGLISH_STOP_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
-        "a", "an", "the", "this", "that", "these", "those", "in", "on", "at", "by", "for",
-        "with", "from", "to", "of", "and", "or", "but", "nor", "so", "yet", "all", "some",
-        "any", "each", "every", "both", "few", "many", "total", "using", "used", "uses", "use",
-        "made", "make", "now", "then", "when", "where", "how", "what", "why", "one", "two",
-        "three", "first", "second", "last",
-    ].into_iter().collect()
+        "a", "an", "the", "this", "that", "these", "those", "in", "on", "at", "by", "for", "with",
+        "from", "to", "of", "and", "or", "but", "nor", "so", "yet", "all", "some", "any", "each",
+        "every", "both", "few", "many", "total", "using", "used", "uses", "use", "made", "make",
+        "now", "then", "when", "where", "how", "what", "why", "one", "two", "three", "first",
+        "second", "last",
+    ]
+    .into_iter()
+    .collect()
 });
 
 static BULGARIAN_STOP_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
         // Common Bulgarian stop words
-        "и", "в", "на", "за", "с", "от", "до", "по", "при", "без",
-        "е", "са", "си", "съм", "беше", "бяха", "ще", "би",
-        "това", "тази", "тези", "този", "онзи",
-        "която", "който", "които",
-        "как", "какво", "къде", "кога", "защо", "кой",
-        "не", "да", "ли", "че", "ако", "когато", "докато", "или", "но", "а",
-        "още", "само", "вече", "тук", "там",
-        "всички", "всяка", "всеки", "няколко", "много", "малко",
-        "го", "му", "й", "ги", "им", "ме", "ти", "ви", "ни",
-        "един", "една", "едно", "два", "две", "три",
+        "и",
+        "в",
+        "на",
+        "за",
+        "с",
+        "от",
+        "до",
+        "по",
+        "при",
+        "без",
+        "е",
+        "са",
+        "си",
+        "съм",
+        "беше",
+        "бяха",
+        "ще",
+        "би",
+        "това",
+        "тази",
+        "тези",
+        "този",
+        "онзи",
+        "която",
+        "който",
+        "които",
+        "как",
+        "какво",
+        "къде",
+        "кога",
+        "защо",
+        "кой",
+        "не",
+        "да",
+        "ли",
+        "че",
+        "ако",
+        "когато",
+        "докато",
+        "или",
+        "но",
+        "а",
+        "още",
+        "само",
+        "вече",
+        "тук",
+        "там",
+        "всички",
+        "всяка",
+        "всеки",
+        "няколко",
+        "много",
+        "малко",
+        "го",
+        "му",
+        "й",
+        "ги",
+        "им",
+        "ме",
+        "ти",
+        "ви",
+        "ни",
+        "един",
+        "една",
+        "едно",
+        "два",
+        "две",
+        "три",
         // Common verbs
-        "прави", "работи", "работят", "има", "имат",
-        "мога", "може", "могат", "трябва", "искам", "иска",
-        "използва", "използваме", "използвам", "използват",
-        "осигурява", "осигуряват", "позволява", "позволяват",
-        "оркестрира", "оркестрират",
-        "върна", "връща", "връщат",
-        "търсения", "търсене", "достъп", "данни", "параметри",
-        "сесии", "сесия", "система", "системи",
+        "прави",
+        "работи",
+        "работят",
+        "има",
+        "имат",
+        "мога",
+        "може",
+        "могат",
+        "трябва",
+        "искам",
+        "иска",
+        "използва",
+        "използваме",
+        "използвам",
+        "използват",
+        "осигурява",
+        "осигуряват",
+        "позволява",
+        "позволяват",
+        "оркестрира",
+        "оркестрират",
+        "върна",
+        "връща",
+        "връщат",
+        "търсения",
+        "търсене",
+        "достъп",
+        "данни",
+        "параметри",
+        "сесии",
+        "сесия",
+        "система",
+        "системи",
         // Common prepositions and conjunctions
-        "през", "след", "преди", "около", "между", "над", "под", "към", "чрез",
-        "според", "заради", "поради",
+        "през",
+        "след",
+        "преди",
+        "около",
+        "между",
+        "над",
+        "под",
+        "към",
+        "чрез",
+        "според",
+        "заради",
+        "поради",
         // Common adjectives and descriptors
-        "различни", "различен", "различна", "различно",
-        "семантични", "семантичен", "семантична", "семантично", "семантичните",
-        "приблизително", "приблизителен", "приблизителна",
-        "по-добър", "по-добра", "по-добро", "по-добре",
-        "висока", "висок", "високо", "високи",
-        "вместо", "индексът", "индекса", "индекси",
-        "използване", "използването",
+        "различни",
+        "различен",
+        "различна",
+        "различно",
+        "семантични",
+        "семантичен",
+        "семантична",
+        "семантично",
+        "семантичните",
+        "приблизително",
+        "приблизителен",
+        "приблизителна",
+        "по-добър",
+        "по-добра",
+        "по-добро",
+        "по-добре",
+        "висока",
+        "висок",
+        "високо",
+        "високи",
+        "вместо",
+        "индексът",
+        "индекса",
+        "индекси",
+        "използване",
+        "използването",
         // Common nouns that are too generic
-        "начин", "начина", "начини",
-        "вид", "вида", "видове",
-        "тип", "типа", "типове",
-        "част", "частта", "части",
-        "случай", "случая", "случаи",
-    ].into_iter().collect()
+        "начин",
+        "начина",
+        "начини",
+        "вид",
+        "вида",
+        "нещо",
+        "неща",
+        "всичко",
+        "нищо",
+        // Noisy technical words
+        "детайли",
+        "обновяване",
+        "контекст",
+        "пример",
+        "резултат",
+        "функция",
+        "метод",
+        "клас",
+    ]
+    .into_iter()
+    .collect()
 });
 
 static COMMON_ENGLISH_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     [
-        "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
-        "her", "was", "one", "our", "out", "day", "get", "has", "him", "his",
-        "how", "its", "may", "new", "now", "old", "see", "two", "who", "boy",
-        "did", "man", "men", "put", "say", "she", "too", "use", "this", "that",
-        "with", "have", "from", "they", "know", "want", "been", "good", "much",
-        "some", "time", "very", "when", "come", "here", "just", "like", "long",
-        "make", "many", "over", "such", "take", "than", "them", "well", "were",
-        "will", "your", "about", "after", "again", "back", "could", "every",
-        "first", "going", "house", "little", "might", "never", "only", "other",
-        "right", "should", "through", "under", "where", "while", "would", "write",
-        "years", "because", "before", "being", "between", "during", "without",
-        "within", "against", "across", "around", "behind", "beside", "beneath",
-        "beyond", "inside", "outside", "toward", "towards", "underneath",
-        "thing", "stuff", "something", "anything", "everything",
-    ].into_iter().collect()
+        "the",
+        "and",
+        "for",
+        "are",
+        "but",
+        "not",
+        "you",
+        "all",
+        "can",
+        "had",
+        "her",
+        "was",
+        "one",
+        "our",
+        "out",
+        "day",
+        "get",
+        "has",
+        "him",
+        "his",
+        "how",
+        "its",
+        "may",
+        "new",
+        "now",
+        "old",
+        "see",
+        "two",
+        "who",
+        "boy",
+        "did",
+        "man",
+        "men",
+        "put",
+        "say",
+        "she",
+        "too",
+        "use",
+        "this",
+        "that",
+        "with",
+        "have",
+        "from",
+        "they",
+        "know",
+        "want",
+        "been",
+        "good",
+        "much",
+        "some",
+        "time",
+        "very",
+        "when",
+        "come",
+        "here",
+        "just",
+        "like",
+        "long",
+        "make",
+        "many",
+        "over",
+        "such",
+        "take",
+        "than",
+        "them",
+        "well",
+        "were",
+        "will",
+        "your",
+        "about",
+        "after",
+        "again",
+        "back",
+        "could",
+        "every",
+        "first",
+        "going",
+        "house",
+        "little",
+        "might",
+        "never",
+        "only",
+        "other",
+        "right",
+        "should",
+        "through",
+        "under",
+        "where",
+        "while",
+        "would",
+        "write",
+        "years",
+        "because",
+        "before",
+        "being",
+        "between",
+        "during",
+        "without",
+        "within",
+        "against",
+        "across",
+        "around",
+        "behind",
+        "beside",
+        "beneath",
+        "beyond",
+        "inside",
+        "outside",
+        "toward",
+        "towards",
+        "underneath",
+        "thing",
+        "stuff",
+        "something",
+        "anything",
+        "everything",
+        // Noisy words from technical context
+        "details",
+        "storing",
+        "tokens",
+        "update",
+        "context",
+        "example",
+        "result",
+        "using",
+        "into",
+        "feature",
+        "function",
+        "method",
+        "class",
+    ]
+    .into_iter()
+    .collect()
 });
 
 /// Pre-load the global NER engine (call during daemon startup for best performance)
@@ -145,7 +392,10 @@ async fn get_ner_engine() -> Option<Arc<LockFreeNEREngine>> {
             Some(arc_engine)
         }
         Err(e) => {
-            warn!("Failed to load NER engine: {}. Entity extraction will use fallback method.", e);
+            warn!(
+                "Failed to load NER engine: {}. Entity extraction will use fallback method.",
+                e
+            );
             None
         }
     }
@@ -169,7 +419,7 @@ pub struct ActiveSession {
 
     // Lock-free tiered context storage
     pub hot_context: Arc<HotContext>, // Lock-free hot updates (DashMap-based)
-    pub warm_context: Arc<Vec<CompressedUpdate>>,  // CoW: Compressed updates (storage)
+    pub warm_context: Arc<Vec<CompressedUpdate>>, // CoW: Compressed updates (storage)
     pub cold_context: Arc<Vec<StructuredSummary>>, // CoW: Periodic summaries (storage)
 
     // Structured context - CoW wrapped for efficient updates
@@ -436,10 +686,7 @@ impl ActiveSession {
         let mut metadata = SessionMetadata::new(id, name, description, user_preferences);
         metadata.created_at = created_at;
 
-        let hot_context = HotContext::from_deque(
-            VecDeque::from(hot_context_vec),
-            max_hot_size,
-        );
+        let hot_context = HotContext::from_deque(VecDeque::from(hot_context_vec), max_hot_size);
 
         let vectorized_ids = Arc::new(DashSet::new());
         for vid in vectorized_update_ids {
@@ -615,15 +862,15 @@ impl ActiveSession {
         match &update.update_type {
             UpdateType::QuestionAnswered => {
                 // Add question to open questions (since Q&A implies there was a question)
-                current_state.open_questions.push(
-                    crate::core::structured_context::QuestionItem {
+                current_state
+                    .open_questions
+                    .push(crate::core::structured_context::QuestionItem {
                         question: update.content.title.clone(),
                         context: update.content.description.clone(),
                         status: crate::core::structured_context::QuestionStatus::Answered,
                         timestamp: update.timestamp,
                         last_updated: update.timestamp,
-                    },
-                );
+                    });
 
                 // Extract key concepts from Q&A content
                 Self::extract_and_add_concepts_to_state(
@@ -635,14 +882,14 @@ impl ActiveSession {
                 );
 
                 // Add to conversation flow
-                current_state.conversation_flow.push(
-                    crate::core::structured_context::FlowItem {
+                current_state
+                    .conversation_flow
+                    .push(crate::core::structured_context::FlowItem {
                         step_description: format!("Q&A: {}", update.content.title),
                         timestamp: update.timestamp,
                         related_updates: vec![update.id],
                         outcome: Some(update.content.description.clone()),
-                    },
-                );
+                    });
             }
             UpdateType::ProblemSolved => {
                 // Extract key concepts from problem/solution content
@@ -655,14 +902,14 @@ impl ActiveSession {
                 );
 
                 // Add to conversation flow
-                current_state.conversation_flow.push(
-                    crate::core::structured_context::FlowItem {
+                current_state
+                    .conversation_flow
+                    .push(crate::core::structured_context::FlowItem {
                         step_description: format!("Problem Solved: {}", update.content.title),
                         timestamp: update.timestamp,
                         related_updates: vec![update.id],
                         outcome: Some(update.content.description.clone()),
-                    },
-                );
+                    });
             }
             UpdateType::CodeChanged => {
                 // Extract key concepts from code change content
@@ -675,58 +922,58 @@ impl ActiveSession {
                 );
 
                 // Add to conversation flow
-                current_state.conversation_flow.push(
-                    crate::core::structured_context::FlowItem {
+                current_state
+                    .conversation_flow
+                    .push(crate::core::structured_context::FlowItem {
                         step_description: format!("Code Change: {}", update.content.title),
                         timestamp: update.timestamp,
                         related_updates: vec![update.id],
                         outcome: Some(update.content.description.clone()),
-                    },
-                );
+                    });
             }
             UpdateType::DecisionMade => {
                 // Add to key decisions
-                current_state.key_decisions.push(
-                    crate::core::structured_context::DecisionItem {
+                current_state
+                    .key_decisions
+                    .push(crate::core::structured_context::DecisionItem {
                         description: update.content.title.clone(),
                         context: update.content.description.clone(),
                         alternatives: update.content.details.clone(),
                         confidence: 1.0,
                         timestamp: update.timestamp,
-                    },
-                );
+                    });
 
                 // Add to conversation flow
-                current_state.conversation_flow.push(
-                    crate::core::structured_context::FlowItem {
+                current_state
+                    .conversation_flow
+                    .push(crate::core::structured_context::FlowItem {
                         step_description: format!("Decision Made: {}", update.content.title),
                         timestamp: update.timestamp,
                         related_updates: vec![update.id],
                         outcome: Some(update.content.description.clone()),
-                    },
-                );
+                    });
             }
             UpdateType::ConceptDefined => {
                 // Add to key concepts
-                current_state.key_concepts.push(
-                    crate::core::structured_context::ConceptItem {
+                current_state
+                    .key_concepts
+                    .push(crate::core::structured_context::ConceptItem {
                         name: update.content.title.clone(),
                         definition: update.content.description.clone(),
                         examples: update.content.examples.clone(),
                         related_concepts: update.content.details.clone(),
                         timestamp: update.timestamp,
-                    },
-                );
+                    });
 
                 // Add to conversation flow
-                current_state.conversation_flow.push(
-                    crate::core::structured_context::FlowItem {
+                current_state
+                    .conversation_flow
+                    .push(crate::core::structured_context::FlowItem {
                         step_description: format!("Concept Defined: {}", update.content.title),
                         timestamp: update.timestamp,
                         related_updates: vec![update.id],
                         outcome: Some(update.content.description.clone()),
-                    },
-                );
+                    });
             }
             UpdateType::RequirementAdded => {
                 // Add to technical specifications
@@ -741,14 +988,14 @@ impl ActiveSession {
                 );
 
                 // Add to conversation flow
-                current_state.conversation_flow.push(
-                    crate::core::structured_context::FlowItem {
+                current_state
+                    .conversation_flow
+                    .push(crate::core::structured_context::FlowItem {
                         step_description: format!("Requirement Added: {}", update.content.title),
                         timestamp: update.timestamp,
                         related_updates: vec![update.id],
                         outcome: Some(update.content.description.clone()),
-                    },
-                );
+                    });
             }
         }
 
@@ -902,46 +1149,88 @@ impl ActiveSession {
             self.total_entities_truncated
         );
 
-        // Pre-compute entity types before taking mutable borrow of entity_graph
+        // Pre-compute entity types and relationships before taking mutable borrow of entity_graph
         // This avoids borrowing self while entity_graph is mutably borrowed
-        let entity_types: Vec<_> = extracted_entities
-            .iter()
-            .map(|name| self.infer_entity_type(&update.update_type, name))
-            .collect();
+        let mut entity_type_map = std::collections::HashMap::new();
 
-        // Use Arc::make_mut for CoW semantics on entity_graph
-        // This will only clone if there are other Arc references
-        let entity_graph = Arc::make_mut(&mut self.entity_graph);
-
-        // Create new entities (batch operation)
-        info!("DEBUG: About to start entity loop");
-        for (entity_name, entity_type) in extracted_entities.iter().zip(entity_types.iter()) {
-            info!("Adding entity: '{}'", entity_name);
-            entity_graph.add_or_update_entity(
-                entity_name.clone(),
-                entity_type.clone(),
-                update.timestamp,
-                &update.content.description,
+        for name in &extracted_entities {
+            entity_type_map.insert(
+                name.clone(),
+                self.infer_entity_type(&update.update_type, name),
             );
         }
+        for name in &referenced_entities {
+            if !entity_type_map.contains_key(name) {
+                entity_type_map.insert(
+                    name.clone(),
+                    self.infer_entity_type(&update.update_type, name),
+                );
+            }
+        }
 
+        // Combine all known entities for relationship extraction
+        let mut all_entities = extracted_entities.clone();
+        all_entities.extend(referenced_entities.clone());
+        all_entities.sort();
+        all_entities.dedup();
+
+        // Extract relationships from text (heuristic)
+        let extracted_rels = if !all_entities.is_empty() {
+            self.extract_relationships_from_text(&content_text, &all_entities)
+        } else {
+            Vec::new()
+        };
+
+        // Pre-calculate auto-generated relationships (heuristic/co-occurrence)
+        // Note: auto_generate_relationships modifies entity_graph, so we can't fully pre-calc it easily without duplication
+        // BUT, auto_generate_relationships ALSO calls self.infer_relationship_type which borrows self.
+        // We need to inline or pre-calc that too.
+
+        let auto_rel_type = self.infer_relationship_type(&update.update_type);
+        let auto_context = format!("Co-mentioned in: {}", update.content.title);
+
+        // NOW we can take the mutable borrow of entity_graph
+        let entity_graph = Arc::make_mut(&mut self.entity_graph);
+
+        // Add extracted entities to graph
         info!(
-            "Entity graph now has {} total entities",
-            entity_graph.entities.len()
+            "DEBUG: Adding {} extracted entities to graph",
+            extracted_entities.len()
         );
+        for name in &extracted_entities {
+            let entity_type = entity_type_map.get(name).unwrap().clone();
+            entity_graph.add_or_update_entity(
+                name.clone(),
+                entity_type,
+                update.timestamp,
+                &format!("Extracted from: {}", update.content.title),
+            );
+        }
+        info!("DEBUG: Extracted entities added successfully");
 
-        // Add entity references (batch operation)
+        // Update referenced entities
         info!(
-            "DEBUG: Adding entity references for {} entities",
+            "DEBUG: Updating {} referenced entities",
             referenced_entities.len()
         );
-        for entity_name in &referenced_entities {
-            entity_graph
-                .mention_entity(entity_name, update.id, update.timestamp);
+        for name in &referenced_entities {
+            // Only update timestamp if exists
+            if entity_graph.has_entity(name) {
+                entity_graph.update_entity_timestamp(name, update.timestamp);
+            } else {
+                // If referenced but not exists, add it (weak inference)
+                let entity_type = entity_type_map.get(name).unwrap().clone();
+                entity_graph.add_or_update_entity(
+                    name.clone(),
+                    entity_type,
+                    update.timestamp,
+                    &format!("Referenced in: {}", update.content.title),
+                );
+            }
         }
         info!("DEBUG: Entity references added successfully");
 
-        // Create relationships (always process explicit relationships)
+        // Create explicit relationships
         info!(
             "DEBUG: Creating {} explicit relationships",
             update.creates_relationships.len()
@@ -951,14 +1240,50 @@ impl ActiveSession {
         }
         info!("DEBUG: Explicit relationships created successfully");
 
-        // Auto-generate relationships between entities in the same update
-        // Always generate relationships - internal limits (max 10 entities, max 15 relationships) protect performance
-        let total_entities = extracted_entities.len() + referenced_entities.len();
+        // Add heuristically extracted relationships
         info!(
-            "DEBUG: Auto-generating relationships for {} total entities",
-            total_entities
+            "DEBUG: Heuristically extracted {} relationships from text",
+            extracted_rels.len()
         );
-        self.auto_generate_relationships(&extracted_entities, &referenced_entities, update)?;
+        for rel in extracted_rels {
+            info!(
+                "DEBUG: Adding extracted relationship: {} -> {} ({:?})",
+                rel.from_entity, rel.to_entity, rel.relation_type
+            );
+            entity_graph.add_relationship(rel);
+        }
+
+        // Auto-generate relationships (inline implementation to avoid borrowing self)
+        use crate::core::context_update::EntityRelationship;
+        let max_entities = 10;
+        let limited_created: Vec<_> = extracted_entities.iter().take(max_entities).collect();
+
+        let mut relationship_count = 0;
+        let max_relationships = 15;
+
+        info!("DEBUG: Auto-generating relationships (inline)");
+        for (i, entity1) in limited_created.iter().enumerate() {
+            if relationship_count >= max_relationships {
+                break;
+            }
+            for entity2 in limited_created.iter().skip(i + 1) {
+                if relationship_count >= max_relationships {
+                    break;
+                }
+                if entity1.is_empty() || entity2.is_empty() || entity1 == entity2 {
+                    continue;
+                }
+
+                let relationship = EntityRelationship {
+                    from_entity: entity1.to_string(),
+                    to_entity: entity2.to_string(),
+                    relation_type: auto_rel_type.clone(),
+                    context: auto_context.clone(),
+                };
+                entity_graph.add_relationship(relationship);
+                relationship_count += 1;
+            }
+        }
         info!("DEBUG: Auto-generate relationships completed");
 
         info!("DEBUG: add_incremental_update completed successfully, returning Ok");
@@ -1144,14 +1469,15 @@ impl ActiveSession {
                     Ok(recognized_entities) => {
                         info!("NER extracted {} entities", recognized_entities.len());
                         // Convert RecognizedEntity to Vec<String>
-                        let entity_names: Vec<String> = recognized_entities
-                            .into_iter()
-                            .map(|e| e.text)
-                            .collect();
+                        let entity_names: Vec<String> =
+                            recognized_entities.into_iter().map(|e| e.text).collect();
                         return entity_names;
                     }
                     Err(e) => {
-                        info!("NER extraction failed: {}. Falling back to pattern matching", e);
+                        info!(
+                            "NER extraction failed: {}. Falling back to pattern matching",
+                            e
+                        );
                     }
                 }
             } else {
@@ -1719,17 +2045,35 @@ impl ActiveSession {
         }
 
         let tech_prefixes = ["micro", "multi", "auto", "async", "sync"];
-        if tech_prefixes.iter().any(|&prefix| entity.starts_with(prefix)) {
+        if tech_prefixes
+            .iter()
+            .any(|&prefix| entity.starts_with(prefix))
+        {
             score += 0.4;
         }
 
         // Architecture/process terms
         let important_patterns = [
-            "system", "service", "protocol", "framework", "library",
-            "engine", "platform", "server", "client", "cache",
-            "storage", "database", "memory", "thread", "process",
+            "system",
+            "service",
+            "protocol",
+            "framework",
+            "library",
+            "engine",
+            "platform",
+            "server",
+            "client",
+            "cache",
+            "storage",
+            "database",
+            "memory",
+            "thread",
+            "process",
         ];
-        if important_patterns.iter().any(|&pattern| entity.contains(pattern)) {
+        if important_patterns
+            .iter()
+            .any(|&pattern| entity.contains(pattern))
+        {
             score += 0.6;
         }
 
@@ -1751,9 +2095,20 @@ impl ActiveSession {
 
         // Look for concept indicators
         let concept_indicators = [
-            "concept", "principle", "pattern", "approach", "methodology",
-            "framework", "architecture", "design", "strategy", "technique",
-            "algorithm", "model", "abstraction", "paradigm",
+            "concept",
+            "principle",
+            "pattern",
+            "approach",
+            "methodology",
+            "framework",
+            "architecture",
+            "design",
+            "strategy",
+            "technique",
+            "algorithm",
+            "model",
+            "abstraction",
+            "paradigm",
         ];
 
         // Extract terms following concept indicators
@@ -1799,13 +2154,109 @@ impl ActiveSession {
             for cap in camelcase_regex.find_iter(text) {
                 let camelcase_term = cap.as_str();
                 if camelcase_term.len() >= 4 && camelcase_term.len() <= 20 {
-                    let common_camelcase = ["This", "That", "These", "Those", "When", "Where", "What"];
+                    let common_camelcase =
+                        ["This", "That", "These", "Those", "When", "Where", "What"];
                     if !common_camelcase.contains(&camelcase_term) {
                         concepts.insert(camelcase_term.to_lowercase());
                     }
                 }
             }
         }
+    }
+
+    /// Extract relationships between entities based on text patterns
+    fn extract_relationships_from_text(
+        &self,
+        text: &str,
+        entities: &[String],
+    ) -> Vec<crate::core::context_update::EntityRelationship> {
+        use crate::core::context_update::{EntityRelationship, RelationType};
+
+        let mut relationships = Vec::new();
+        // Analyze the full text as one block for short updates, or split by newlines
+        // Splitting by '.' can be risky with abbreviations or code snippets.
+        // For Context Updates, the description is usually one coherent thought.
+        let lower_text = text.to_lowercase();
+
+        // Map of keywords to relation types
+        let patterns = [
+            (vec![
+                "depends on", "depends", "relies on", "needs", "requires", "based on",
+                "зависи от", "изисква", "базира се на", "стъпва на", "се нуждае от"
+            ], RelationType::DependsOn),
+            (vec![
+                "implements", "extends", "inherits",
+                "имплементира", "реализира", "наследява", "разширява", "внедрява"
+            ], RelationType::Implements),
+            (vec![
+                "calls", "uses", "invokes", "connects to", "connects", "communicates with",
+                "използва", "свързва се с", "комуникира с", "работи с", "вика", "се обръща към", "има връзка с"
+            ], RelationType::RelatedTo),
+            (vec![
+                "causes", "leads to", "triggers", "results in", "generates", "starts",
+                "води до", "причинява", "създава", "генерира", "предизвиква", "отключва", "стартира"
+            ], RelationType::LeadsTo),
+            (vec![
+                "solves", "fixes", "resolves", "handles", "removes",
+                "решава", "поправя", "оправя", "фиксва", "затваря", "устранява", "премахва"
+            ], RelationType::Solves),
+        ];
+
+        // Find all entities present in the text
+        let present_entities: Vec<&String> = entities
+            .iter()
+            .filter(|e| lower_text.contains(&e.to_lowercase()))
+            .collect();
+
+        if present_entities.len() >= 2 {
+            // Check for relationships between pairs of entities
+            for (i, e1) in present_entities.iter().enumerate() {
+                for e2 in present_entities.iter().skip(i + 1) {
+                    if e1 == e2 {
+                        continue;
+                    }
+
+                    let e1_lower = e1.to_lowercase();
+                    let e2_lower = e2.to_lowercase();
+
+                    // Check which relationship pattern appears
+                    for (keywords, rel_type) in &patterns {
+                        if keywords.iter().any(|k| lower_text.contains(k)) {
+                            // Find positions
+                            let pos1 = lower_text.find(&e1_lower).unwrap_or(0);
+                            let pos2 = lower_text.find(&e2_lower).unwrap_or(0);
+
+                            // Determine direction
+                            let (from, to) = if pos1 < pos2 { (e1, e2) } else { (e2, e1) };
+
+                            // Validate that the keyword is actually BETWEEN the entities
+                            // This reduces false positives significantly
+                            let start = pos1.min(pos2) + from.len();
+                            let end = pos1.max(pos2);
+
+                            let segment = if start < end {
+                                &lower_text[start..end]
+                            } else {
+                                ""
+                            };
+
+                            if keywords.iter().any(|k| segment.contains(k)) {
+                                relationships.push(EntityRelationship {
+                                    from_entity: from.to_string(),
+                                    to_entity: to.to_string(),
+                                    relation_type: rel_type.clone(),
+                                    context: text.trim().to_string(),
+                                });
+                                // Found a relationship for this pair, move to next pair
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        relationships
     }
 
     /// Static version of extract_entities_from_text for use with CoW patterns
@@ -1819,9 +2270,10 @@ impl ActiveSession {
         // Extract capitalized terms (proper nouns)
         if let Ok(capitalized_regex) = regex::Regex::new(r"\b[A-Z][a-zA-Z-]{2,}\b") {
             let common_words = [
-                "The", "This", "That", "These", "Those", "When", "Where", "What", "Why", "How", "Who",
-                "Which", "Will", "Would", "Could", "Should", "Must", "Can", "May", "Might", "And",
-                "But", "Or", "Not", "So", "Yet", "For", "Nor", "Because", "Although", "Since", "While",
+                "The", "This", "That", "These", "Those", "When", "Where", "What", "Why", "How",
+                "Who", "Which", "Will", "Would", "Could", "Should", "Must", "Can", "May", "Might",
+                "And", "But", "Or", "Not", "So", "Yet", "For", "Nor", "Because", "Although",
+                "Since", "While",
             ];
             for cap in capitalized_regex.find_iter(text) {
                 let original = cap.as_str();
@@ -2081,6 +2533,9 @@ impl ActiveSession {
 
     /// Get the current name and description
     pub fn get_metadata(&self) -> (Option<String>, Option<String>) {
-        (self.metadata.name.clone(), self.metadata.description.clone())
+        (
+            self.metadata.name.clone(),
+            self.metadata.description.clone(),
+        )
     }
 }

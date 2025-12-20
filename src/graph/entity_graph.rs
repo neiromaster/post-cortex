@@ -267,6 +267,19 @@ impl SimpleEntityGraph {
         }
     }
 
+    /// Check if entity exists in the graph
+    pub fn has_entity(&self, name: &str) -> bool {
+        self.entities.contains_key(name)
+    }
+
+    /// Update entity timestamp without changing other properties
+    pub fn update_entity_timestamp(&mut self, name: &str, timestamp: DateTime<Utc>) {
+        if let Some(entity) = self.entities.get_mut(name) {
+            entity.last_mentioned = timestamp;
+            entity.mention_count += 1;
+        }
+    }
+
     /// Add or update entity - maintains same API as original SimpleEntityGraph
     pub fn add_or_update_entity(
         &mut self,

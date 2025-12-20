@@ -309,13 +309,28 @@ impl SurrealDBStorage {
 
             -- Relation tables for graph edges (schemaless for flexibility)
             DEFINE TABLE IF NOT EXISTS required_by SCHEMALESS;
+            DEFINE INDEX IF NOT EXISTS idx_required_by_session ON required_by FIELDS session_id;
+
             DEFINE TABLE IF NOT EXISTS leads_to SCHEMALESS;
+            DEFINE INDEX IF NOT EXISTS idx_leads_to_session ON leads_to FIELDS session_id;
+
             DEFINE TABLE IF NOT EXISTS related_to SCHEMALESS;
+            DEFINE INDEX IF NOT EXISTS idx_related_to_session ON related_to FIELDS session_id;
+
             DEFINE TABLE IF NOT EXISTS conflicts_with SCHEMALESS;
+            DEFINE INDEX IF NOT EXISTS idx_conflicts_with_session ON conflicts_with FIELDS session_id;
+
             DEFINE TABLE IF NOT EXISTS depends_on SCHEMALESS;
+            DEFINE INDEX IF NOT EXISTS idx_depends_on_session ON depends_on FIELDS session_id;
+
             DEFINE TABLE IF NOT EXISTS implements SCHEMALESS;
+            DEFINE INDEX IF NOT EXISTS idx_implements_session ON implements FIELDS session_id;
+
             DEFINE TABLE IF NOT EXISTS caused_by SCHEMALESS;
+            DEFINE INDEX IF NOT EXISTS idx_caused_by_session ON caused_by FIELDS session_id;
+
             DEFINE TABLE IF NOT EXISTS solves SCHEMALESS;
+            DEFINE INDEX IF NOT EXISTS idx_solves_session ON solves FIELDS session_id;
 
             -- Embeddings table with vector support
             DEFINE TABLE IF NOT EXISTS embedding SCHEMAFULL;
@@ -376,9 +391,29 @@ impl SurrealDBStorage {
         }
     }
 
-    /// Create entity ID from session and name
+    /// Generate a deterministic ID for a relationship to avoid duplicates
+    fn relation_id(
+        session_id: Uuid,
+        from_entity: &str,
+        to_entity: &str,
+        rel_type: &RelationType,
+    ) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        session_id.hash(&mut hasher);
+        from_entity.hash(&mut hasher);
+        to_entity.hash(&mut hasher);
+        format!("{:?}", rel_type).hash(&mut hasher);
+        let hash = hasher.finish();
+
+        format!("{}_{:x}", session_id, hash)
+    }
+
+    /// Generate a deterministic ID for an entity
     fn entity_id(session_id: Uuid, name: &str) -> String {
-        format!("{}_{}", session_id, name.replace(' ', "_").to_lowercase())
+        format!("{}_{}", session_id, name)
     }
 
     /// Parse RFC3339 datetime string, fallback to current time on error
@@ -712,20 +747,52 @@ impl Storage for SurrealDBStorage {
             "SurrealDBStorage: Loading updates for session {}",
             session_id
         );
+        info!(
+            "SurrealDBStorage: Fetching updates for session {}...",
+            session_id
+        );
 
-        let mut response = self
-            .db
-            .query("SELECT * FROM context_update WHERE session_id = $session_id ORDER BY timestamp")
-            .bind(("session_id", session_id.to_string()))
-            .await?;
+        let mut updates = Vec::new();
+        let mut start = 0;
+        let limit = 1000;
 
-        let records: Vec<ContextUpdateRecord> = response.take(0)?;
+        loop {
+            let mut response = self
+                .db
+                .query("SELECT * FROM context_update WHERE session_id = $session_id ORDER BY timestamp LIMIT $limit START $start")
+                .bind(("session_id", session_id.to_string()))
+                .bind(("limit", limit))
+                .bind(("start", start))
+                .await?;
 
-        // Parse update_data JSON back to ContextUpdate
-        let updates: Vec<ContextUpdate> = records
-            .into_iter()
-            .filter_map(|r| serde_json::from_value(r.update_data).ok())
-            .collect();
+            let records: Vec<ContextUpdateRecord> = response.take(0)?;
+            let count = records.len();
+
+            if count == 0 {
+                break;
+            }
+
+            // Parse update_data JSON back to ContextUpdate
+            for r in records {
+                if let Ok(update) = serde_json::from_value(r.update_data) {
+                    updates.push(update);
+                }
+            }
+
+            if updates.len() % 1000 == 0 {
+                info!(
+                    "SurrealDBStorage: Loaded {} updates for session {}...",
+                    updates.len(),
+                    session_id
+                );
+            }
+
+            if count < limit {
+                break;
+            }
+
+            start += count;
+        }
 
         debug!("SurrealDBStorage: Loaded {} updates", updates.len());
 
@@ -1081,26 +1148,58 @@ impl GraphStorage for SurrealDBStorage {
     }
 
     async fn list_entities(&self, session_id: Uuid) -> Result<Vec<EntityData>> {
-        let mut response = self
-            .db
-            .query("SELECT * FROM entity WHERE session_id = $session_id ORDER BY importance_score DESC")
-            .bind(("session_id", session_id.to_string()))
-            .await?;
+        info!(
+            "SurrealDBStorage: Fetching entities for session {}...",
+            session_id
+        );
+        let mut all_entities = Vec::new();
+        let mut start = 0;
+        let limit = 1000;
 
-        let records: Vec<EntityRecord> = response.take(0)?;
+        loop {
+            let mut response = self
+                .db
+                .query("SELECT * FROM entity WHERE session_id = $session_id ORDER BY importance_score DESC LIMIT $limit START $start")
+                .bind(("session_id", session_id.to_string()))
+                .bind(("limit", limit))
+                .bind(("start", start))
+                .await?;
 
-        Ok(records
-            .into_iter()
-            .map(|r| EntityData {
-                name: r.name,
-                entity_type: Self::parse_entity_type(&r.entity_type),
-                first_mentioned: Self::parse_datetime(&r.first_mentioned),
-                last_mentioned: Self::parse_datetime(&r.last_mentioned),
-                mention_count: r.mention_count,
-                importance_score: r.importance_score,
-                description: r.description,
-            })
-            .collect())
+            let records: Vec<EntityRecord> = response.take(0)?;
+            let count = records.len();
+
+            if count == 0 {
+                break;
+            }
+
+            for r in records {
+                all_entities.push(EntityData {
+                    name: r.name,
+                    entity_type: Self::parse_entity_type(&r.entity_type),
+                    first_mentioned: Self::parse_datetime(&r.first_mentioned),
+                    last_mentioned: Self::parse_datetime(&r.last_mentioned),
+                    mention_count: r.mention_count,
+                    importance_score: r.importance_score,
+                    description: r.description,
+                });
+            }
+
+            if all_entities.len() % 1000 == 0 {
+                info!(
+                    "SurrealDBStorage: Loaded {} entities for session {}...",
+                    all_entities.len(),
+                    session_id
+                );
+            }
+
+            if count < limit {
+                break;
+            }
+
+            start += count;
+        }
+
+        Ok(all_entities)
     }
 
     async fn delete_entity(&self, session_id: Uuid, name: &str) -> Result<()> {
@@ -1122,11 +1221,18 @@ impl GraphStorage for SurrealDBStorage {
         let from_id = Self::entity_id(session_id, &relationship.from_entity);
         let to_id = Self::entity_id(session_id, &relationship.to_entity);
         let table = Self::relation_table_name(&relationship.relation_type);
+        let rel_id = Self::relation_id(
+            session_id,
+            &relationship.from_entity,
+            &relationship.to_entity,
+            &relationship.relation_type,
+        );
 
-        // Create relationship using RELATE (backticks needed for IDs with dashes/special chars)
+        // Use UPSERT for the relationship table with deterministic ID
+        // Note: In SurrealDB, for graph edges, you can also UPSERT the edge table directly
         let query = format!(
-            "RELATE entity:`{}`->{}->entity:`{}` SET context = $context, session_id = $session_id",
-            from_id, table, to_id
+            "UPSERT {}:`{}` SET in = entity:`{}`, out = entity:`{}`, context = $context, session_id = $session_id",
+            table, rel_id, from_id, to_id
         );
 
         self.db
@@ -1355,6 +1461,10 @@ impl GraphStorage for SurrealDBStorage {
 impl SurrealDBStorage {
     /// Load all relationships for a session from native graph
     async fn load_all_relationships(&self, session_id: Uuid) -> Result<Vec<EntityRelationship>> {
+        info!(
+            "SurrealDBStorage: Fetching relationships for session {}...",
+            session_id
+        );
         let mut all_relationships = Vec::new();
 
         // Query each relation type table
@@ -1370,40 +1480,77 @@ impl SurrealDBStorage {
         ];
 
         for (table, rel_type) in relation_tables {
-            let query = format!(
-                r#"
-                SELECT
-                    in.name AS from_entity,
-                    out.name AS to_entity,
-                    context
-                FROM {}
-                WHERE session_id = $session_id
-                "#,
+            debug!(
+                "SurrealDBStorage: Processing relationship table '{}'...",
                 table
             );
+            let mut start = 0;
+            let limit = 1000;
 
-            let mut response = self
-                .db
-                .query(query)
-                .bind(("session_id", session_id.to_string()))
-                .await?;
+            loop {
+                let query = format!(
+                    r#"
+                    SELECT
+                        in.name AS from_entity,
+                        out.name AS to_entity,
+                        context
+                    FROM {}
+                    WHERE session_id = $session_id
+                    LIMIT $limit START $start
+                    "#,
+                    table
+                );
 
-            #[derive(Deserialize, SurrealValue)]
-            struct RelRecord {
-                from_entity: String,
-                to_entity: String,
-                context: String,
-            }
+                let mut response = self
+                    .db
+                    .query(query)
+                    .bind(("session_id", session_id.to_string()))
+                    .bind(("limit", limit))
+                    .bind(("start", start))
+                    .await?;
 
-            let records: Vec<RelRecord> = response.take(0).unwrap_or_default();
+                #[derive(Deserialize, SurrealValue)]
+                struct RelRecord {
+                    from_entity: String,
+                    to_entity: String,
+                    context: String,
+                }
 
-            for record in records {
-                all_relationships.push(EntityRelationship {
-                    from_entity: record.from_entity,
-                    to_entity: record.to_entity,
-                    relation_type: rel_type.clone(),
-                    context: record.context,
-                });
+                let records: Vec<RelRecord> = response.take(0).unwrap_or_default();
+                let count = records.len();
+
+                if count == 0 {
+                    break;
+                }
+
+                if count > 0 {
+                    info!(
+                        "SurrealDBStorage: Loaded {} relationships from '{}' (start: {})...",
+                        count, table, start
+                    );
+                }
+
+                for record in records {
+                    all_relationships.push(EntityRelationship {
+                        from_entity: record.from_entity,
+                        to_entity: record.to_entity,
+                        relation_type: rel_type.clone(),
+                        context: record.context,
+                    });
+                }
+
+                if all_relationships.len() > 0 && all_relationships.len() % 1000 == 0 {
+                    debug!(
+                        "SurrealDBStorage: Loaded {} relationships...",
+                        all_relationships.len()
+                    );
+                }
+
+                if count < limit {
+                    break;
+                }
+
+                start += count;
             }
         }
 
@@ -2092,6 +2239,7 @@ impl SurrealDBStorage {
         info!("SurrealDBStorage: Exporting {} sessions", session_ids.len());
 
         for session_id in session_ids {
+            info!("SurrealDBStorage: Processing session {}...", session_id);
             match self.export_session_data(session_id).await {
                 Ok(session_data) => export.sessions.push(session_data),
                 Err(e) => {
@@ -2247,27 +2395,57 @@ impl SurrealDBStorage {
     }
 
     /// Export all embeddings from the database
-    async fn export_all_embeddings(&self) -> Result<Vec<crate::storage::export_import::ExportedEmbedding>> {
+    async fn export_all_embeddings(
+        &self,
+    ) -> Result<Vec<crate::storage::export_import::ExportedEmbedding>> {
         use crate::storage::export_import::ExportedEmbedding;
 
-        let result: Vec<EmbeddingRecord> = self
-            .db
-            .query("SELECT * FROM embedding")
-            .await?
-            .take(0)?;
+        let mut all_embeddings = Vec::new();
+        let mut start = 0;
+        let limit = 500; // Embeddings are large, use smaller batch size
 
-        Ok(result
-            .into_iter()
-            .map(|r| ExportedEmbedding {
-                content_id: r.content_id,
-                session_id: r.session_id,
-                vector: r.vector,
-                text: r.text,
-                content_type: r.content_type,
-                timestamp: r.timestamp,
-                metadata: r.metadata,
-            })
-            .collect())
+        loop {
+            let mut response = self
+                .db
+                .query("SELECT * FROM embedding LIMIT $limit START $start")
+                .bind(("limit", limit))
+                .bind(("start", start))
+                .await?;
+
+            let records: Vec<EmbeddingRecord> = response.take(0)?;
+            let count = records.len();
+
+            if count == 0 {
+                break;
+            }
+
+            for r in records {
+                all_embeddings.push(ExportedEmbedding {
+                    content_id: r.content_id,
+                    session_id: r.session_id,
+                    vector: r.vector,
+                    text: r.text,
+                    content_type: r.content_type,
+                    timestamp: r.timestamp,
+                    metadata: r.metadata,
+                });
+            }
+
+            if all_embeddings.len() % 500 == 0 {
+                info!(
+                    "SurrealDBStorage: Exported {} embeddings...",
+                    all_embeddings.len()
+                );
+            }
+
+            if count < limit {
+                break;
+            }
+
+            start += count;
+        }
+
+        Ok(all_embeddings)
     }
 
     /// Export embeddings for specific sessions
@@ -2278,25 +2456,53 @@ impl SurrealDBStorage {
         use crate::storage::export_import::ExportedEmbedding;
 
         let session_id_strs: Vec<String> = session_ids.iter().map(|id| id.to_string()).collect();
-        let result: Vec<EmbeddingRecord> = self
-            .db
-            .query("SELECT * FROM embedding WHERE session_id IN $session_ids")
-            .bind(("session_ids", session_id_strs))
-            .await?
-            .take(0)?;
+        let mut all_embeddings = Vec::new();
+        let mut start = 0;
+        let limit = 500;
 
-        Ok(result
-            .into_iter()
-            .map(|r| ExportedEmbedding {
-                content_id: r.content_id,
-                session_id: r.session_id,
-                vector: r.vector,
-                text: r.text,
-                content_type: r.content_type,
-                timestamp: r.timestamp,
-                metadata: r.metadata,
-            })
-            .collect())
+        loop {
+            let mut response = self
+                .db
+                .query("SELECT * FROM embedding WHERE session_id IN $session_ids LIMIT $limit START $start")
+                .bind(("session_ids", session_id_strs.clone()))
+                .bind(("limit", limit))
+                .bind(("start", start))
+                .await?;
+
+            let records: Vec<EmbeddingRecord> = response.take(0)?;
+            let count = records.len();
+
+            if count == 0 {
+                break;
+            }
+
+            for r in records {
+                all_embeddings.push(ExportedEmbedding {
+                    content_id: r.content_id,
+                    session_id: r.session_id,
+                    vector: r.vector,
+                    text: r.text,
+                    content_type: r.content_type,
+                    timestamp: r.timestamp,
+                    metadata: r.metadata,
+                });
+            }
+
+            if all_embeddings.len() % 500 == 0 {
+                info!(
+                    "SurrealDBStorage: Exported {} session embeddings...",
+                    all_embeddings.len()
+                );
+            }
+
+            if count < limit {
+                break;
+            }
+
+            start += count;
+        }
+
+        Ok(all_embeddings)
     }
 
     /// Import embeddings from export data
