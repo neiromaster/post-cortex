@@ -970,6 +970,66 @@ async fn vectorize_all() -> Result<(), String> {
 // Export/Import Handlers
 // ============================================================================
 
+use post_cortex::daemon::DaemonConfig as DaemonConfigAlias;
+
+async fn export_from_rocksdb(
+    daemon_config: &DaemonConfigAlias,
+    options: &ExportOptions,
+    workspace: Option<String>,
+    session: Option<Vec<String>>,
+) -> Result<post_cortex::storage::export_import::ExportData, String> {
+    let data_dir = &daemon_config.data_directory;
+    println!("Source: RocksDB at {}", data_dir);
+
+    let storage = RealRocksDBStorage::new(data_dir).await.map_err(|e| {
+        let err_str = e.to_string();
+        if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
+            format!(
+                "Database is locked by another process (likely the daemon).\n\
+                     \n\
+                     Please stop the daemon first:\n\
+                     \n\
+                     Option 1: Stop via CLI\n\
+                     $ pkill -f 'pcx start'\n\
+                     \n\
+                     Option 2: Stop via launchctl (macOS)\n\
+                     $ launchctl unload ~/Library/LaunchAgents/com.juliusml.post-cortex.plist\n\
+                     \n\
+                     Then retry the export command."
+            )
+        } else {
+            format!("Failed to open storage: {}", e)
+        }
+    })?;
+
+    if let Some(workspace_id) = workspace {
+        let uuid =
+            Uuid::parse_str(&workspace_id).map_err(|e| format!("Invalid workspace UUID: {}", e))?;
+        println!("Exporting workspace {}...", workspace_id);
+        storage
+            .export_workspace(uuid, options)
+            .await
+            .map_err(|e| format!("Export failed: {}", e))
+    } else if let Some(session_ids) = session {
+        let uuids: Result<Vec<Uuid>, _> = session_ids
+            .iter()
+            .map(|s| Uuid::parse_str(s).map_err(|e| format!("Invalid session UUID {}: {}", s, e)))
+            .collect();
+        let uuids = uuids?;
+        println!("Exporting {} session(s)...", uuids.len());
+        storage
+            .export_sessions(uuids, options)
+            .await
+            .map_err(|e| format!("Export failed: {}", e))
+    } else {
+        println!("Exporting all data...");
+        storage
+            .export_full(options)
+            .await
+            .map_err(|e| format!("Export failed: {}", e))
+    }
+}
+
 async fn handle_export(
     output: String,
     compress: Option<String>,
@@ -1003,27 +1063,6 @@ async fn handle_export(
     println!("Initializing export...");
 
     let daemon_config = DaemonConfig::load();
-    let data_dir = daemon_config.data_directory;
-    let storage = RealRocksDBStorage::new(&data_dir).await.map_err(|e| {
-        let err_str = e.to_string();
-        if err_str.contains("LOCK") || err_str.contains("Resource temporarily unavailable") {
-            format!(
-                "Database is locked by another process (likely the daemon).\n\
-                     \n\
-                     Please stop the daemon first:\n\
-                     \n\
-                     Option 1: Stop via CLI\n\
-                     $ pkill -f 'pcx start'\n\
-                     \n\
-                     Option 2: Stop via launchctl (macOS)\n\
-                     $ launchctl unload ~/Library/LaunchAgents/com.juliusml.post-cortex.plist\n\
-                     \n\
-                     Then retry the export command."
-            )
-        } else {
-            format!("Failed to open storage: {}", e)
-        }
-    })?;
 
     // Determine compression
     let compression = if let Some(ref c) = compress {
@@ -1039,36 +1078,64 @@ async fn handle_export(
         pretty,
     };
 
-    // Perform export based on options
-    let export_data = if let Some(workspace_id) = workspace {
-        // Export specific workspace
-        let uuid =
-            Uuid::parse_str(&workspace_id).map_err(|e| format!("Invalid workspace UUID: {}", e))?;
-        println!("Exporting workspace {}...", workspace_id);
-        storage
-            .export_workspace(uuid, &options)
-            .await
-            .map_err(|e| format!("Export failed: {}", e))?
-    } else if let Some(session_ids) = session {
-        // Export specific sessions
-        let uuids: Result<Vec<Uuid>, _> = session_ids
-            .iter()
-            .map(|s| Uuid::parse_str(s).map_err(|e| format!("Invalid session UUID {}: {}", s, e)))
-            .collect();
-        let uuids = uuids?;
-        println!("Exporting {} session(s)...", uuids.len());
-        storage
-            .export_sessions(uuids, &options)
-            .await
-            .map_err(|e| format!("Export failed: {}", e))?
+    // Check storage backend configuration
+    #[cfg(feature = "surrealdb-storage")]
+    let use_surrealdb = daemon_config.storage_backend == "surrealdb";
+    #[cfg(not(feature = "surrealdb-storage"))]
+    let use_surrealdb = false;
+
+    // Perform export based on storage backend
+    #[cfg(feature = "surrealdb-storage")]
+    let export_data = if use_surrealdb {
+        let endpoint = daemon_config
+            .surrealdb_endpoint
+            .as_ref()
+            .ok_or("SurrealDB endpoint not configured in daemon.toml")?;
+
+        println!("Source: SurrealDB at {}", endpoint);
+
+        let storage = SurrealDBStorage::new(
+            endpoint,
+            daemon_config.surrealdb_username.as_deref(),
+            daemon_config.surrealdb_password.as_deref(),
+            Some(&daemon_config.surrealdb_namespace),
+            Some(&daemon_config.surrealdb_database),
+        )
+        .await
+        .map_err(|e| format!("Failed to connect to SurrealDB: {}", e))?;
+
+        if let Some(workspace_id) = workspace {
+            let uuid = Uuid::parse_str(&workspace_id)
+                .map_err(|e| format!("Invalid workspace UUID: {}", e))?;
+            println!("Exporting workspace {}...", workspace_id);
+            storage
+                .export_workspace(uuid, &options)
+                .await
+                .map_err(|e| format!("Export failed: {}", e))?
+        } else if let Some(session_ids) = session {
+            let uuids: Result<Vec<Uuid>, _> = session_ids
+                .iter()
+                .map(|s| Uuid::parse_str(s).map_err(|e| format!("Invalid session UUID {}: {}", s, e)))
+                .collect();
+            let uuids = uuids?;
+            println!("Exporting {} session(s)...", uuids.len());
+            storage
+                .export_sessions(uuids, &options)
+                .await
+                .map_err(|e| format!("Export failed: {}", e))?
+        } else {
+            println!("Exporting all data...");
+            storage
+                .export_full(&options)
+                .await
+                .map_err(|e| format!("Export failed: {}", e))?
+        }
     } else {
-        // Full export
-        println!("Exporting all data...");
-        storage
-            .export_full(&options)
-            .await
-            .map_err(|e| format!("Export failed: {}", e))?
+        export_from_rocksdb(&daemon_config, &options, workspace, session).await?
     };
+
+    #[cfg(not(feature = "surrealdb-storage"))]
+    let export_data = export_from_rocksdb(&daemon_config, &options, workspace, session).await?;
 
     // Write to file
     let path = Path::new(&output);

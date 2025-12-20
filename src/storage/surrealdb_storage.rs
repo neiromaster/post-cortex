@@ -2062,6 +2062,138 @@ impl SurrealDBStorage {
 
         Ok(result)
     }
+
+    /// Export all data from the database
+    pub async fn export_full(
+        &self,
+        options: &crate::storage::export_import::ExportOptions,
+    ) -> Result<crate::storage::export_import::ExportData> {
+        use crate::storage::export_import::{ExportData, ExportType, ExportedSession, ExportedWorkspace};
+
+        info!("SurrealDBStorage: Starting full database export");
+
+        let mut export = ExportData::new(ExportType::Full, options.compression);
+
+        // Export all sessions
+        let session_ids = self.list_sessions().await?;
+        info!("SurrealDBStorage: Exporting {} sessions", session_ids.len());
+
+        for session_id in session_ids {
+            match self.export_session_data(session_id).await {
+                Ok(session_data) => export.sessions.push(session_data),
+                Err(e) => {
+                    info!("SurrealDBStorage: Warning: Failed to export session {}: {}", session_id, e);
+                }
+            }
+        }
+
+        // Export all workspaces
+        let workspaces = self.list_workspaces().await?;
+        info!("SurrealDBStorage: Exporting {} workspaces", workspaces.len());
+        export.workspaces = workspaces.into_iter().map(ExportedWorkspace::from).collect();
+
+        // Export checkpoints if requested
+        if options.include_checkpoints {
+            export.checkpoints = self.list_checkpoints().await?;
+            info!("SurrealDBStorage: Exported {} checkpoints", export.checkpoints.len());
+        }
+
+        export.update_counts();
+        info!(
+            "SurrealDBStorage: Export complete: {} sessions, {} workspaces, {} updates",
+            export.metadata.session_count,
+            export.metadata.workspace_count,
+            export.metadata.update_count
+        );
+
+        Ok(export)
+    }
+
+    /// Export specific sessions
+    pub async fn export_sessions(
+        &self,
+        session_ids: Vec<Uuid>,
+        options: &crate::storage::export_import::ExportOptions,
+    ) -> Result<crate::storage::export_import::ExportData> {
+        use crate::storage::export_import::{ExportData, ExportType};
+
+        info!("SurrealDBStorage: Starting selective export of {} sessions", session_ids.len());
+
+        let mut export = ExportData::new(
+            ExportType::SelectiveSessions {
+                session_ids: session_ids.clone(),
+            },
+            options.compression,
+        );
+
+        for session_id in session_ids {
+            match self.export_session_data(session_id).await {
+                Ok(session_data) => export.sessions.push(session_data),
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to export session {}: {}",
+                        session_id,
+                        e
+                    ));
+                }
+            }
+        }
+
+        export.update_counts();
+        Ok(export)
+    }
+
+    /// Export a workspace and all its sessions
+    pub async fn export_workspace(
+        &self,
+        workspace_id: Uuid,
+        options: &crate::storage::export_import::ExportOptions,
+    ) -> Result<crate::storage::export_import::ExportData> {
+        use crate::storage::export_import::{ExportData, ExportType, ExportedWorkspace};
+
+        info!("SurrealDBStorage: Starting workspace export for {}", workspace_id);
+
+        let mut export = ExportData::new(
+            ExportType::SelectiveWorkspace { workspace_id },
+            options.compression,
+        );
+
+        // Find the workspace
+        let workspaces = self.list_workspaces().await?;
+        let workspace = workspaces
+            .into_iter()
+            .find(|w| w.id == workspace_id)
+            .ok_or_else(|| anyhow::anyhow!("Workspace {} not found", workspace_id))?;
+
+        // Export the workspace
+        export.workspaces.push(ExportedWorkspace::from(workspace.clone()));
+
+        // Export all sessions in the workspace
+        for (session_id, _role) in &workspace.sessions {
+            match self.export_session_data(*session_id).await {
+                Ok(session_data) => export.sessions.push(session_data),
+                Err(e) => {
+                    info!(
+                        "SurrealDBStorage: Warning: Failed to export session {} from workspace: {}",
+                        session_id, e
+                    );
+                }
+            }
+        }
+
+        export.update_counts();
+        Ok(export)
+    }
+
+    /// Export a single session with its updates
+    async fn export_session_data(&self, session_id: Uuid) -> Result<crate::storage::export_import::ExportedSession> {
+        use crate::storage::export_import::ExportedSession;
+
+        let session = self.load_session(session_id).await?;
+        let updates = self.load_session_updates(session_id).await?;
+
+        Ok(ExportedSession { session, updates })
+    }
 }
 
 // ============================================================================
