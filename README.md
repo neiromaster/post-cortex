@@ -15,6 +15,7 @@ Post-Cortex is an MCP server that gives AI assistants long-term memory. It store
 - **Knowledge Graph** - Automatic entity and relationship extraction
 - **Privacy-First** - All processing runs locally, no external APIs
 - **Fast** - Lock-free Rust architecture, <10ms queries
+- **Flexible Storage** - RocksDB (embedded) or SurrealDB (graph database)
 
 ## Installation
 
@@ -83,7 +84,7 @@ update_conversation_context(
 )
 ```
 
-**Interaction types:** `qa`, `decision_made`, `problem_solved`, `code_change`
+**Interaction types:** `qa`, `decision_made`, `problem_solved`, `code_change`, `requirement_added`, `concept_defined`
 
 ### `semantic_search` - Find Related Content
 
@@ -193,6 +194,40 @@ pcx import --input backup.json --overwrite
 
 **Compression:** Auto-detected from extension (`.json`, `.json.gz`, `.json.zst`)
 
+## Storage Backends
+
+### RocksDB (Default)
+
+Embedded key-value store, zero configuration:
+
+```bash
+pcx start  # Uses ~/.post-cortex/data
+```
+
+### SurrealDB
+
+Native graph database with advanced query capabilities:
+
+1. Start SurrealDB:
+```bash
+surreal start --user root --pass root
+```
+
+2. Configure `~/.post-cortex/daemon.toml`:
+```toml
+storage_backend = "surrealdb"
+surrealdb_endpoint = "ws://localhost:8000"
+surrealdb_username = "root"
+surrealdb_password = "root"
+surrealdb_namespace = "post_cortex"
+surrealdb_database = "main"
+```
+
+3. Start Post-Cortex:
+```bash
+pcx start
+```
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -200,6 +235,8 @@ pcx import --input backup.json --overwrite
 | `PC_HOST` | 127.0.0.1 | Bind address |
 | `PC_PORT` | 3737 | Port |
 | `PC_DATA_DIR` | ~/.post-cortex/data | Storage location |
+| `PC_STORAGE_BACKEND` | rocksdb | Storage: `rocksdb` or `surrealdb` |
+| `PC_SURREALDB_ENDPOINT` | - | SurrealDB WebSocket URL |
 
 ## Performance
 
@@ -212,7 +249,10 @@ pcx import --input backup.json --overwrite
 ## Development
 
 ```bash
-# Build
+# Build with all features
+cargo build --release --features "embeddings,surrealdb-storage"
+
+# Build with RocksDB only
 cargo build --release --features embeddings
 
 # Test
