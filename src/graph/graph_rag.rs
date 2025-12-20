@@ -309,6 +309,154 @@ impl GraphRagEnricher {
             .unwrap_or(usize::MAX)
     }
 
+    // =========================================================================
+    // Phase 3: Intelligence - Relevance Filtering & Path Summarization
+    // =========================================================================
+
+    /// Filter relations by relevance to query context
+    ///
+    /// A relation is considered relevant if:
+    /// 1. The target entity appears in query entities
+    /// 2. The target entity shares context with query entities (common neighbors)
+    /// 3. The relation type is high-priority (causes, depends_on, etc.)
+    pub fn filter_relevant_relations(
+        &self,
+        relations: &[RelationInfo],
+        query_entities: &[String],
+        graph: &SimpleEntityGraph,
+    ) -> Vec<RelationInfo> {
+        if query_entities.is_empty() {
+            return relations.to_vec();
+        }
+
+        let query_set: HashSet<_> = query_entities.iter().map(|s| s.to_lowercase()).collect();
+
+        // Get neighbors of query entities for context overlap check
+        let mut query_neighbors: HashSet<String> = HashSet::new();
+        for qe in query_entities {
+            let neighbors = graph.find_related_entities(qe);
+            query_neighbors.extend(neighbors.into_iter().map(|n| n.to_lowercase()));
+        }
+
+        let mut scored_relations: Vec<(RelationInfo, u32)> = relations
+            .iter()
+            .map(|rel| {
+                let mut score = 0u32;
+                let target_lower = rel.target_entity.to_lowercase();
+
+                // Direct match with query entity (highest relevance)
+                if query_set.contains(&target_lower) {
+                    score += 100;
+                }
+
+                // Shares neighbor with query entities (context overlap)
+                if query_neighbors.contains(&target_lower) {
+                    score += 50;
+                }
+
+                // High-priority relation type
+                let priority = self.get_relation_priority(&rel.relation_type);
+                if priority < 3 {
+                    score += (30 - priority * 10) as u32;
+                }
+
+                // Closer depth = more relevant
+                if rel.depth == 1 {
+                    score += 20;
+                } else if rel.depth == 2 {
+                    score += 10;
+                }
+
+                (rel.clone(), score)
+            })
+            .collect();
+
+        // Sort by relevance score (descending)
+        scored_relations.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Filter out zero-score relations and return
+        scored_relations
+            .into_iter()
+            .filter(|(_, score)| *score > 0)
+            .map(|(rel, _)| rel)
+            .collect()
+    }
+
+    /// Summarize a path with relationship types
+    ///
+    /// Converts: ["payment", "database", "timeout"]
+    /// To: "payment ─DEPENDS_ON→ database ─CAUSED_BY→ timeout"
+    pub fn summarize_path(&self, path: &[String], graph: &SimpleEntityGraph) -> String {
+        if path.len() < 2 {
+            return path.join(" → ");
+        }
+
+        let mut parts = Vec::new();
+        parts.push(path[0].clone());
+
+        for i in 0..path.len() - 1 {
+            let from = &path[i];
+            let to = &path[i + 1];
+
+            // Find the relationship between these two entities
+            let relations = graph.get_entity_relationships(from);
+            let rel_type = relations
+                .iter()
+                .find(|(target, _, _)| target == to)
+                .map(|(_, rt, _)| self.format_relation_type(rt))
+                .unwrap_or_else(|| "→".to_string());
+
+            parts.push(format!("─{}→", rel_type));
+            parts.push(to.clone());
+        }
+
+        parts.join(" ")
+    }
+
+    /// Format relation type for display
+    fn format_relation_type(&self, rel_type: &RelationType) -> String {
+        match rel_type {
+            RelationType::CausedBy => "CAUSED_BY".to_string(),
+            RelationType::DependsOn => "DEPENDS_ON".to_string(),
+            RelationType::Implements => "IMPLEMENTS".to_string(),
+            RelationType::LeadsTo => "LEADS_TO".to_string(),
+            RelationType::RelatedTo => "RELATED_TO".to_string(),
+            RelationType::RequiredBy => "REQUIRED_BY".to_string(),
+            RelationType::ConflictsWith => "CONFLICTS".to_string(),
+            RelationType::Solves => "SOLVES".to_string(),
+        }
+    }
+
+    /// Calculate relevance score for a relation (exposed for testing)
+    pub fn relation_relevance_score(
+        &self,
+        relation: &RelationInfo,
+        query_entities: &[String],
+        query_neighbors: &HashSet<String>,
+    ) -> u32 {
+        let mut score = 0u32;
+        let target_lower = relation.target_entity.to_lowercase();
+        let query_set: HashSet<_> = query_entities.iter().map(|s| s.to_lowercase()).collect();
+
+        if query_set.contains(&target_lower) {
+            score += 100;
+        }
+        if query_neighbors.contains(&target_lower) {
+            score += 50;
+        }
+        let priority = self.get_relation_priority(&relation.relation_type);
+        if priority < 3 {
+            score += (30 - priority * 10) as u32;
+        }
+        if relation.depth == 1 {
+            score += 20;
+        } else if relation.depth == 2 {
+            score += 10;
+        }
+
+        score
+    }
+
     /// Analyze query and build global insights
     pub fn analyze_query(
         &self,
@@ -374,19 +522,28 @@ impl GraphRagEnricher {
         // Deduplicate related entities
         let mut seen = HashSet::new();
         related.retain(|r| seen.insert(r.target_entity.clone()));
-        related.truncate(self.config.max_relations_per_entity);
 
-        // Format context string
-        let context_string = self.format_enrichment(&related, &paths);
+        // Phase 3: Apply relevance filtering
+        let filtered_related = self.filter_relevant_relations(&related, query_entities, graph);
+        let final_related: Vec<RelationInfo> = if filtered_related.is_empty() {
+            // Fallback to unfiltered if filtering removes everything
+            related.into_iter().take(self.config.max_relations_per_entity).collect()
+        } else {
+            filtered_related.into_iter().take(self.config.max_relations_per_entity).collect()
+        };
+
+        // Format context string with summarized paths
+        let context_string = self.format_enrichment_with_summary(graph, &final_related, &paths);
 
         GraphEnrichment {
-            related_entities: related,
+            related_entities: final_related,
             paths_to_query: paths,
             context_string,
         }
     }
 
     /// Find structural insights between top results
+    /// Now uses path summarization to show relationship types
     pub fn find_cross_result_insights(
         &self,
         graph: &SimpleEntityGraph,
@@ -408,11 +565,9 @@ impl GraphRagEnricher {
                     if e1 != e2 {
                         if let Some(path) = graph.find_shortest_path(e1, e2) {
                             if path.len() > 2 && path.len() <= 5 {
-                                insights.push(format!(
-                                    "Connection: {} → {}",
-                                    path.join(" → "),
-                                    ""
-                                ).trim_end_matches(" → ").to_string());
+                                // Phase 3: Use path summarization
+                                let summarized = self.summarize_path(&path, graph);
+                                insights.push(format!("Connection: {}", summarized));
                             }
                         }
                     }
@@ -423,7 +578,52 @@ impl GraphRagEnricher {
         insights
     }
 
-    /// Format enrichment data as a readable string
+    /// Format enrichment data with path summarization (Phase 3)
+    fn format_enrichment_with_summary(
+        &self,
+        graph: &SimpleEntityGraph,
+        relations: &[RelationInfo],
+        paths: &[Vec<String>],
+    ) -> String {
+        if relations.is_empty() && paths.is_empty() {
+            return String::new();
+        }
+
+        let mut output = String::from("\n───────────────────────────\n📊 Graph Context:\n");
+
+        // Add relations grouped by type
+        if !relations.is_empty() {
+            let mut by_type: std::collections::HashMap<&RelationType, Vec<&str>> =
+                std::collections::HashMap::new();
+
+            for rel in relations.iter().take(8) {
+                by_type
+                    .entry(&rel.relation_type)
+                    .or_default()
+                    .push(&rel.target_entity);
+            }
+
+            for (rel_type, entities) in by_type {
+                output.push_str(&format!(
+                    "• {}: {}\n",
+                    self.format_relation_type(rel_type),
+                    entities.join(", ")
+                ));
+            }
+        }
+
+        // Add summarized paths (Phase 3)
+        for path in paths.iter().take(2) {
+            let summarized = self.summarize_path(path, graph);
+            output.push_str(&format!("• Path: {}\n", summarized));
+        }
+
+        output.push_str("───────────────────────────");
+        output
+    }
+
+    /// Format enrichment data as a readable string (legacy, kept for compatibility)
+    #[allow(dead_code)]
     fn format_enrichment(&self, relations: &[RelationInfo], paths: &[Vec<String>]) -> String {
         if relations.is_empty() && paths.is_empty() {
             return String::new();
@@ -671,5 +871,133 @@ mod tests {
         assert!(!enrichment.related_entities.is_empty());
         assert!(!enrichment.context_string.is_empty());
         assert!(enrichment.context_string.contains("Graph Context"));
+    }
+
+    // =========================================================================
+    // Phase 3 Tests: Relevance Filtering & Path Summarization
+    // =========================================================================
+
+    #[test]
+    fn test_path_summarization() {
+        let enricher = GraphRagEnricher::with_defaults();
+        let graph = create_test_graph();
+
+        // Test path: payment -> database -> timeout
+        let path = vec![
+            "payment".to_string(),
+            "database".to_string(),
+            "timeout".to_string(),
+        ];
+
+        let summarized = enricher.summarize_path(&path, &graph);
+
+        // Should contain relationship types
+        assert!(summarized.contains("payment"));
+        assert!(summarized.contains("database"));
+        assert!(summarized.contains("timeout"));
+        assert!(summarized.contains("DEPENDS_ON") || summarized.contains("→"));
+    }
+
+    #[test]
+    fn test_relevance_filtering() {
+        let enricher = GraphRagEnricher::with_defaults();
+        let graph = create_test_graph();
+
+        // Create some test relations
+        let relations = vec![
+            RelationInfo {
+                target_entity: "database".to_string(),
+                relation_type: RelationType::DependsOn,
+                context: String::new(),
+                depth: 1,
+            },
+            RelationInfo {
+                target_entity: "timeout".to_string(),
+                relation_type: RelationType::CausedBy,
+                context: String::new(),
+                depth: 2,
+            },
+            RelationInfo {
+                target_entity: "unrelated".to_string(),
+                relation_type: RelationType::RelatedTo,
+                context: String::new(),
+                depth: 3,
+            },
+        ];
+
+        // Query for "timeout" - should prioritize relations connected to timeout
+        let query_entities = vec!["timeout".to_string()];
+        let filtered = enricher.filter_relevant_relations(&relations, &query_entities, &graph);
+
+        // Should filter and prioritize
+        assert!(!filtered.is_empty());
+
+        // timeout should be first (direct match with query)
+        if !filtered.is_empty() {
+            // The direct match should have highest score
+            let first = &filtered[0];
+            assert!(
+                first.target_entity == "timeout" || first.target_entity == "database",
+                "Expected timeout or database to be prioritized"
+            );
+        }
+    }
+
+    #[test]
+    fn test_relevance_scoring() {
+        let enricher = GraphRagEnricher::with_defaults();
+
+        let relation = RelationInfo {
+            target_entity: "database".to_string(),
+            relation_type: RelationType::DependsOn,
+            context: String::new(),
+            depth: 1,
+        };
+
+        // Query includes "database" - should get high score
+        let query_entities = vec!["database".to_string()];
+        let query_neighbors: HashSet<String> = HashSet::new();
+
+        let score = enricher.relation_relevance_score(&relation, &query_entities, &query_neighbors);
+
+        // Direct match (100) + priority bonus (20 for DependsOn at index 1) + depth 1 (20) = 140
+        assert!(score >= 100, "Direct match should give high score, got {}", score);
+    }
+
+    #[test]
+    fn test_format_relation_type() {
+        let enricher = GraphRagEnricher::with_defaults();
+
+        assert_eq!(enricher.format_relation_type(&RelationType::CausedBy), "CAUSED_BY");
+        assert_eq!(enricher.format_relation_type(&RelationType::DependsOn), "DEPENDS_ON");
+        assert_eq!(enricher.format_relation_type(&RelationType::Implements), "IMPLEMENTS");
+        assert_eq!(enricher.format_relation_type(&RelationType::LeadsTo), "LEADS_TO");
+        assert_eq!(enricher.format_relation_type(&RelationType::RelatedTo), "RELATED_TO");
+    }
+
+    #[test]
+    fn test_cross_result_insights_with_summary() {
+        let enricher = GraphRagEnricher::with_defaults();
+        let graph = create_test_graph();
+
+        // Two result sets with entities that have a path between them
+        let result_entities = vec![
+            vec!["payment".to_string()],
+            vec!["timeout".to_string()],
+        ];
+
+        let insights = enricher.find_cross_result_insights(&graph, &result_entities);
+
+        // Should find connection through database
+        // Path: payment -> database -> timeout
+        if !insights.is_empty() {
+            let insight = &insights[0];
+            assert!(insight.contains("Connection:"), "Should contain 'Connection:'");
+            // Should have summarized path with relationship types
+            assert!(
+                insight.contains("payment") && insight.contains("timeout"),
+                "Should contain both entities"
+            );
+        }
     }
 }

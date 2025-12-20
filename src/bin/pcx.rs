@@ -332,25 +332,31 @@ fn init_logging(to_file: bool, also_stderr: bool) {
 
     if to_file {
         let file_appender = RollingFileAppender::new(Rotation::DAILY, log_dir, "daemon.log");
+        // Use RUST_LOG if set, otherwise default to "info"
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info"));
+
         if also_stderr {
             // Log to both file and stderr (foreground daemon mode)
             tracing_subscriber::registry()
                 .with(fmt::layer().with_writer(file_appender))
                 .with(fmt::layer().with_writer(std::io::stderr))
-                .with(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+                .with(filter)
                 .init();
         } else {
             // Log to file only (background daemon mode)
             tracing_subscriber::registry()
                 .with(fmt::layer().with_writer(file_appender))
-                .with(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+                .with(filter)
                 .init();
         }
     } else {
         // Log to stderr only (CLI commands)
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("info"));
         tracing_subscriber::registry()
             .with(fmt::layer().with_writer(std::io::stderr))
-            .with(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+            .with(filter)
             .init();
     }
 }

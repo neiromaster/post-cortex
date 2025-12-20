@@ -2568,7 +2568,8 @@ impl LockFreeConversationMemorySystem {
 
         // Auto-load session if not already loaded (get_session_internal handles this)
         // This ensures the session is in memory before vectorization
-        let _session = self.get_session_internal(session_id).await?;
+        // We keep a reference to use for Graph-RAG enrichment
+        let session_arc = self.get_session_internal(session_id).await?;
 
         // Auto-vectorize if session hasn't been vectorized yet
         if !vectorizer.is_session_vectorized(session_id) {
@@ -2590,42 +2591,44 @@ impl LockFreeConversationMemorySystem {
             .await
         {
             Ok(results) => {
-                // Helper to extract entities from text
+                // Helper to extract potential entity names from text
+                // Extract all words > 3 chars (will be validated against graph)
                 let extract_entities = |text: &str| -> Vec<String> {
                     text.split_whitespace()
-                        .filter(|w| {
-                            let clean = w.trim_matches(|c: char| !c.is_alphanumeric());
-                            clean.len() > 3 && (
-                                clean.chars().next().map_or(false, |c| c.is_uppercase()) ||
-                                clean.contains('_') || clean.contains('-')
-                            )
+                        .filter_map(|w| {
+                            let clean = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+                            if clean.len() > 3 {
+                                Some(clean.to_lowercase())
+                            } else {
+                                None
+                            }
                         })
-                        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
                         .collect()
                 };
 
                 // ADVANCED GRAPH-RAG LOGIC
-                
+                // Use the already-loaded session's entity graph directly (no async message passing)
+                let session = session_arc.load();
+                let entity_graph = &session.entity_graph;
+                let graph_size = entity_graph.entity_count();
+
+                tracing::debug!("Graph-RAG: Starting enrichment for {} results (graph has {} entities)",
+                    results.len(), graph_size);
+
                 // 1. Identify core concepts in the QUERY
                 let query_entities = extract_entities(query);
+                tracing::debug!("Graph-RAG: Extracted {} query entities: {:?}", query_entities.len(), query_entities);
                 let mut global_graph_map = std::collections::HashMap::new();
-                
-                // 2. Expand Query Context via Graph Traversal
+
+                // 2. Expand Query Context via Graph Traversal (direct graph access - O(degree) per entity)
                 for q_entity in &query_entities {
-                    let (tx, mut rx) = channel(1);
-                    if self.storage_actor.sender.send(StorageMessage::FindRelatedEntities {
-                        session_id,
-                        entity_name: q_entity.clone(),
-                        response_tx: tx,
-                    }).is_ok() {
-                        if let Ok(Some(Ok(relations))) = tokio::time::timeout(
-                            std::time::Duration::from_millis(50), 
-                            rx.recv()
-                        ).await {
-                            if !relations.is_empty() {
-                                global_graph_map.insert(q_entity.clone(), relations);
-                            }
-                        }
+                    let relations = entity_graph.find_related_entities(q_entity);
+                    if !relations.is_empty() {
+                        tracing::debug!("Graph-RAG: Entity '{}' -> {} relations: {:?}",
+                            q_entity, relations.len(), relations.iter().take(3).collect::<Vec<_>>());
+                        global_graph_map.insert(q_entity.clone(), relations);
+                    } else {
+                        tracing::debug!("Graph-RAG: Entity '{}' not found in graph", q_entity);
                     }
                 }
 
@@ -2638,7 +2641,7 @@ impl LockFreeConversationMemorySystem {
                     }
                 }
 
-                // 4. Enrich results and analyze cross-references
+                // 4. Enrich results and analyze cross-references (direct graph access)
                 let mut enriched_results = Vec::new();
                 for mut result in results.into_iter() {
                     // Local enrichment (neighbors of entities in this specific chunk)
@@ -2652,34 +2655,24 @@ impl LockFreeConversationMemorySystem {
                     for entity in unique_chunk_entities.iter().take(2) {
                         // Skip if already in global map
                         if global_graph_map.contains_key(entity) { continue; }
-                        
-                        let (tx, mut rx) = channel(1);
-                        if self.storage_actor.sender.send(StorageMessage::FindRelatedEntities {
-                            session_id,
-                            entity_name: entity.clone(),
-                            response_tx: tx,
-                        }).is_ok() {
-                            if let Ok(Some(Ok(relations))) = tokio::time::timeout(
-                                std::time::Duration::from_millis(20), 
-                                rx.recv()
-                            ).await {
-                                if !relations.is_empty() {
-                                    // Limit relations
-                                    let limited_rels: Vec<_> = relations.iter().take(5).cloned().collect();
-                                    local_rels.push(format!("{}: {}", entity, limited_rels.join(", ")));
-                                }
-                            }
+
+                        // Direct graph access instead of async message
+                        let relations = entity_graph.find_related_entities(entity);
+                        if !relations.is_empty() {
+                            // Limit relations
+                            let limited_rels: Vec<_> = relations.iter().take(5).cloned().collect();
+                            local_rels.push(format!("{}: {}", entity, limited_rels.join(", ")));
                         }
                     }
 
                     if !local_rels.is_empty() {
                         result.text_content = format!("{}\n(Graph expansion: {})", result.text_content, local_rels.join(" | "));
                     }
-                    
+
                     enriched_results.push(result);
                 }
 
-                // 5. Deep Graph Analysis (Pathfinding between top results)
+                // 5. Deep Graph Analysis (Pathfinding between top results) - direct graph access
                 // If we have at least 2 results, check if they are connected
                 if enriched_results.len() >= 2 {
                     let top1_entities = extract_entities(&enriched_results[0].text_content);
@@ -2687,31 +2680,25 @@ impl LockFreeConversationMemorySystem {
 
                     if let (Some(e1), Some(e2)) = (top1_entities.first(), top2_entities.first()) {
                         if e1 != e2 {
-                             let (tx, mut rx) = channel(1);
-                             if self.storage_actor.sender.send(StorageMessage::FindShortestPath {
-                                 session_id,
-                                 from_entity: e1.clone(),
-                                 to_entity: e2.clone(),
-                                 response_tx: tx,
-                             }).is_ok() {
-                                 if let Ok(Some(Ok(Some(path)))) = tokio::time::timeout(
-                                     std::time::Duration::from_millis(100), // Longer timeout for pathfinding
-                                     rx.recv()
-                                 ).await {
-                                     if path.len() > 2 { // Valid path found (more than just start/end)
-                                         graph_insights.push_str(&format!("\n[Structural Insight]: Found connection: {}\n", path.join(" -> ")));
-                                     }
-                                 }
-                             }
+                            // Direct pathfinding call
+                            if let Some(path) = entity_graph.find_shortest_path(e1, e2) {
+                                if path.len() > 2 { // Valid path found (more than just start/end)
+                                    tracing::debug!("Graph-RAG: Found path {} -> {}: {:?}", e1, e2, path);
+                                    graph_insights.push_str(&format!("\n[Structural Insight]: Found connection: {}\n", path.join(" -> ")));
+                                }
+                            }
                         }
                     }
                 }
 
                 // Prepend insights to the first result
                 if !graph_insights.is_empty() && !enriched_results.is_empty() {
+                    tracing::debug!("Graph-RAG: Adding insights to first result: {} chars", graph_insights.len());
                     enriched_results[0].text_content = format!("{}{}\n---\n", graph_insights, enriched_results[0].text_content);
+                } else {
+                    tracing::debug!("Graph-RAG: No insights generated (global_map: {} entries)", global_graph_map.len());
                 }
-                
+
                 Ok(enriched_results)
             },
             Err(e) => Err(format!("Session semantic search failed: {e}")),
