@@ -876,50 +876,73 @@ impl LockFreeConversationMemorySystem {
             .await?;
         tracing::info!("Internal: Session obtained successfully");
 
-        // Update session atomically using ArcSwap
+        // Update session atomically using CAS loop to prevent race conditions
         let update_result = {
             let start = std::time::Instant::now();
+            let mut attempts = 0;
 
-            // Load current session
-            tracing::info!("DEBUG: About to load current session");
-            let current_session = session_arc.load();
-            tracing::info!("DEBUG: Loaded current session, about to clone");
-            let mut new_session = (**current_session).clone();
-            tracing::info!("DEBUG: Cloned session, about to call add_context_update_to_session");
+            let result_holder = loop {
+                attempts += 1;
+                if attempts > 100 {
+                    break Err("Failed to update session: high contention (CAS loop exhausted)".to_string());
+                }
 
-            // Add context update
-            let result = Self::add_context_update_to_session(
-                &mut new_session,
-                description.clone(),
-                metadata.clone(),
-            )
-            .await;
+                // Load current session
+                let current_arc = session_arc.load();
+                let mut new_session = (**current_arc).clone();
 
-            tracing::info!("DEBUG: add_context_update_to_session returned, about to store");
-            // Store updated session atomically
-            session_arc.store(Arc::new(new_session));
-            tracing::info!("DEBUG: Stored updated session");
+                // Add context update (async)
+                let result = Self::add_context_update_to_session(
+                    &mut new_session,
+                    description.clone(),
+                    metadata.clone(),
+                ).await;
 
-            // Update processing metrics
-            let processing_time_ns = start.elapsed().as_nanos() as u64;
-            let total_time = self
-                .context_processor
-                .total_processing_time_ns
-                .fetch_add(processing_time_ns, Ordering::Relaxed)
-                + processing_time_ns;
-            let processed_count = self
-                .context_processor
-                .contexts_processed
-                .fetch_add(1, Ordering::Relaxed)
-                + 1;
+                match result {
+                    Ok((uid, update)) => {
+                        // Try to swap atomically
+                        let new_arc = Arc::new(new_session);
+                        let prev_arc = session_arc.compare_and_swap(&current_arc, new_arc);
 
-            // Update cached average
-            let avg_time = total_time / processed_count;
-            self.context_processor
-                .avg_processing_time_ns
-                .store(avg_time, Ordering::Relaxed);
+                        // Check if swap was successful (pointer equality)
+                        if Arc::ptr_eq(&prev_arc, &current_arc) {
+                            // Success
+                            break Ok((uid, update));
+                        }
+                        
+                        // CAS failed, retry
+                        tracing::debug!("CAS failed for session {}, retrying (attempt {})", session_id, attempts);
+                        tokio::task::yield_now().await;
+                    },
+                    Err(e) => {
+                        // Logic error, not contention
+                        break Err(e);
+                    }
+                }
+            };
 
-            result
+            // Update processing metrics if successful
+            if result_holder.is_ok() {
+                let processing_time_ns = start.elapsed().as_nanos() as u64;
+                let total_time = self
+                    .context_processor
+                    .total_processing_time_ns
+                    .fetch_add(processing_time_ns, Ordering::Relaxed)
+                    + processing_time_ns;
+                let processed_count = self
+                    .context_processor
+                    .contexts_processed
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1;
+
+                // Update cached average
+                let avg_time = total_time / processed_count;
+                self.context_processor
+                    .avg_processing_time_ns
+                    .store(avg_time, Ordering::Relaxed);
+            }
+
+            result_holder
         };
 
         match update_result {
@@ -2124,14 +2147,25 @@ impl LockFreeConversationMemorySystem {
                     ..Default::default()
                 };
 
-                let vectorizer = ContentVectorizer::new(vectorizer_config)
+                let mut vectorizer = ContentVectorizer::new(vectorizer_config)
                     .await
                     .map_err(|e| format!("Failed to initialize content vectorizer: {}", e))?;
 
                 // Set persistent storage for embedding persistence
-                let vectorizer = vectorizer.with_persistent_storage(
-                    self.vector_storage.clone()
-                );
+                vectorizer.set_persistent_storage(self.vector_storage.clone());
+
+                // Load persisted embeddings from storage immediately on initialization
+                match vectorizer.load_all_embeddings_from_storage().await {
+                    Ok(count) => {
+                        if count > 0 {
+                            info!("Loaded {} persisted embeddings from storage during initialization", count);
+                        }
+                    }
+                    Err(e) => {
+                        // We fail initialization if we can't load embeddings - this allows retry
+                        return Err(format!("Failed to load persisted embeddings from storage: {}", e));
+                    }
+                }
 
                 Ok(Arc::new(vectorizer))
             })
@@ -2145,22 +2179,6 @@ impl LockFreeConversationMemorySystem {
                 );
                 // Clear any previous error
                 *self.embedding_config_holder.last_init_error.write() = None;
-
-                // Load persisted embeddings from storage on first initialization
-                // Only do this once (attempt == 1 means first successful init)
-                if attempt == 1 {
-                    match vectorizer.load_all_embeddings_from_storage().await {
-                        Ok(count) => {
-                            if count > 0 {
-                                info!("Loaded {} persisted embeddings from storage", count);
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to load persisted embeddings: {}", e);
-                            // Continue anyway - embeddings will be regenerated on first search
-                        }
-                    }
-                }
 
                 Ok(Arc::clone(vectorizer))
             }
@@ -2288,6 +2306,13 @@ impl LockFreeConversationMemorySystem {
                                 "Cache invalidation for session {} (non-critical): {}",
                                 session_id, e
                             );
+                        }
+
+                        // Persist session to save the updated vectorized_update_ids
+                        if let Err(e) = self.storage_actor.save_session((**session).clone()).await {
+                            warn!("Failed to persist session {} after vectorization: {}", session_id, e);
+                        } else {
+                            debug!("Session {} persisted after vectorization", session_id);
                         }
                     }
 

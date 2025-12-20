@@ -55,10 +55,26 @@ pub struct DaemonConfig {
     /// SurrealDB password (optional)
     #[serde(default)]
     pub surrealdb_password: Option<String>,
+
+    /// SurrealDB namespace (default: "post_cortex")
+    #[serde(default = "default_surrealdb_namespace")]
+    pub surrealdb_namespace: String,
+
+    /// SurrealDB database (default: "main")
+    #[serde(default = "default_surrealdb_database")]
+    pub surrealdb_database: String,
 }
 
 fn default_storage_backend() -> String {
     "rocksdb".to_string()
+}
+
+fn default_surrealdb_namespace() -> String {
+    "post_cortex".to_string()
+}
+
+fn default_surrealdb_database() -> String {
+    "main".to_string()
 }
 
 impl Default for DaemonConfig {
@@ -71,6 +87,8 @@ impl Default for DaemonConfig {
             surrealdb_endpoint: None,
             surrealdb_username: None,
             surrealdb_password: None,
+            surrealdb_namespace: default_surrealdb_namespace(),
+            surrealdb_database: default_surrealdb_database(),
         }
     }
 }

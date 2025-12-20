@@ -1591,17 +1591,28 @@ impl VectorStorage for SurrealDBStorage {
 
         debug!("SurrealDBStorage: Searching for {} nearest vectors", k);
 
-        // Compute cosine similarity manually (SurrealDB 2.x doesn't have built-in vector ops)
-        // In production, you might want to use an extension or compute similarity differently
-        let mut response = self.db.query("SELECT * FROM embedding").await?;
+        // Fetch all vectors using pagination
+        let mut matches = Vec::new();
+        let limit = 1000;
+        let mut start = 0;
 
-        let records: Vec<EmbeddingRecord> = response.take(0)?;
+        loop {
+            let mut response = self
+                .db
+                .query("SELECT * FROM embedding LIMIT $limit START $start")
+                .bind(("limit", limit))
+                .bind(("start", start))
+                .await?;
 
-        let mut matches: Vec<SearchMatch> = records
-            .into_iter()
-            .map(|r| {
+            let records: Vec<EmbeddingRecord> = response.take(0)?;
+
+            if records.is_empty() {
+                break;
+            }
+
+            for r in records {
                 let similarity = cosine_similarity(query, &r.vector);
-                SearchMatch {
+                matches.push(SearchMatch {
                     vector_id: 0, // Not used with SurrealDB
                     similarity,
                     metadata: VectorMetadata {
@@ -1612,9 +1623,11 @@ impl VectorStorage for SurrealDBStorage {
                         timestamp: Self::parse_datetime(&r.timestamp),
                         metadata: r.metadata,
                     },
-                }
-            })
-            .collect();
+                });
+            }
+
+            start += limit;
+        }
 
         // Sort by similarity descending
         matches.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap());
@@ -1646,19 +1659,28 @@ impl VectorStorage for SurrealDBStorage {
             k, session_id
         );
 
-        let mut response = self
-            .db
-            .query("SELECT * FROM embedding WHERE session_id = $session_id")
-            .bind(("session_id", session_id.to_string()))
-            .await?;
+        let mut matches = Vec::new();
+        let limit = 1000;
+        let mut start = 0;
 
-        let records: Vec<EmbeddingRecord> = response.take(0)?;
+        loop {
+            let mut response = self
+                .db
+                .query("SELECT * FROM embedding WHERE session_id = $session_id LIMIT $limit START $start")
+                .bind(("session_id", session_id.to_string()))
+                .bind(("limit", limit))
+                .bind(("start", start))
+                .await?;
 
-        let mut matches: Vec<SearchMatch> = records
-            .into_iter()
-            .map(|r| {
+            let records: Vec<EmbeddingRecord> = response.take(0)?;
+
+            if records.is_empty() {
+                break;
+            }
+
+            for r in records {
                 let similarity = cosine_similarity(query, &r.vector);
-                SearchMatch {
+                matches.push(SearchMatch {
                     vector_id: 0,
                     similarity,
                     metadata: VectorMetadata {
@@ -1669,9 +1691,11 @@ impl VectorStorage for SurrealDBStorage {
                         timestamp: Self::parse_datetime(&r.timestamp),
                         metadata: r.metadata,
                     },
-                }
-            })
-            .collect();
+                });
+            }
+
+            start += limit;
+        }
 
         matches.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap());
         matches.truncate(k);
@@ -1693,19 +1717,28 @@ impl VectorStorage for SurrealDBStorage {
             ));
         }
 
-        let mut response = self
-            .db
-            .query("SELECT * FROM embedding WHERE content_type = $content_type")
-            .bind(("content_type", content_type.to_string()))
-            .await?;
+        let mut matches = Vec::new();
+        let limit = 1000;
+        let mut start = 0;
 
-        let records: Vec<EmbeddingRecord> = response.take(0)?;
+        loop {
+            let mut response = self
+                .db
+                .query("SELECT * FROM embedding WHERE content_type = $content_type LIMIT $limit START $start")
+                .bind(("content_type", content_type.to_string()))
+                .bind(("limit", limit))
+                .bind(("start", start))
+                .await?;
 
-        let mut matches: Vec<SearchMatch> = records
-            .into_iter()
-            .map(|r| {
+            let records: Vec<EmbeddingRecord> = response.take(0)?;
+
+            if records.is_empty() {
+                break;
+            }
+
+            for r in records {
                 let similarity = cosine_similarity(query, &r.vector);
-                SearchMatch {
+                matches.push(SearchMatch {
                     vector_id: 0,
                     similarity,
                     metadata: VectorMetadata {
@@ -1716,9 +1749,11 @@ impl VectorStorage for SurrealDBStorage {
                         timestamp: Self::parse_datetime(&r.timestamp),
                         metadata: r.metadata,
                     },
-                }
-            })
-            .collect();
+                });
+            }
+
+            start += limit;
+        }
 
         matches.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap());
         matches.truncate(k);
@@ -1806,14 +1841,26 @@ impl VectorStorage for SurrealDBStorage {
     }
 
     async fn get_all_vectors(&self) -> Result<Vec<(Vec<f32>, VectorMetadata)>> {
-        let mut response = self.db.query("SELECT * FROM embedding").await?;
+        let mut all_vectors = Vec::new();
+        let limit = 1000;
+        let mut start = 0;
 
-        let records: Vec<EmbeddingRecord> = response.take(0)?;
+        loop {
+            let mut response = self
+                .db
+                .query("SELECT * FROM embedding LIMIT $limit START $start")
+                .bind(("limit", limit))
+                .bind(("start", start))
+                .await?;
 
-        Ok(records
-            .into_iter()
-            .map(|r| {
-                (
+            let records: Vec<EmbeddingRecord> = response.take(0)?;
+
+            if records.is_empty() {
+                break;
+            }
+
+            for r in records {
+                all_vectors.push((
                     r.vector,
                     VectorMetadata {
                         id: r.content_id,
@@ -1823,9 +1870,13 @@ impl VectorStorage for SurrealDBStorage {
                         timestamp: Self::parse_datetime(&r.timestamp),
                         metadata: r.metadata,
                     },
-                )
-            })
-            .collect())
+                ));
+            }
+
+            start += limit;
+        }
+
+        Ok(all_vectors)
     }
 }
 

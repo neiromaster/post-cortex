@@ -323,19 +323,30 @@ enum SessionAction {
     List,
 }
 
-fn init_logging(to_file: bool) {
+fn init_logging(to_file: bool, also_stderr: bool) {
     let log_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".post-cortex/logs");
     std::fs::create_dir_all(&log_dir).ok();
 
     if to_file {
-        let file_appender = RollingFileAppender::new(Rotation::DAILY, log_dir, "pcx.log");
-        tracing_subscriber::registry()
-            .with(fmt::layer().with_writer(file_appender))
-            .with(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
-            .init();
+        let file_appender = RollingFileAppender::new(Rotation::DAILY, log_dir, "daemon.log");
+        if also_stderr {
+            // Log to both file and stderr (foreground daemon mode)
+            tracing_subscriber::registry()
+                .with(fmt::layer().with_writer(file_appender))
+                .with(fmt::layer().with_writer(std::io::stderr))
+                .with(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+                .init();
+        } else {
+            // Log to file only (background daemon mode)
+            tracing_subscriber::registry()
+                .with(fmt::layer().with_writer(file_appender))
+                .with(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+                .init();
+        }
     } else {
+        // Log to stderr only (CLI commands)
         tracing_subscriber::registry()
             .with(fmt::layer().with_writer(std::io::stderr))
             .with(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
@@ -351,7 +362,7 @@ async fn main() -> Result<(), String> {
         // No command = stdio proxy mode (default for MCP clients)
         None => {
             // Minimal logging for stdio mode (to stderr only)
-            init_logging(false);
+            init_logging(false, false);
 
             let config = DaemonConfig::load();
             run_stdio_proxy(config).await
@@ -364,11 +375,11 @@ async fn main() -> Result<(), String> {
 
             if daemon {
                 // Background daemon mode - log to file only
-                init_logging(true);
+                init_logging(true, false);
                 info!("Starting pcx daemon in background mode");
             } else {
-                // Foreground mode - log to both
-                init_logging(false);
+                // Foreground mode - log to file AND stderr
+                init_logging(true, true);
                 println!("Starting Post-Cortex daemon...");
                 println!("Version: {}", VERSION);
                 println!();
@@ -390,17 +401,17 @@ async fn main() -> Result<(), String> {
         Some(Commands::Init) => init_config(),
 
         Some(Commands::VectorizeAll) => {
-            init_logging(false);
+            init_logging(false, false);
             vectorize_all().await
         }
 
         Some(Commands::Workspace { action }) => {
-            init_logging(false);
+            init_logging(false, false);
             handle_workspace_action(action).await
         }
 
         Some(Commands::Session { action }) => {
-            init_logging(false);
+            init_logging(false, false);
             handle_session_action(action).await
         }
 
@@ -413,7 +424,7 @@ async fn main() -> Result<(), String> {
             pretty,
             force,
         }) => {
-            init_logging(false);
+            init_logging(false, false);
             handle_export(
                 output,
                 compress,
@@ -434,7 +445,7 @@ async fn main() -> Result<(), String> {
             overwrite,
             list,
         }) => {
-            init_logging(false);
+            init_logging(false, false);
             handle_import(input, session, workspace, skip_existing, overwrite, list).await
         }
 
@@ -449,7 +460,7 @@ async fn main() -> Result<(), String> {
             password,
             dry_run,
         }) => {
-            init_logging(false);
+            init_logging(false, false);
             handle_migrate(
                 from,
                 to,

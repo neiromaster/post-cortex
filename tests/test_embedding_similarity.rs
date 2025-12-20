@@ -227,3 +227,36 @@ async fn test_end_to_end_semantic_search_pipeline() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_unrelated_text_should_have_low_similarity() -> Result<()> {
+    // Test that COMPLETELY unrelated texts have LOW similarity
+    let config = EmbeddingConfig::default();
+    let engine = LockFreeLocalEmbeddingEngine::new(config).await?;
+
+    let text1 = "How does BERT work for text embeddings? BERT uses transformer architecture with bidirectional attention to create contextual embeddings. Each word's representation depends on all other words in the sentence, capturing semantic meaning.";
+    let text2 = "What is the best recipe for banana bread? Mix 3 ripe bananas with sugar, butter, eggs, and flour. Add baking soda and vanilla. Bake at 350F for 60 minutes until golden brown.";
+
+    let e1 = engine.encode_text(text1).await?;
+    let e2 = engine.encode_text(text2).await?;
+
+    let dot: f32 = e1.iter().zip(e2.iter()).map(|(a, b)| a * b).sum();
+    let n1: f32 = e1.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let n2: f32 = e2.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let similarity = dot / (n1 * n2);
+
+    println!("BERT text vs Banana bread recipe");
+    println!("Norm 1: {:.6}, Norm 2: {:.6}", n1, n2);
+    println!("Similarity: {:.4} ({:.1}%)", similarity, similarity * 100.0);
+    println!("First 5 of e1: {:?}", &e1[..5]);
+    println!("First 5 of e2: {:?}", &e2[..5]);
+
+    // Unrelated texts should have LOW similarity - below 50%!
+    assert!(
+        similarity < 0.5,
+        "Unrelated texts (BERT vs banana bread) should have <50% similarity, got {:.1}%",
+        similarity * 100.0
+    );
+
+    Ok(())
+}
