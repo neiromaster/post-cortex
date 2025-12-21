@@ -5,6 +5,32 @@ All notable changes to Post-Cortex will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.14] - 2025-12-21
+
+### Changed
+
+- **RMCP Transport Upgrade**: Migrated from SSE to Streamable HTTP transport
+  - Updated `rmcp` to 0.12.0 with `transport-streamable-http-server` feature
+  - Replaced `SseServer` with `StreamableHttpService` and `LocalSessionManager`
+  - Unified endpoint: `/mcp` replaces `/sse` + `/message`
+  - MCP client config: `"type": "http"` with `"url": "http://localhost:3737/mcp"`
+
+- **stdio_proxy Lock-Free Rewrite**: Updated to use Streamable HTTP protocol
+  - Replaced `RwLock` with `ArcSwap` for session ID storage
+  - Session ID extracted from `Mcp-Session-Id` response header
+  - Proper `Accept: application/json, text/event-stream` headers
+
+- **bincode Downgrade**: 3.0.0 → 2.0.1 with `serde` feature
+  - bincode 3.0.0 contains intentional `compile_error!` (maintainer protest after doxxing incident)
+  - Version 2.0.1 is stable and fully functional
+
+### Fixed
+
+- **Documentation Updates**: Updated all MCP endpoint references
+  - README.md: HTTP transport configuration
+  - DAEMON_MODE.md: Streamable HTTP examples
+  - pcx status: Shows `/mcp` and `/health` endpoints
+
 ## [0.1.13] - 2025-12-21
 
 ### Added
