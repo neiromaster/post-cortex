@@ -157,13 +157,13 @@ pcx status
 pcx stop
 ```
 
-Configure Claude for SSE:
+Configure Claude for HTTP transport:
 ```json
 {
   "mcpServers": {
     "post-cortex": {
-      "type": "sse",
-      "url": "http://localhost:3737/sse"
+      "type": "http",
+      "url": "http://localhost:3737/mcp"
     }
   }
 }

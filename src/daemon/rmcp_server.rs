@@ -13,7 +13,9 @@ use axum::{
     http::StatusCode,
     routing::{delete, get, post},
 };
-use rmcp::transport::sse_server::{SseServer, SseServerConfig};
+use rmcp::transport::streamable_http_server::{
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -65,7 +67,10 @@ pub async fn start_rmcp_daemon(config: DaemonConfig) -> Result<(), String> {
         if system_config.storage_backend == StorageBackendType::SurrealDB {
             info!(
                 "Using SurrealDB storage backend: {} (ns: {}, db: {})",
-                system_config.surrealdb_endpoint.as_deref().unwrap_or("not configured"),
+                system_config
+                    .surrealdb_endpoint
+                    .as_deref()
+                    .unwrap_or("not configured"),
                 config.surrealdb_namespace,
                 config.surrealdb_database
             );
@@ -93,21 +98,23 @@ pub async fn start_rmcp_daemon(config: DaemonConfig) -> Result<(), String> {
         info!("Query cache cleared successfully on daemon startup");
     }
 
-    // Create SSE server configuration
-    let sse_config = SseServerConfig {
-        bind: addr,
-        sse_path: "/sse".to_string(),
-        post_path: "/message".to_string(),
-        ct: CancellationToken::new(),
-        sse_keep_alive: Some(std::time::Duration::from_secs(30)),
-    };
+    // Create cancellation token for graceful shutdown
+    let ct = CancellationToken::new();
 
-    info!("SSE endpoints configured:");
-    info!("  SSE stream: http://{}/sse", addr);
-    info!("  POST messages: http://{}/message", addr);
+    // Create MCP service using streamable HTTP transport
+    let mcp_service = StreamableHttpService::new(
+        {
+            let memory_system = memory_system.clone();
+            move || Ok(PostCortexService::new(memory_system.clone()))
+        },
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig {
+            cancellation_token: ct.child_token(),
+            ..Default::default()
+        },
+    );
 
-    // Create SSE server
-    let (sse_server, sse_router) = SseServer::new(sse_config);
+    info!("MCP endpoint configured: http://{}/mcp", addr);
 
     // Create API state
     let api_state = Arc::new(ApiState {
@@ -117,15 +124,26 @@ pub async fn start_rmcp_daemon(config: DaemonConfig) -> Result<(), String> {
     // Create API router with its own state
     let api_router = Router::new()
         .route("/health", get(api_health))
-        .route("/api/sessions", get(api_list_sessions).post(api_create_session))
+        .route(
+            "/api/sessions",
+            get(api_list_sessions).post(api_create_session),
+        )
         .route("/api/sessions/{id}", delete(api_delete_session))
-        .route("/api/workspaces", get(api_list_workspaces).post(api_create_workspace))
+        .route(
+            "/api/workspaces",
+            get(api_list_workspaces).post(api_create_workspace),
+        )
         .route("/api/workspaces/{id}", delete(api_delete_workspace))
-        .route("/api/workspaces/{workspace_id}/sessions/{session_id}", post(api_attach_session))
+        .route(
+            "/api/workspaces/{workspace_id}/sessions/{session_id}",
+            post(api_attach_session),
+        )
         .with_state(api_state);
 
-    // Merge SSE router with API router
-    let router = sse_router.merge(api_router);
+    // Create router with MCP service and API routes
+    let router = Router::new()
+        .nest_service("/mcp", mcp_service)
+        .merge(api_router);
 
     // Create TCP listener
     let listener = tokio::net::TcpListener::bind(addr)
@@ -135,21 +153,18 @@ pub async fn start_rmcp_daemon(config: DaemonConfig) -> Result<(), String> {
     info!("TCP listener bound to {}", addr);
 
     // Setup graceful shutdown
-    let ct = sse_server.config.ct.child_token();
+    let shutdown_ct = ct.clone();
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
-        ct.cancelled().await;
-        info!("SSE server shutting down gracefully");
+        shutdown_ct.cancelled().await;
+        info!("HTTP server shutting down gracefully");
     });
 
     // Start HTTP server in background
     tokio::spawn(async move {
         if let Err(e) = server.await {
-            error!("SSE server error: {}", e);
+            error!("HTTP server error: {}", e);
         }
     });
-
-    // Register Post-Cortex service with SSE server
-    let ct = sse_server.with_service(move || PostCortexService::new(memory_system.clone()));
 
     info!("Post-Cortex MCP service registered with SSE server");
     info!("Daemon is ready to accept connections");
@@ -276,7 +291,8 @@ async fn api_delete_session(
     State(state): State<Arc<ApiState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let uuid = Uuid::parse_str(&id).map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid UUID: {}", e)))?;
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid UUID: {}", e)))?;
 
     state
         .memory_system
@@ -311,7 +327,9 @@ async fn api_list_workspaces(
         .into_iter()
         .map(|ws| {
             // Count only sessions that still exist
-            let actual_count = ws.sessions.iter()
+            let actual_count = ws
+                .sessions
+                .iter()
                 .filter(|(id, _)| existing_sessions.contains(id))
                 .count();
             WorkspaceInfo {
@@ -352,7 +370,8 @@ async fn api_delete_workspace(
     State(state): State<Arc<ApiState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let uuid = Uuid::parse_str(&id).map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid UUID: {}", e)))?;
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid UUID: {}", e)))?;
 
     state
         .memory_system
@@ -369,10 +388,18 @@ async fn api_attach_session(
     Path((workspace_id, session_id)): Path<(String, String)>,
     Json(req): Json<AttachSessionRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let ws_id = Uuid::parse_str(&workspace_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid workspace UUID: {}", e)))?;
-    let sess_id = Uuid::parse_str(&session_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid session UUID: {}", e)))?;
+    let ws_id = Uuid::parse_str(&workspace_id).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid workspace UUID: {}", e),
+        )
+    })?;
+    let sess_id = Uuid::parse_str(&session_id).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid session UUID: {}", e),
+        )
+    })?;
 
     let role = match req.role.as_deref().unwrap_or("related") {
         "primary" => crate::workspace::SessionRole::Primary,

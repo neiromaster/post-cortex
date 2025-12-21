@@ -280,7 +280,10 @@ impl RealRocksDBStorage {
 
             // Use iterator with seek - prefix_iterator doesn't work correctly
             // when prefix_extractor size (16 bytes) doesn't match our prefix (8 bytes "session:")
-            let iter = db.iterator(rocksdb::IteratorMode::From(b"session:", rocksdb::Direction::Forward));
+            let iter = db.iterator(rocksdb::IteratorMode::From(
+                b"session:",
+                rocksdb::Direction::Forward,
+            ));
             for item in iter {
                 let (key, _) = item?;
                 let key_str = String::from_utf8_lossy(&key);
@@ -353,7 +356,10 @@ impl RealRocksDBStorage {
             // Delete all updates for this session
             // Key format: "session:{session_id}:update:{update_id}"
             let update_prefix = format!("session:{}:update:", session_id);
-            let iter = db.iterator(rocksdb::IteratorMode::From(update_prefix.as_bytes(), rocksdb::Direction::Forward));
+            let iter = db.iterator(rocksdb::IteratorMode::From(
+                update_prefix.as_bytes(),
+                rocksdb::Direction::Forward,
+            ));
             let mut keys_to_delete = Vec::new();
 
             for item in iter {
@@ -435,7 +441,10 @@ impl RealRocksDBStorage {
 
             // First pass: Load all workspaces using iterator with seek
             // (prefix_iterator doesn't work with our 16-byte prefix extractor)
-            let workspace_iter = db.iterator(rocksdb::IteratorMode::From(b"workspace:", rocksdb::Direction::Forward));
+            let workspace_iter = db.iterator(rocksdb::IteratorMode::From(
+                b"workspace:",
+                rocksdb::Direction::Forward,
+            ));
             for item in workspace_iter {
                 let (key, value) = item?;
                 let key_str = String::from_utf8_lossy(&key);
@@ -458,7 +467,10 @@ impl RealRocksDBStorage {
             }
 
             // Second pass: Load all workspace-session associations using iterator with seek
-            let ws_session_iter = db.iterator(rocksdb::IteratorMode::From(b"ws_session:", rocksdb::Direction::Forward));
+            let ws_session_iter = db.iterator(rocksdb::IteratorMode::From(
+                b"ws_session:",
+                rocksdb::Direction::Forward,
+            ));
             for item in ws_session_iter {
                 let (key, value) = item?;
                 let key_str = String::from_utf8_lossy(&key);
@@ -550,7 +562,10 @@ impl RealRocksDBStorage {
 
             // Also delete all workspace-session associations
             let ws_session_prefix = format!("ws_session:{}:", workspace_id);
-            let iter = db.iterator(rocksdb::IteratorMode::From(ws_session_prefix.as_bytes(), rocksdb::Direction::Forward));
+            let iter = db.iterator(rocksdb::IteratorMode::From(
+                ws_session_prefix.as_bytes(),
+                rocksdb::Direction::Forward,
+            ));
             let mut keys_to_delete = Vec::new();
 
             for item in iter {
@@ -787,7 +802,14 @@ impl Storage for RealRocksDBStorage {
         description: &str,
         session_ids: &[Uuid],
     ) -> Result<()> {
-        RealRocksDBStorage::save_workspace_metadata(self, workspace_id, name, description, session_ids).await
+        RealRocksDBStorage::save_workspace_metadata(
+            self,
+            workspace_id,
+            name,
+            description,
+            session_ids,
+        )
+        .await
     }
 
     async fn delete_workspace(&self, workspace_id: Uuid) -> Result<()> {
@@ -878,7 +900,10 @@ impl RealRocksDBStorage {
         let embedding = embedding.clone();
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let key = format!("embedding:{}:{}", embedding.session_id, embedding.content_id);
+            let key = format!(
+                "embedding:{}:{}",
+                embedding.session_id, embedding.content_id
+            );
             let data = bincode::serde::encode_to_vec(&embedding, bincode::config::standard())
                 .map_err(|e| anyhow::anyhow!("Failed to serialize embedding: {}", e))?;
             db.put(key.as_bytes(), &data)?;
@@ -910,12 +935,10 @@ impl RealRocksDBStorage {
                     break;
                 }
 
-                if let Ok((embedding, _)) =
-                    bincode::serde::decode_from_slice::<StoredEmbedding, _>(
-                        &value,
-                        bincode::config::standard(),
-                    )
-                {
+                if let Ok((embedding, _)) = bincode::serde::decode_from_slice::<StoredEmbedding, _>(
+                    &value,
+                    bincode::config::standard(),
+                ) {
                     embeddings.push(embedding);
                 }
             }
@@ -945,12 +968,10 @@ impl RealRocksDBStorage {
                     break;
                 }
 
-                if let Ok((embedding, _)) =
-                    bincode::serde::decode_from_slice::<StoredEmbedding, _>(
-                        &value,
-                        bincode::config::standard(),
-                    )
-                {
+                if let Ok((embedding, _)) = bincode::serde::decode_from_slice::<StoredEmbedding, _>(
+                    &value,
+                    bincode::config::standard(),
+                ) {
                     embeddings.push(embedding);
                 }
             }
@@ -1037,7 +1058,11 @@ impl VectorStorage for RealRocksDBStorage {
             })
             .collect();
 
-        matches.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+        matches.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         matches.truncate(k);
 
         Ok(matches)
@@ -1063,7 +1088,11 @@ impl VectorStorage for RealRocksDBStorage {
             })
             .collect();
 
-        matches.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+        matches.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         matches.truncate(k);
 
         Ok(matches)
@@ -1090,7 +1119,11 @@ impl VectorStorage for RealRocksDBStorage {
             })
             .collect();
 
-        matches.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+        matches.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         matches.truncate(k);
 
         Ok(matches)
@@ -1123,7 +1156,10 @@ impl VectorStorage for RealRocksDBStorage {
             .unwrap_or(0)
     }
 
-    async fn get_session_vectors(&self, session_id: &str) -> Result<Vec<(Vec<f32>, VectorMetadata)>> {
+    async fn get_session_vectors(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<(Vec<f32>, VectorMetadata)>> {
         let embeddings = self.load_session_embeddings(session_id).await?;
         Ok(embeddings
             .into_iter()

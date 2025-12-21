@@ -7,11 +7,12 @@
 //! If no daemon is running, it automatically starts one in the background.
 
 use crate::daemon::DaemonConfig;
+use arc_swap::ArcSwap;
 use std::io::{self, BufRead};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
 use tracing::{error, info};
 
@@ -77,146 +78,100 @@ pub async fn ensure_daemon_running(config: &DaemonConfig) -> Result<(), String> 
     wait_for_daemon(&config.host, config.port).await
 }
 
-/// Run stdio proxy mode - bridges stdin/stdout to daemon via HTTP SSE
+/// Run stdio proxy mode - bridges stdin/stdout to daemon via Streamable HTTP
 pub async fn run_stdio_proxy(config: DaemonConfig) -> Result<(), String> {
     // Ensure daemon is running
     ensure_daemon_running(&config).await?;
 
-    let base_url = format!("http://{}:{}", config.host, config.port);
+    let mcp_url = format!("http://{}:{}/mcp", config.host, config.port);
     let client = reqwest::Client::new();
 
-    let sse_url = format!("{}/sse", base_url);
+    info!("Connecting to daemon at {}", mcp_url);
 
-    info!("Connecting to daemon at {}", sse_url);
+    // Session ID storage (lock-free via ArcSwap)
+    let session_id: Arc<ArcSwap<Option<String>>> = Arc::new(ArcSwap::from_pointee(None));
 
-    // Channels for communication (all lock-free)
-    let (stdout_tx, mut stdout_rx) = mpsc::unbounded_channel::<String>();
-    let (session_tx, session_rx) = oneshot::channel::<String>();
+    // Stdin reader - send requests to daemon and write responses to stdout
+    let stdin_handle = tokio::task::spawn_blocking({
+        let client = client.clone();
+        let mcp_url = mcp_url.clone();
+        let session_id = session_id.clone();
 
-    // SSE reader task - receives responses and session ID
-    let sse_client = client.clone();
-    let sse_url_clone = sse_url.clone();
-    let mut session_tx = Some(session_tx);
+        move || {
+            let stdin = io::stdin();
+            let reader = stdin.lock();
+            let rt = tokio::runtime::Handle::current();
 
-    let _sse_handle = tokio::spawn(async move {
-        match sse_client.get(&sse_url_clone).send().await {
-            Ok(response) => {
-                use futures::StreamExt;
-                let mut stream = response.bytes_stream();
-                let mut buffer = String::new();
+            for line in reader.lines() {
+                match line {
+                    Ok(line) if !line.trim().is_empty() => {
+                        let client = client.clone();
+                        let url = mcp_url.clone();
+                        let session_id = session_id.clone();
 
-                while let Some(chunk) = stream.next().await {
-                    match chunk {
-                        Ok(bytes) => {
-                            let text = String::from_utf8_lossy(&bytes);
-                            buffer.push_str(&text);
+                        rt.block_on(async {
+                            // Build request with proper headers for Streamable HTTP
+                            let mut request = client
+                                .post(&url)
+                                .header("Content-Type", "application/json")
+                                .header("Accept", "application/json, text/event-stream");
 
-                            // Parse SSE events
-                            while let Some(pos) = buffer.find("\n\n") {
-                                let event = buffer[..pos].to_string();
-                                buffer = buffer[pos + 2..].to_string();
+                            // Add session ID header if we have one (lock-free load)
+                            let current_sid = session_id.load();
+                            if let Some(ref id) = **current_sid {
+                                request = request.header("Mcp-Session-Id", id.clone());
+                            }
 
-                                // Extract session ID from endpoint event
-                                if event.contains("event: endpoint") {
-                                    if let Some(data_line) =
-                                        event.lines().find(|l| l.starts_with("data: "))
-                                    {
-                                        let endpoint = data_line.trim_start_matches("data: ");
-                                        if let Some(sid) = endpoint.split("sessionId=").nth(1) {
-                                            let sid = sid.trim().to_string();
-                                            info!("Got session ID: {}", sid);
-
-                                            // Notify stdin reader (lock-free oneshot channel)
-                                            if let Some(tx) = session_tx.take() {
-                                                let _ = tx.send(sid);
+                            match request.body(line).send().await {
+                                Ok(resp) => {
+                                    // Extract session ID from response header (lock-free store)
+                                    if let Some(new_sid) = resp.headers().get("mcp-session-id") {
+                                        if let Ok(sid_str) = new_sid.to_str() {
+                                            if session_id.load().is_none() {
+                                                info!("Got session ID: {}", sid_str);
+                                                session_id
+                                                    .store(Arc::new(Some(sid_str.to_string())));
                                             }
                                         }
                                     }
-                                }
-                                // Forward message events to stdout
-                                else if event.contains("event: message") {
-                                    if let Some(data_line) =
-                                        event.lines().find(|l| l.starts_with("data: "))
-                                    {
-                                        let data = data_line.trim_start_matches("data: ");
-                                        if stdout_tx.send(data.to_string()).is_err() {
-                                            break;
+
+                                    if resp.status().is_success() {
+                                        // Read response body and parse SSE events
+                                        match resp.text().await {
+                                            Ok(body) => {
+                                                // Parse SSE format: "data: {...}\n\n"
+                                                for event in body.split("\n\n") {
+                                                    if let Some(data) = event.strip_prefix("data: ")
+                                                    {
+                                                        let data = data.trim();
+                                                        if !data.is_empty() {
+                                                            println!("{}", data);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to read response: {}", e);
+                                            }
+                                        }
+                                    } else {
+                                        error!("Request failed with status: {}", resp.status());
+                                        if let Ok(body) = resp.text().await {
+                                            error!("Response: {}", body);
                                         }
                                     }
                                 }
-                            }
-                        }
-                        Err(e) => {
-                            error!("SSE stream error: {}", e);
-                            break;
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Failed to connect to SSE: {}", e);
-            }
-        }
-    });
-
-    // Stdout writer task
-    let _stdout_handle = tokio::spawn(async move {
-        use tokio::io::AsyncWriteExt;
-        let mut stdout = tokio::io::stdout();
-        while let Some(msg) = stdout_rx.recv().await {
-            let line = format!("{}\n", msg);
-            if stdout.write_all(line.as_bytes()).await.is_err() {
-                break;
-            }
-            if stdout.flush().await.is_err() {
-                break;
-            }
-        }
-    });
-
-    // Wait for session ID before processing stdin
-    let session_id_str = session_rx
-        .await
-        .map_err(|_| "Failed to get session ID from SSE".to_string())?;
-
-    let message_url = format!("{}/message?sessionId={}", base_url, session_id_str);
-    info!("Ready to proxy requests to {}", message_url);
-
-    // Stdin reader - send requests to daemon
-    let stdin_handle = tokio::task::spawn_blocking(move || {
-        let stdin = io::stdin();
-        let reader = stdin.lock();
-        let rt = tokio::runtime::Handle::current();
-
-        for line in reader.lines() {
-            match line {
-                Ok(line) if !line.trim().is_empty() => {
-                    let client = client.clone();
-                    let url = message_url.clone();
-
-                    rt.block_on(async {
-                        match client
-                            .post(&url)
-                            .header("Content-Type", "application/json")
-                            .body(line)
-                            .send()
-                            .await
-                        {
-                            Ok(resp) => {
-                                if !resp.status().is_success() {
-                                    error!("Request failed with status: {}", resp.status());
+                                Err(e) => {
+                                    error!("Failed to send request: {}", e);
                                 }
                             }
-                            Err(e) => {
-                                error!("Failed to send request: {}", e);
-                            }
-                        }
-                    });
-                }
-                Ok(_) => {} // Empty line, skip
-                Err(e) => {
-                    error!("Error reading stdin: {}", e);
-                    break;
+                        });
+                    }
+                    Ok(_) => {} // Empty line, skip
+                    Err(e) => {
+                        error!("Error reading stdin: {}", e);
+                        break;
+                    }
                 }
             }
         }

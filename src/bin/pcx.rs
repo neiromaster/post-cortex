@@ -495,9 +495,9 @@ async fn check_status(config: &DaemonConfig) -> Result<(), String> {
     match timeout(Duration::from_secs(2), TcpStream::connect(&addr)).await {
         Ok(Ok(_)) => {
             println!("Daemon is running");
-            println!("  SSE endpoint: http://{}:{}/sse", config.host, config.port);
+            println!("  MCP endpoint: http://{}:{}/mcp", config.host, config.port);
             println!(
-                "  POST endpoint: http://{}:{}/message",
+                "  Health endpoint: http://{}:{}/health",
                 config.host, config.port
             );
             Ok(())

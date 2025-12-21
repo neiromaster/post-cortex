@@ -10,7 +10,7 @@ Daemon mode enables multiple Claude Code instances to share a single Post-Cortex
 - Single HTTP daemon with lock-free concurrent access
 - Multiple clients connect via HTTP/JSON-RPC
 - Shared RocksDB storage with workspace isolation
-- SSE events for real-time notifications
+- Streamable HTTP transport for MCP communication
 
 ## Quick Start
 
@@ -87,9 +87,13 @@ curl -X POST http://127.0.0.1:3737/mcp \
   }'
 ```
 
-**Server-Sent Events:**
+**MCP Streamable HTTP:**
 ```bash
-curl http://127.0.0.1:3737/events
+# Initialize session
+curl -X POST http://127.0.0.1:3737/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
 ```
 
 ## Workspaces
