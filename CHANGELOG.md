@@ -5,6 +5,16 @@ All notable changes to Post-Cortex will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.15] - 2025-12-22
+
+### Fixed
+
+- **MCP Client Compatibility**: Strip `$schema` from tool input schemas
+  - Many MCP clients (Cursor, Windsurf, Continue.dev) don't support JSON Schema draft/2020-12
+  - Replaced `#[tool_handler]` macro with manual `list_tools` implementation
+  - Removes `$schema` field from all tool schemas and nested `$defs`
+  - Error "no schema with key or ref 'https://json-schema.org/draft/2020-12/schema'" is now resolved
+
 ## [0.1.14] - 2025-12-21
 
 ### Changed

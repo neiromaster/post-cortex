@@ -16,9 +16,9 @@ use rmcp::{
     RoleServer, ServerHandler,
     handler::server::router::tool::ToolRouter,
     handler::server::wrapper::Parameters,
-    model::{CallToolResult, Content, ErrorData as McpError, *},
+    model::{CallToolResult, CallToolRequestParam, Content, ErrorData as McpError, ListToolsResult, PaginatedRequestParam, *},
     service::RequestContext,
-    tool, tool_handler, tool_router,
+    tool, tool_router,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -608,7 +608,9 @@ impl PostCortexService {
     }
 }
 
-#[tool_handler]
+// NOTE: We implement ServerHandler manually instead of using #[tool_handler] macro
+// to strip $schema from tool input schemas for broader MCP client compatibility.
+// Many clients (Cursor, Windsurf, Continue.dev) don't support JSON Schema draft/2020-12.
 impl ServerHandler for PostCortexService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -633,5 +635,49 @@ impl ServerHandler for PostCortexService {
             info!("Client initialized from {}", parts.uri);
         }
         Ok(self.get_info())
+    }
+
+    // Custom list_tools that strips $schema from input schemas for client compatibility
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let tools = self.tool_router.list_all();
+
+        // Strip $schema from each tool's input_schema for broader client compatibility
+        // Clone and modify since input_schema is Arc<JsonObject>
+        let tools: Vec<Tool> = tools.into_iter().map(|mut tool| {
+            let mut schema = (*tool.input_schema).clone();
+            schema.remove("$schema");
+            // Also strip from $defs if present
+            if let Some(defs) = schema.get_mut("$defs") {
+                if let Some(defs_obj) = defs.as_object_mut() {
+                    for (_, def) in defs_obj.iter_mut() {
+                        if let Some(def_obj) = def.as_object_mut() {
+                            def_obj.remove("$schema");
+                        }
+                    }
+                }
+            }
+            tool.input_schema = std::sync::Arc::new(schema);
+            tool
+        }).collect();
+
+        Ok(ListToolsResult {
+            tools,
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
+    // Route tool calls to the tool router
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
     }
 }
