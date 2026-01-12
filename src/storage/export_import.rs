@@ -799,8 +799,9 @@ mod tests {
     fn test_version_compatibility() {
         assert!(is_version_compatible("1.0.0"));
         assert!(is_version_compatible("1.0.1")); // Patch version doesn't matter
+        assert!(is_version_compatible("1.1.0")); // Past minor version
         assert!(!is_version_compatible("2.0.0")); // Major version mismatch
-        assert!(!is_version_compatible("1.1.0")); // Future minor version
+        assert!(!is_version_compatible("1.3.0")); // Future minor version
     }
 
     #[test]
