@@ -2519,7 +2519,7 @@ pub async fn semantic_search_global(
                 message.push_str(&format!(
                     "{}. [Session: {}] [{:?}] Similarity: {:.1}% | Relevance: {:.1}% ({})\n",
                     idx + 1,
-                    &r.session_id.to_string()[..8],
+                    &r.session_id.to_string(),
                     r.content_type,
                     r.similarity_score * 100.0,
                     r.combined_score * 100.0,
