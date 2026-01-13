@@ -24,6 +24,7 @@
 //! Claude Code instances to share a single RocksDB instance.
 
 pub mod config;
+pub mod coerce;
 pub mod mcp_service;
 pub mod rmcp_server;
 pub mod server;

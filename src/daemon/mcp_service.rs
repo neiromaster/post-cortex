@@ -12,6 +12,7 @@
 //! 6. manage_workspace - workspace operations
 
 use crate::ConversationMemorySystem;
+use crate::daemon::coerce::{coerce_and_validate, CoercionError};
 use rmcp::{
     RoleServer, ServerHandler,
     handler::server::router::tool::ToolRouter,
@@ -175,9 +176,15 @@ impl PostCortexService {
     #[tool(description = "Manage sessions: create new session or list all sessions")]
     async fn session(
         &self,
-        params: Parameters<SessionRequest>,
+        params: Parameters<serde_json::Value>,
     ) -> Result<CallToolResult, McpError> {
-        let req = &params.0;
+        let req: SessionRequest = coerce_and_validate(params.0)
+            .map_err(|e| {
+                e.with_parameter_path("action".to_string())
+                    .with_expected_type("one of: create, list")
+                    .with_hint("Use 'create' to create a new session or 'list' to see all sessions")
+                    .to_mcp_error()
+            })?;
 
         match req.action.to_lowercase().as_str() {
             "create" => {
@@ -213,11 +220,46 @@ impl PostCortexService {
     #[tool(description = "Add context updates to conversation. Supports single update or bulk mode with updates array.")]
     async fn update_conversation_context(
         &self,
-        params: Parameters<UpdateConversationContextRequest>,
+        params: Parameters<serde_json::Value>,
     ) -> Result<CallToolResult, McpError> {
-        let req = &params.0;
+        let req: UpdateConversationContextRequest = coerce_and_validate(params.0)
+            .map_err(|e| {
+                // Enhance error with parameter-specific hints
+                if e.message.contains("session_id") {
+                    e.clone()
+                        .with_parameter_path("session_id".to_string())
+                        .with_expected_type("UUID string (36 chars with hyphens)")
+                        .with_hint("Create a session first using the 'session' tool with action='create', then use the returned UUID")
+                        .to_mcp_error()
+                } else if e.message.contains("interaction_type") {
+                    e.clone()
+                        .with_parameter_path("interaction_type".to_string())
+                        .with_expected_type("one of: qa, decision_made, problem_solved, code_change, requirement_added, concept_defined")
+                        .with_hint("Valid interaction types: qa, decision_made, problem_solved, code_change, requirement_added, concept_defined")
+                        .to_mcp_error()
+                } else if e.message.contains("content") {
+                    e.clone()
+                        .with_parameter_path("content".to_string())
+                        .with_expected_type("object with string key-value pairs")
+                        .with_hint("Content must be a map of string keys to string values. For complex data, stringify as JSON first.")
+                        .to_mcp_error()
+                } else {
+                    e.to_mcp_error()
+                }
+            })?;
+
         let uuid = Uuid::parse_str(&req.session_id)
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            .map_err(|e| {
+                CoercionError::new(
+                    &format!("Invalid session_id format: '{}'", req.session_id),
+                    e,
+                    Some(req.session_id.clone().into()),
+                )
+                .with_parameter_path("session_id".to_string())
+                .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+                .with_hint("Create a session first using the 'session' tool with action='create'")
+                .to_mcp_error()
+            })?;
 
         // Bulk mode: if updates array is provided
         if let Some(ref updates) = req.updates {
@@ -238,15 +280,29 @@ impl PostCortexService {
         } else {
             // Single update mode
             let interaction_type = req.interaction_type.as_ref()
-                .ok_or_else(|| McpError::invalid_params(
-                    "interaction_type is required for single update (or use updates array for bulk)".to_string(),
-                    None,
-                ))?;
+                .ok_or_else(|| {
+                    CoercionError::new(
+                        "Missing required parameter",
+                        std::io::Error::new(std::io::ErrorKind::InvalidInput, "interaction_type required"),
+                        None,
+                    )
+                    .with_parameter_path("interaction_type".to_string())
+                    .with_expected_type("one of: qa, decision_made, problem_solved, code_change, requirement_added, concept_defined")
+                    .with_hint("For single update, provide 'interaction_type' and 'content'. For bulk updates, use 'updates' array instead.")
+                    .to_mcp_error()
+                })?;
             let content = req.content.as_ref()
-                .ok_or_else(|| McpError::invalid_params(
-                    "content is required for single update (or use updates array for bulk)".to_string(),
-                    None,
-                ))?;
+                .ok_or_else(|| {
+                    CoercionError::new(
+                        "Missing required parameter",
+                        std::io::Error::new(std::io::ErrorKind::InvalidInput, "content required"),
+                        None,
+                    )
+                    .with_parameter_path("content".to_string())
+                    .with_expected_type("object with string key-value pairs")
+                    .with_hint("For single update, provide 'content' and 'interaction_type'. For bulk updates, use 'updates' array instead.")
+                    .to_mcp_error()
+                })?;
 
             let code_ref = req
                 .code_reference
@@ -273,20 +329,61 @@ impl PostCortexService {
     #[tool(description = "Universal semantic search. Scope: session (requires scope_id), workspace (requires scope_id), or global (default).")]
     async fn semantic_search(
         &self,
-        params: Parameters<SemanticSearchRequest>,
+        params: Parameters<serde_json::Value>,
     ) -> Result<CallToolResult, McpError> {
-        let req = &params.0;
+        let req: SemanticSearchRequest = coerce_and_validate(params.0)
+            .map_err(|e| {
+                if e.message.contains("scope") {
+                    e.clone()
+                        .with_parameter_path("scope".to_string())
+                        .with_expected_type("one of: session, workspace, global")
+                        .with_hint("Valid scopes: 'session' (requires scope_id), 'workspace' (requires scope_id), 'global' (default)")
+                        .to_mcp_error()
+                } else if e.message.contains("scope_id") {
+                    e.clone()
+                        .with_parameter_path("scope_id".to_string())
+                        .with_expected_type("UUID string (required when scope is 'session' or 'workspace')")
+                        .with_hint("When scope is 'session' or 'workspace', provide the session/workspace UUID as scope_id")
+                        .to_mcp_error()
+                } else if e.message.contains("query") {
+                    e.clone()
+                        .with_parameter_path("query".to_string())
+                        .with_expected_type("search query string")
+                        .with_hint("Provide a text query to search for in the conversation history")
+                        .to_mcp_error()
+                } else {
+                    e.to_mcp_error()
+                }
+            })?;
+
         let scope = req.scope.as_deref().unwrap_or("global");
 
         match scope.to_lowercase().as_str() {
             "session" => {
                 let session_id = req.scope_id.as_ref()
-                    .ok_or_else(|| McpError::invalid_params(
-                        "scope_id (session_id) is required when scope is 'session'".to_string(),
-                        None,
-                    ))?;
+                    .ok_or_else(|| {
+                        CoercionError::new(
+                            "Missing required parameter",
+                            std::io::Error::new(std::io::ErrorKind::InvalidInput, "scope_id required"),
+                            None,
+                        )
+                        .with_parameter_path("scope_id".to_string())
+                        .with_expected_type("UUID string")
+                        .with_hint("When scope is 'session', you must provide scope_id (the session UUID)")
+                        .to_mcp_error()
+                    })?;
                 let uuid = Uuid::parse_str(session_id)
-                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    .map_err(|e| {
+                        CoercionError::new(
+                            &format!("Invalid scope_id format: '{}'", session_id),
+                            e,
+                            Some(session_id.clone().into()),
+                        )
+                        .with_parameter_path("scope_id".to_string())
+                        .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+                        .with_hint("Provide a valid session UUID")
+                        .to_mcp_error()
+                    })?;
 
                 match crate::tools::mcp::semantic_search_session(
                     uuid,
@@ -341,12 +438,40 @@ impl PostCortexService {
     #[tool(description = "Get session summary. Use 'include' to specify sections: decisions, insights, entities, or all (default).")]
     async fn get_structured_summary(
         &self,
-        params: Parameters<GetStructuredSummaryRequest>,
+        params: Parameters<serde_json::Value>,
     ) -> Result<CallToolResult, McpError> {
-        let req = &params.0;
+        let req: GetStructuredSummaryRequest = coerce_and_validate(params.0)
+            .map_err(|e| {
+                if e.message.contains("session_id") {
+                    e.clone()
+                        .with_parameter_path("session_id".to_string())
+                        .with_expected_type("UUID string (36 chars with hyphens)")
+                        .with_hint("Provide a valid session UUID to get its summary")
+                        .to_mcp_error()
+                } else if e.message.contains("include") {
+                    e.clone()
+                        .with_parameter_path("include".to_string())
+                        .with_expected_type("array of: decisions, insights, entities, questions, all")
+                        .with_hint("Specify which sections to include, or omit for all. Valid values: decisions, insights, entities, questions, all")
+                        .to_mcp_error()
+                } else {
+                    e.to_mcp_error()
+                }
+            })?;
+
         // Validate session_id format
         let _uuid = Uuid::parse_str(&req.session_id)
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            .map_err(|e| {
+                CoercionError::new(
+                    &format!("Invalid session_id format: '{}'", req.session_id),
+                    e,
+                    Some(req.session_id.clone().into()),
+                )
+                .with_parameter_path("session_id".to_string())
+                .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+                .with_hint("Provide a valid session UUID")
+                .to_mcp_error()
+            })?;
 
         // Determine which sections to include
         let include = req.include.as_ref().map(|v| {
@@ -428,19 +553,53 @@ impl PostCortexService {
     #[tool(description = "Query session data. Types: find_related_entities, get_entity_context, search_updates, entity_importance, entity_network, etc.")]
     async fn query_conversation_context(
         &self,
-        params: Parameters<QueryConversationContextRequest>,
+        params: Parameters<serde_json::Value>,
     ) -> Result<CallToolResult, McpError> {
-        let req = &params.0;
+        let req: QueryConversationContextRequest = coerce_and_validate(params.0)
+            .map_err(|e| {
+                if e.message.contains("session_id") {
+                    e.clone()
+                        .with_parameter_path("session_id".to_string())
+                        .with_expected_type("UUID string (36 chars with hyphens)")
+                        .with_hint("Provide the session UUID you want to query")
+                        .to_mcp_error()
+                } else if e.message.contains("query_type") {
+                    e.clone()
+                        .with_parameter_path("query_type".to_string())
+                        .with_expected_type("query type string (e.g., entity_importance, entity_network, find_related_entities)")
+                        .with_hint("Specify the type of query: entity_importance, entity_network, find_related_entities, get_entity_context, search_updates")
+                        .to_mcp_error()
+                } else if e.message.contains("parameters") {
+                    e.clone()
+                        .with_parameter_path("parameters".to_string())
+                        .with_expected_type("object with string key-value pairs")
+                        .with_hint("Query parameters vary by query_type. Provide as key-value pairs.")
+                        .to_mcp_error()
+                } else {
+                    e.to_mcp_error()
+                }
+            })?;
+
         let uuid = Uuid::parse_str(&req.session_id)
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            .map_err(|e| {
+                CoercionError::new(
+                    &format!("Invalid session_id format: '{}'", req.session_id),
+                    e,
+                    Some(req.session_id.clone().into()),
+                )
+                .with_parameter_path("session_id".to_string())
+                .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+                .with_hint("Provide a valid session UUID")
+                .to_mcp_error()
+            })?;
 
         // Handle special query types that map to deprecated tools
         match req.query_type.to_lowercase().as_str() {
             "entity_importance" => {
                 let limit = req.parameters.get("limit")
-                    .and_then(|s| s.parse().ok());
+                    .and_then(|s: &String| s.parse().ok());
                 let min_importance = req.parameters.get("min_importance")
-                    .and_then(|s| s.parse().ok());
+                    .and_then(|s: &String| s.parse().ok());
 
                 match crate::tools::mcp::get_entity_importance_analysis(
                     req.session_id.clone(),
@@ -454,9 +613,9 @@ impl PostCortexService {
             "entity_network" => {
                 let center_entity = req.parameters.get("center_entity").cloned();
                 let max_entities = req.parameters.get("max_entities")
-                    .and_then(|s| s.parse().ok());
+                    .and_then(|s: &String| s.parse().ok());
                 let max_relationships = req.parameters.get("max_relationships")
-                    .and_then(|s| s.parse().ok());
+                    .and_then(|s: &String| s.parse().ok());
 
                 match crate::tools::mcp::get_entity_network_view(
                     req.session_id.clone(),
@@ -499,22 +658,47 @@ impl PostCortexService {
     #[tool(description = "Manage workspaces. Actions: create, list, get, delete, add_session, remove_session")]
     async fn manage_workspace(
         &self,
-        params: Parameters<ManageWorkspaceRequest>,
+        params: Parameters<serde_json::Value>,
     ) -> Result<CallToolResult, McpError> {
-        let req = &params.0;
+        let req: ManageWorkspaceRequest = coerce_and_validate(params.0)
+            .map_err(|e| {
+                if e.message.contains("action") {
+                    e.clone()
+                        .with_parameter_path("action".to_string())
+                        .with_expected_type("one of: create, list, get, delete, add_session, remove_session")
+                        .with_hint("Valid actions: create (workspace), list (all), get (workspace details), delete (workspace), add_session (to workspace), remove_session (from workspace)")
+                        .to_mcp_error()
+                } else {
+                    e.to_mcp_error()
+                }
+            })?;
 
         match req.action.to_lowercase().as_str() {
             "create" => {
                 let name = req.name.as_ref()
-                    .ok_or_else(|| McpError::invalid_params(
-                        "name is required for create action".to_string(),
-                        None,
-                    ))?;
+                    .ok_or_else(|| {
+                        CoercionError::new(
+                            "Missing required parameter",
+                            std::io::Error::new(std::io::ErrorKind::InvalidInput, "name required"),
+                            None,
+                        )
+                        .with_parameter_path("name".to_string())
+                        .with_expected_type("workspace name string")
+                        .with_hint("For create action, provide 'name' and 'description' for the new workspace")
+                        .to_mcp_error()
+                    })?;
                 let description = req.description.as_ref()
-                    .ok_or_else(|| McpError::invalid_params(
-                        "description is required for create action".to_string(),
-                        None,
-                    ))?;
+                    .ok_or_else(|| {
+                        CoercionError::new(
+                            "Missing required parameter",
+                            std::io::Error::new(std::io::ErrorKind::InvalidInput, "description required"),
+                            None,
+                        )
+                        .with_parameter_path("description".to_string())
+                        .with_expected_type("workspace description string")
+                        .with_hint("For create action, provide 'name' and 'description' for the new workspace")
+                        .to_mcp_error()
+                    })?;
 
                 match crate::tools::mcp::create_workspace(name.clone(), description.clone()).await {
                     Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
@@ -529,12 +713,29 @@ impl PostCortexService {
             }
             "get" => {
                 let workspace_id = req.workspace_id.as_ref()
-                    .ok_or_else(|| McpError::invalid_params(
-                        "workspace_id is required for get action".to_string(),
-                        None,
-                    ))?;
+                    .ok_or_else(|| {
+                        CoercionError::new(
+                            "Missing required parameter",
+                            std::io::Error::new(std::io::ErrorKind::InvalidInput, "workspace_id required"),
+                            None,
+                        )
+                        .with_parameter_path("workspace_id".to_string())
+                        .with_expected_type("workspace UUID string")
+                        .with_hint("For get action, provide 'workspace_id' of the workspace to retrieve")
+                        .to_mcp_error()
+                    })?;
                 let uuid = Uuid::parse_str(workspace_id)
-                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    .map_err(|e| {
+                        CoercionError::new(
+                            &format!("Invalid workspace_id format: '{}'", workspace_id),
+                            e,
+                            Some(workspace_id.clone().into()),
+                        )
+                        .with_parameter_path("workspace_id".to_string())
+                        .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+                        .with_hint("Provide a valid workspace UUID")
+                        .to_mcp_error()
+                    })?;
 
                 match crate::tools::mcp::get_workspace(uuid).await {
                     Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
@@ -543,12 +744,29 @@ impl PostCortexService {
             }
             "delete" => {
                 let workspace_id = req.workspace_id.as_ref()
-                    .ok_or_else(|| McpError::invalid_params(
-                        "workspace_id is required for delete action".to_string(),
-                        None,
-                    ))?;
+                    .ok_or_else(|| {
+                        CoercionError::new(
+                            "Missing required parameter",
+                            std::io::Error::new(std::io::ErrorKind::InvalidInput, "workspace_id required"),
+                            None,
+                        )
+                        .with_parameter_path("workspace_id".to_string())
+                        .with_expected_type("workspace UUID string")
+                        .with_hint("For delete action, provide 'workspace_id' of the workspace to delete")
+                        .to_mcp_error()
+                    })?;
                 let uuid = Uuid::parse_str(workspace_id)
-                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+                    .map_err(|e| {
+                        CoercionError::new(
+                            &format!("Invalid workspace_id format: '{}'", workspace_id),
+                            e,
+                            Some(workspace_id.clone().into()),
+                        )
+                        .with_parameter_path("workspace_id".to_string())
+                        .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+                        .with_hint("Provide a valid workspace UUID")
+                        .to_mcp_error()
+                    })?;
 
                 match crate::tools::mcp::delete_workspace(uuid).await {
                     Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
@@ -557,21 +775,55 @@ impl PostCortexService {
             }
             "add_session" => {
                 let workspace_id = req.workspace_id.as_ref()
-                    .ok_or_else(|| McpError::invalid_params(
-                        "workspace_id is required for add_session action".to_string(),
-                        None,
-                    ))?;
+                    .ok_or_else(|| {
+                        CoercionError::new(
+                            "Missing required parameter",
+                            std::io::Error::new(std::io::ErrorKind::InvalidInput, "workspace_id required"),
+                            None,
+                        )
+                        .with_parameter_path("workspace_id".to_string())
+                        .with_expected_type("workspace UUID string")
+                        .with_hint("For add_session action, provide 'workspace_id' and 'session_id'")
+                        .to_mcp_error()
+                    })?;
                 let session_id = req.session_id.as_ref()
-                    .ok_or_else(|| McpError::invalid_params(
-                        "session_id is required for add_session action".to_string(),
-                        None,
-                    ))?;
+                    .ok_or_else(|| {
+                        CoercionError::new(
+                            "Missing required parameter",
+                            std::io::Error::new(std::io::ErrorKind::InvalidInput, "session_id required"),
+                            None,
+                        )
+                        .with_parameter_path("session_id".to_string())
+                        .with_expected_type("session UUID string")
+                        .with_hint("For add_session action, provide 'workspace_id' and 'session_id'")
+                        .to_mcp_error()
+                    })?;
                 let role = req.role.clone().unwrap_or_else(|| "related".to_string());
 
                 let ws_uuid = Uuid::parse_str(workspace_id)
-                    .map_err(|e| McpError::invalid_params(format!("Invalid workspace_id: {}", e), None))?;
+                    .map_err(|e| {
+                        CoercionError::new(
+                            &format!("Invalid workspace_id format: '{}'", workspace_id),
+                            e,
+                            Some(workspace_id.clone().into()),
+                        )
+                        .with_parameter_path("workspace_id".to_string())
+                        .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+                        .with_hint("Provide a valid workspace UUID")
+                        .to_mcp_error()
+                    })?;
                 let sess_uuid = Uuid::parse_str(session_id)
-                    .map_err(|e| McpError::invalid_params(format!("Invalid session_id: {}", e), None))?;
+                    .map_err(|e| {
+                        CoercionError::new(
+                            &format!("Invalid session_id format: '{}'", session_id),
+                            e,
+                            Some(session_id.clone().into()),
+                        )
+                        .with_parameter_path("session_id".to_string())
+                        .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+                        .with_hint("Provide a valid session UUID")
+                        .to_mcp_error()
+                    })?;
 
                 match crate::tools::mcp::add_session_to_workspace(ws_uuid, sess_uuid, role).await {
                     Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
@@ -580,20 +832,54 @@ impl PostCortexService {
             }
             "remove_session" => {
                 let workspace_id = req.workspace_id.as_ref()
-                    .ok_or_else(|| McpError::invalid_params(
-                        "workspace_id is required for remove_session action".to_string(),
-                        None,
-                    ))?;
+                    .ok_or_else(|| {
+                        CoercionError::new(
+                            "Missing required parameter",
+                            std::io::Error::new(std::io::ErrorKind::InvalidInput, "workspace_id required"),
+                            None,
+                        )
+                        .with_parameter_path("workspace_id".to_string())
+                        .with_expected_type("workspace UUID string")
+                        .with_hint("For remove_session action, provide 'workspace_id' and 'session_id'")
+                        .to_mcp_error()
+                    })?;
                 let session_id = req.session_id.as_ref()
-                    .ok_or_else(|| McpError::invalid_params(
-                        "session_id is required for remove_session action".to_string(),
-                        None,
-                    ))?;
+                    .ok_or_else(|| {
+                        CoercionError::new(
+                            "Missing required parameter",
+                            std::io::Error::new(std::io::ErrorKind::InvalidInput, "session_id required"),
+                            None,
+                        )
+                        .with_parameter_path("session_id".to_string())
+                        .with_expected_type("session UUID string")
+                        .with_hint("For remove_session action, provide 'workspace_id' and 'session_id'")
+                        .to_mcp_error()
+                    })?;
 
                 let ws_uuid = Uuid::parse_str(workspace_id)
-                    .map_err(|e| McpError::invalid_params(format!("Invalid workspace_id: {}", e), None))?;
+                    .map_err(|e| {
+                        CoercionError::new(
+                            &format!("Invalid workspace_id format: '{}'", workspace_id),
+                            e,
+                            Some(workspace_id.clone().into()),
+                        )
+                        .with_parameter_path("workspace_id".to_string())
+                        .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+                        .with_hint("Provide a valid workspace UUID")
+                        .to_mcp_error()
+                    })?;
                 let sess_uuid = Uuid::parse_str(session_id)
-                    .map_err(|e| McpError::invalid_params(format!("Invalid session_id: {}", e), None))?;
+                    .map_err(|e| {
+                        CoercionError::new(
+                            &format!("Invalid session_id format: '{}'", session_id),
+                            e,
+                            Some(session_id.clone().into()),
+                        )
+                        .with_parameter_path("session_id".to_string())
+                        .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+                        .with_hint("Provide a valid session UUID")
+                        .to_mcp_error()
+                    })?;
 
                 match crate::tools::mcp::remove_session_from_workspace(ws_uuid, sess_uuid).await {
                     Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
