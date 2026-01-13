@@ -405,6 +405,34 @@ impl Default for SystemConfig {
     }
 }
 
+/// Safely truncates a string at the nearest UTF-8 character boundary before `max_bytes`.
+///
+/// # Arguments
+/// * `s` - The string to truncate
+/// * `max_bytes` - Maximum byte length (not character length)
+///
+/// # Returns
+/// The byte index for safe truncation, guaranteed to be at a UTF-8 character boundary
+///
+/// # Example
+/// ```
+/// let text = "Hello мир"; // "мир" is Cyrillic, multi-byte UTF-8
+/// let safe_len = safe_truncate_len(text, 8);
+/// let truncated = &text[..safe_len]; // Won't panic
+/// ```
+fn safe_truncate_len(s: &str, max_bytes: usize) -> usize {
+    if s.len() <= max_bytes {
+        return s.len();
+    }
+
+    // Find the nearest character boundary at or before max_bytes
+    let mut idx = max_bytes;
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 impl LockFreeConversationMemorySystem {
     /// Create system from config
     ///
@@ -884,9 +912,10 @@ impl LockFreeConversationMemorySystem {
         tracing::info!("Internal: Processing session {}", session_id);
         // Content size limit to prevent timeouts
         if description.len() > 2000 {
-            description.truncate(1800);
+            let safe_len = safe_truncate_len(&description, 1800);
+            description.truncate(safe_len);
             description.push_str("... (truncated)");
-            debug!("Truncated long description to prevent timeout");
+            debug!("Truncated long description to prevent timeout (UTF-8 safe)");
         }
 
         tracing::info!("Internal: Getting or creating session...");
