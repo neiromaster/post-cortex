@@ -19,11 +19,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 use clap::{Parser, Subcommand};
 use post_cortex::daemon::{DaemonConfig, is_daemon_running, run_stdio_proxy, start_rmcp_daemon};
 #[cfg(feature = "surrealdb-storage")]
-use post_cortex::storage::SurrealDBStorage;
+use post_cortex::storage::{GraphStorage, Storage, StorageBackendType, SurrealDBStorage};
 use post_cortex::storage::{
-    CompressionType, ExportOptions, GraphStorage, ImportOptions, RealRocksDBStorage, Storage,
-    StorageBackendType, list_export_sessions, preview_export_file, read_export_file,
-    write_export_file,
+    CompressionType, ExportOptions, ImportOptions, RealRocksDBStorage, list_export_sessions,
+    preview_export_file, read_export_file, write_export_file,
 };
 use post_cortex::workspace::SessionRole;
 use post_cortex::{LockFreeConversationMemorySystem, SystemConfig};
@@ -545,6 +544,7 @@ fn init_config() -> Result<(), String> {
 
 async fn init_admin_system() -> Result<LockFreeConversationMemorySystem, String> {
     let daemon_config = DaemonConfig::load();
+    #[allow(unused_mut)]
     let mut config = SystemConfig {
         enable_embeddings: false,
         data_directory: daemon_config.data_directory,
@@ -953,6 +953,7 @@ async fn vectorize_all() -> Result<(), String> {
     println!("Starting vectorization of all sessions...");
 
     let daemon_config = DaemonConfig::load();
+    #[allow(unused_mut)]
     let mut config = SystemConfig {
         enable_embeddings: true,
         auto_vectorize_on_update: false,
