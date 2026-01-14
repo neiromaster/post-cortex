@@ -1,6 +1,8 @@
 use anyhow::Result;
 use post_cortex::core::lockfree_embeddings::{EmbeddingConfig, LockFreeLocalEmbeddingEngine};
+use serial_test::serial;
 
+#[serial]
 #[tokio::test]
 async fn test_identical_text_similarity() -> Result<()> {
     // Test that identical texts produce highly similar embeddings (>95%)
@@ -57,6 +59,7 @@ async fn test_identical_text_similarity() -> Result<()> {
     Ok(())
 }
 
+#[serial]
 #[tokio::test]
 async fn test_similar_text_similarity() -> Result<()> {
     // Test that similar texts produce reasonable similarity scores
@@ -101,6 +104,7 @@ async fn test_similar_text_similarity() -> Result<()> {
 
     Ok(())
 }
+#[serial]
 #[tokio::test]
 async fn test_problematic_text_similarity() -> Result<()> {
     // Test the problematic text that gives 11% similarity in daemon
@@ -139,6 +143,7 @@ async fn test_problematic_text_similarity() -> Result<()> {
     Ok(())
 }
 
+#[serial]
 #[tokio::test]
 async fn test_end_to_end_semantic_search_pipeline() -> Result<()> {
     // End-to-end test: Create session, add QA update, search semantically
@@ -228,6 +233,7 @@ async fn test_end_to_end_semantic_search_pipeline() -> Result<()> {
     Ok(())
 }
 
+#[serial]
 #[tokio::test]
 async fn test_unrelated_text_should_have_low_similarity() -> Result<()> {
     // Test that COMPLETELY unrelated texts have LOW similarity

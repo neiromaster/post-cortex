@@ -1,6 +1,7 @@
 // Integration tests for Admin CLI functionality (Workspace and Session management)
 use post_cortex::{ConversationMemorySystem, SystemConfig};
 use post_cortex::workspace::SessionRole;
+use serial_test::serial;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -15,6 +16,7 @@ async fn create_test_system() -> (Arc<ConversationMemorySystem>, TempDir) {
     (Arc::new(system), temp_dir)
 }
 
+#[serial]
 #[tokio::test]
 async fn test_full_admin_lifecycle() {
     let (system, _temp_dir) = create_test_system().await;
@@ -94,6 +96,7 @@ async fn test_full_admin_lifecycle() {
     assert!(workspaces_final.is_empty());
 }
 
+#[serial]
 #[tokio::test]
 async fn test_multiple_sessions_management() {
     let (system, _temp_dir) = create_test_system().await;

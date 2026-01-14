@@ -8,9 +8,12 @@
 // 5. Remove consistency - removed vectors don't appear in searches
 // 6. Stats accuracy - statistics match actual operations
 // 7. Concurrent safety - operations are thread-safe
+//
+// NOTE: All tests in this file should run serially due to shared VectorDB resources
 
 use post_cortex::core::vector_db::{FastVectorDB, VectorDbConfig, VectorMetadata};
 use proptest::prelude::*;
+use serial_test::serial;
 
 // Strategy to generate valid vector dimensions
 fn dimension_strategy() -> impl Strategy<Value = usize> {
@@ -1121,6 +1124,7 @@ mod search_mode_tests {
         }
     }
 
+    #[serial]
     #[test]
     fn test_search_mode_performance_comparison() {
         let dim = 384;

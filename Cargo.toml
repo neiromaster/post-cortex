@@ -71,6 +71,7 @@ tempfile = "3.0"
 criterion = "0.8.1"
 portpicker = "0.1"
 proptest = "1.5"
+serial_test = { version = "3.3", features = ["async"] }
 
 [[bin]]
 name = "pcx"

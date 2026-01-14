@@ -2,8 +2,10 @@
 #![cfg(feature = "embeddings")]
 
 use post_cortex::session::active_session::{ActiveSession, preload_ner_engine};
+use serial_test::serial;
 use uuid::Uuid;
 
+#[serial]
 #[tokio::test]
 #[ignore] // Requires model download (~250MB), run manually with --ignored
 async fn test_ner_integration_with_session() {
@@ -53,6 +55,7 @@ async fn test_ner_integration_with_session() {
     println!("\n NER integration test passed!");
 }
 
+#[serial]
 #[tokio::test]
 async fn test_ner_preload_function() {
     // Test that preload function works

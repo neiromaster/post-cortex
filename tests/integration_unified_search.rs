@@ -1,4 +1,5 @@
 use post_cortex::{ConversationMemorySystem, SystemConfig};
+use serial_test::serial;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -20,6 +21,7 @@ async fn create_test_system() -> (Arc<ConversationMemorySystem>, tempfile::TempD
     (Arc::new(system), temp_dir)
 }
 
+#[serial]
 #[tokio::test]
 async fn test_comprehensive_unified_search() {
     let (system_arc, _temp_dir) = create_test_system().await;
@@ -164,6 +166,7 @@ async fn test_comprehensive_unified_search() {
     assert!(results.iter().all(|r| r.session_id == sess_auth), "Session search must filter by session");
 }
 
+#[serial]
 #[tokio::test]
 async fn test_session_isolation_bug_reproduction() {
     // This test specifically reproduces the bug found during manual testing
