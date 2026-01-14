@@ -30,6 +30,7 @@ pub mod rmcp_server;
 pub mod server;
 pub mod sse;
 pub mod stdio_proxy;
+pub mod validate;
 
 pub use config::DaemonConfig;
 pub use mcp_service::PostCortexService;
