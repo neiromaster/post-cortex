@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Julius ML
+// Copyright (c) 2025, 2026 Julius ML
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -61,11 +61,8 @@ pub trait Storage: Send + Sync {
     // ===== Context Update Operations =====
 
     /// Batch save multiple context updates efficiently
-    async fn batch_save_updates(
-        &self,
-        session_id: Uuid,
-        updates: Vec<ContextUpdate>,
-    ) -> Result<()>;
+    async fn batch_save_updates(&self, session_id: Uuid, updates: Vec<ContextUpdate>)
+    -> Result<()>;
 
     /// Load all updates for a session
     async fn load_session_updates(&self, session_id: Uuid) -> Result<Vec<ContextUpdate>>;
@@ -236,7 +233,10 @@ pub trait VectorStorage: Send + Sync {
     async fn total_count(&self) -> usize;
 
     /// Get all vectors for a session (for loading into memory)
-    async fn get_session_vectors(&self, session_id: &str) -> Result<Vec<(Vec<f32>, VectorMetadata)>>;
+    async fn get_session_vectors(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<(Vec<f32>, VectorMetadata)>>;
 
     /// Get all vectors from storage (for loading into memory on startup)
     async fn get_all_vectors(&self) -> Result<Vec<(Vec<f32>, VectorMetadata)>>;
@@ -467,6 +467,133 @@ impl Storage for StorageBackend {
             StorageBackend::RocksDB(storage) => storage.get_stats().await,
             #[cfg(feature = "surrealdb-storage")]
             StorageBackend::SurrealDB(storage) => storage.get_stats().await,
+        }
+    }
+}
+
+// Implement GraphStorage trait for StorageBackend via delegation
+#[async_trait]
+impl GraphStorage for StorageBackend {
+    async fn upsert_entity(&self, session_id: Uuid, entity: &EntityData) -> Result<()> {
+        match self {
+            StorageBackend::RocksDB(storage) => storage.upsert_entity(session_id, entity).await,
+            #[cfg(feature = "surrealdb-storage")]
+            StorageBackend::SurrealDB(storage) => storage.upsert_entity(session_id, entity).await,
+        }
+    }
+
+    async fn get_entity(&self, session_id: Uuid, name: &str) -> Result<Option<EntityData>> {
+        match self {
+            StorageBackend::RocksDB(storage) => storage.get_entity(session_id, name).await,
+            #[cfg(feature = "surrealdb-storage")]
+            StorageBackend::SurrealDB(storage) => storage.get_entity(session_id, name).await,
+        }
+    }
+
+    async fn list_entities(&self, session_id: Uuid) -> Result<Vec<EntityData>> {
+        match self {
+            StorageBackend::RocksDB(storage) => storage.list_entities(session_id).await,
+            #[cfg(feature = "surrealdb-storage")]
+            StorageBackend::SurrealDB(storage) => storage.list_entities(session_id).await,
+        }
+    }
+
+    async fn delete_entity(&self, session_id: Uuid, name: &str) -> Result<()> {
+        match self {
+            StorageBackend::RocksDB(storage) => storage.delete_entity(session_id, name).await,
+            #[cfg(feature = "surrealdb-storage")]
+            StorageBackend::SurrealDB(storage) => storage.delete_entity(session_id, name).await,
+        }
+    }
+
+    async fn create_relationship(
+        &self,
+        session_id: Uuid,
+        relationship: &EntityRelationship,
+    ) -> Result<()> {
+        match self {
+            StorageBackend::RocksDB(storage) => {
+                storage.create_relationship(session_id, relationship).await
+            }
+            #[cfg(feature = "surrealdb-storage")]
+            StorageBackend::SurrealDB(storage) => {
+                storage.create_relationship(session_id, relationship).await
+            }
+        }
+    }
+
+    async fn find_related_entities(
+        &self,
+        session_id: Uuid,
+        entity_name: &str,
+    ) -> Result<Vec<String>> {
+        match self {
+            StorageBackend::RocksDB(storage) => {
+                storage.find_related_entities(session_id, entity_name).await
+            }
+            #[cfg(feature = "surrealdb-storage")]
+            StorageBackend::SurrealDB(storage) => {
+                storage.find_related_entities(session_id, entity_name).await
+            }
+        }
+    }
+
+    async fn find_related_by_type(
+        &self,
+        session_id: Uuid,
+        entity_name: &str,
+        relation_type: &RelationType,
+    ) -> Result<Vec<String>> {
+        match self {
+            StorageBackend::RocksDB(storage) => {
+                storage
+                    .find_related_by_type(session_id, entity_name, relation_type)
+                    .await
+            }
+            #[cfg(feature = "surrealdb-storage")]
+            StorageBackend::SurrealDB(storage) => {
+                storage
+                    .find_related_by_type(session_id, entity_name, relation_type)
+                    .await
+            }
+        }
+    }
+
+    async fn find_shortest_path(
+        &self,
+        session_id: Uuid,
+        from: &str,
+        to: &str,
+    ) -> Result<Option<Vec<String>>> {
+        match self {
+            StorageBackend::RocksDB(storage) => {
+                storage.find_shortest_path(session_id, from, to).await
+            }
+            #[cfg(feature = "surrealdb-storage")]
+            StorageBackend::SurrealDB(storage) => {
+                storage.find_shortest_path(session_id, from, to).await
+            }
+        }
+    }
+
+    async fn get_entity_network(
+        &self,
+        session_id: Uuid,
+        center: &str,
+        max_depth: usize,
+    ) -> Result<EntityNetwork> {
+        match self {
+            StorageBackend::RocksDB(storage) => {
+                storage
+                    .get_entity_network(session_id, center, max_depth)
+                    .await
+            }
+            #[cfg(feature = "surrealdb-storage")]
+            StorageBackend::SurrealDB(storage) => {
+                storage
+                    .get_entity_network(session_id, center, max_depth)
+                    .await
+            }
         }
     }
 }

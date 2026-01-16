@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Julius ML
+// Copyright (c) 2025,2026 Julius ML
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -17,17 +17,19 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-use crate::core::context_update::ContextUpdate;
+use crate::core::context_update::{ContextUpdate, EntityData, EntityRelationship, RelationType};
 use crate::core::lockfree_vector_db::{SearchMatch, VectorMetadata};
 use crate::core::structured_context::StructuredContext;
+use crate::graph::entity_graph::EntityNetwork;
 use crate::session::active_session::{ActiveSession, ChangeRecord, CodeReference};
-use crate::storage::traits::{Storage, VectorStorage};
+use crate::storage::traits::{GraphStorage, Storage, VectorStorage};
 use crate::workspace::SessionRole;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rocksdb::{DB, Options, WriteBatch};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -50,6 +52,92 @@ pub struct StoredWorkspaceSession {
     pub session_id: Uuid,
     pub role: crate::workspace::SessionRole,
     pub added_at: u64,
+}
+
+/// Required embedding dimension for vector storage (must match model output)
+pub const EMBEDDING_DIMENSION: usize = 384;
+
+/// Stored entity record for RocksDB persistence
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StoredEntity {
+    pub session_id: Uuid,
+    pub name: String,
+    pub entity_type: String,
+    pub first_mentioned: DateTime<Utc>,
+    pub last_mentioned: DateTime<Utc>,
+    pub mention_count: u32,
+    pub importance_score: f32,
+    pub description: Option<String>,
+}
+
+impl StoredEntity {
+    pub fn from_entity_data(session_id: Uuid, entity: &EntityData) -> Self {
+        Self {
+            session_id,
+            name: entity.name.clone(),
+            entity_type: format!("{:?}", entity.entity_type),
+            first_mentioned: entity.first_mentioned,
+            last_mentioned: entity.last_mentioned,
+            mention_count: entity.mention_count,
+            importance_score: entity.importance_score,
+            description: entity.description.clone(),
+        }
+    }
+
+    pub fn to_entity_data(&self) -> EntityData {
+        use crate::core::context_update::EntityType;
+        EntityData {
+            name: self.name.clone(),
+            entity_type: match self.entity_type.as_str() {
+                "Technology" => EntityType::Technology,
+                "Concept" => EntityType::Concept,
+                "Problem" => EntityType::Problem,
+                "Solution" => EntityType::Solution,
+                "Decision" => EntityType::Decision,
+                "CodeComponent" => EntityType::CodeComponent,
+                _ => EntityType::Concept,
+            },
+            first_mentioned: self.first_mentioned,
+            last_mentioned: self.last_mentioned,
+            mention_count: self.mention_count,
+            importance_score: self.importance_score,
+            description: self.description.clone(),
+        }
+    }
+}
+
+/// Stored relationship record for RocksDB persistence
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct StoredRelationship {
+    pub session_id: Uuid,
+    pub from_entity: String,
+    pub to_entity: String,
+    pub relation_type: String,
+    pub context: String,
+}
+
+impl StoredRelationship {
+    pub fn from_relationship(session_id: Uuid, rel: &EntityRelationship) -> Self {
+        Self {
+            session_id,
+            from_entity: rel.from_entity.clone(),
+            to_entity: rel.to_entity.clone(),
+            relation_type: format!("{:?}", rel.relation_type),
+            context: rel.context.clone(),
+        }
+    }
+
+    pub fn to_relationship(&self) -> EntityRelationship {
+        EntityRelationship {
+            from_entity: self.from_entity.clone(),
+            to_entity: self.to_entity.clone(),
+            relation_type: self
+                .relation_type
+                .parse()
+                .unwrap_or(RelationType::RelatedTo),
+            context: self.context.clone(),
+        }
+    }
 }
 
 /// Real RocksDB storage implementation for high performance
@@ -1025,6 +1113,14 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 #[async_trait]
 impl VectorStorage for RealRocksDBStorage {
     async fn add_vector(&self, vector: Vec<f32>, metadata: VectorMetadata) -> Result<String> {
+        // Validate embedding dimension for consistency with SurrealDB backend
+        if vector.len() != EMBEDDING_DIMENSION {
+            return Err(anyhow::anyhow!(
+                "Invalid embedding dimension: expected {}, got {}",
+                EMBEDDING_DIMENSION,
+                vector.len()
+            ));
+        }
         let id = metadata.id.clone();
         let embedding = StoredEmbedding::new(vector, metadata);
         self.save_embedding(&embedding).await?;
@@ -1182,6 +1278,399 @@ impl VectorStorage for RealRocksDBStorage {
     }
 }
 
+// ============================================================================
+// GraphStorage Trait Implementation - Entity Graph Persistence
+// ============================================================================
+
+impl RealRocksDBStorage {
+    /// Generate key for entity storage
+    fn entity_key(session_id: Uuid, entity_name: &str) -> String {
+        format!("entity:{}:{}", session_id, entity_name)
+    }
+
+    /// Generate key prefix for all entities in a session
+    fn entity_prefix(session_id: Uuid) -> String {
+        format!("entity:{}:", session_id)
+    }
+
+    /// Generate key for relationship storage
+    fn relationship_key(
+        session_id: Uuid,
+        from_entity: &str,
+        to_entity: &str,
+        relation_type: &RelationType,
+    ) -> String {
+        format!(
+            "relationship:{}:{}:{}:{:?}",
+            session_id, from_entity, to_entity, relation_type
+        )
+    }
+
+    /// Generate key prefix for all relationships in a session
+    fn relationship_prefix(session_id: Uuid) -> String {
+        format!("relationship:{}:", session_id)
+    }
+
+    /// Save an entity to RocksDB
+    async fn save_entity(&self, entity: &StoredEntity) -> Result<()> {
+        let db = self.db.clone();
+        let entity = entity.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let key = Self::entity_key(entity.session_id, &entity.name);
+            let data = bincode::serde::encode_to_vec(&entity, bincode::config::standard())
+                .map_err(|e| anyhow::anyhow!("Failed to serialize entity: {}", e))?;
+            db.put(key.as_bytes(), &data)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+
+        Ok(())
+    }
+
+    /// Load an entity from RocksDB
+    async fn load_entity(&self, session_id: Uuid, name: &str) -> Result<Option<StoredEntity>> {
+        let db = self.db.clone();
+        let key = Self::entity_key(session_id, name);
+
+        tokio::task::spawn_blocking(move || -> Result<Option<StoredEntity>> {
+            if let Some(data) = db.get(key.as_bytes())? {
+                let (entity, _) = bincode::serde::decode_from_slice::<StoredEntity, _>(
+                    &data,
+                    bincode::config::standard(),
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize entity: {}", e))?;
+                Ok(Some(entity))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+    }
+
+    /// Load all entities for a session
+    async fn load_session_entities(&self, session_id: Uuid) -> Result<Vec<StoredEntity>> {
+        let db = self.db.clone();
+        let prefix = Self::entity_prefix(session_id);
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<StoredEntity>> {
+            let mut entities = Vec::new();
+            let iter = db.iterator(rocksdb::IteratorMode::From(
+                prefix.as_bytes(),
+                rocksdb::Direction::Forward,
+            ));
+
+            for item in iter {
+                let (key, value) = item?;
+                let key_str = String::from_utf8_lossy(&key);
+
+                if !key_str.starts_with(&prefix) {
+                    break;
+                }
+
+                if let Ok((entity, _)) = bincode::serde::decode_from_slice::<StoredEntity, _>(
+                    &value,
+                    bincode::config::standard(),
+                ) {
+                    entities.push(entity);
+                }
+            }
+
+            Ok(entities)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+    }
+
+    /// Delete an entity from RocksDB
+    async fn delete_stored_entity(&self, session_id: Uuid, name: &str) -> Result<()> {
+        let db = self.db.clone();
+        let key = Self::entity_key(session_id, name);
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            db.delete(key.as_bytes())?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+
+        Ok(())
+    }
+
+    /// Save a relationship to RocksDB
+    async fn save_relationship(&self, relationship: &StoredRelationship) -> Result<()> {
+        let db = self.db.clone();
+        let relationship = relationship.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let rel_type: RelationType = relationship
+                .relation_type
+                .parse()
+                .unwrap_or(RelationType::RelatedTo);
+            let key = Self::relationship_key(
+                relationship.session_id,
+                &relationship.from_entity,
+                &relationship.to_entity,
+                &rel_type,
+            );
+            let data = bincode::serde::encode_to_vec(&relationship, bincode::config::standard())
+                .map_err(|e| anyhow::anyhow!("Failed to serialize relationship: {}", e))?;
+            db.put(key.as_bytes(), &data)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+
+        Ok(())
+    }
+
+    /// Load all relationships for a session
+    async fn load_session_relationships(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<StoredRelationship>> {
+        let db = self.db.clone();
+        let prefix = Self::relationship_prefix(session_id);
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<StoredRelationship>> {
+            let mut relationships = Vec::new();
+            let iter = db.iterator(rocksdb::IteratorMode::From(
+                prefix.as_bytes(),
+                rocksdb::Direction::Forward,
+            ));
+
+            for item in iter {
+                let (key, value) = item?;
+                let key_str = String::from_utf8_lossy(&key);
+
+                if !key_str.starts_with(&prefix) {
+                    break;
+                }
+
+                if let Ok((rel, _)) = bincode::serde::decode_from_slice::<StoredRelationship, _>(
+                    &value,
+                    bincode::config::standard(),
+                ) {
+                    relationships.push(rel);
+                }
+            }
+
+            Ok(relationships)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+    }
+}
+
+#[async_trait]
+impl GraphStorage for RealRocksDBStorage {
+    async fn upsert_entity(&self, session_id: Uuid, entity: &EntityData) -> Result<()> {
+        let stored = StoredEntity::from_entity_data(session_id, entity);
+        self.save_entity(&stored).await
+    }
+
+    async fn get_entity(&self, session_id: Uuid, name: &str) -> Result<Option<EntityData>> {
+        let stored = self.load_entity(session_id, name).await?;
+        Ok(stored.map(|s| s.to_entity_data()))
+    }
+
+    async fn list_entities(&self, session_id: Uuid) -> Result<Vec<EntityData>> {
+        let stored = self.load_session_entities(session_id).await?;
+        Ok(stored.into_iter().map(|s| s.to_entity_data()).collect())
+    }
+
+    async fn delete_entity(&self, session_id: Uuid, name: &str) -> Result<()> {
+        self.delete_stored_entity(session_id, name).await
+    }
+
+    async fn create_relationship(
+        &self,
+        session_id: Uuid,
+        relationship: &EntityRelationship,
+    ) -> Result<()> {
+        let stored = StoredRelationship::from_relationship(session_id, relationship);
+        self.save_relationship(&stored).await
+    }
+
+    async fn find_related_entities(
+        &self,
+        session_id: Uuid,
+        entity_name: &str,
+    ) -> Result<Vec<String>> {
+        let relationships = self.load_session_relationships(session_id).await?;
+        let mut related: Vec<String> = relationships
+            .into_iter()
+            .filter_map(|r| {
+                if r.from_entity == entity_name {
+                    Some(r.to_entity)
+                } else if r.to_entity == entity_name {
+                    Some(r.from_entity)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Deduplicate
+        related.sort();
+        related.dedup();
+        Ok(related)
+    }
+
+    async fn find_related_by_type(
+        &self,
+        session_id: Uuid,
+        entity_name: &str,
+        relation_type: &RelationType,
+    ) -> Result<Vec<String>> {
+        let type_str = format!("{:?}", relation_type);
+        let relationships = self.load_session_relationships(session_id).await?;
+        let mut related: Vec<String> = relationships
+            .into_iter()
+            .filter(|r| r.relation_type == type_str)
+            .filter_map(|r| {
+                if r.from_entity == entity_name {
+                    Some(r.to_entity)
+                } else if r.to_entity == entity_name {
+                    Some(r.from_entity)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        related.sort();
+        related.dedup();
+        Ok(related)
+    }
+
+    async fn find_shortest_path(
+        &self,
+        session_id: Uuid,
+        from: &str,
+        to: &str,
+    ) -> Result<Option<Vec<String>>> {
+        use std::collections::{HashSet, VecDeque};
+
+        if from == to {
+            return Ok(Some(vec![from.to_string()]));
+        }
+
+        let relationships = self.load_session_relationships(session_id).await?;
+
+        // Build adjacency list
+        let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
+        for rel in &relationships {
+            adjacency
+                .entry(rel.from_entity.clone())
+                .or_default()
+                .push(rel.to_entity.clone());
+            adjacency
+                .entry(rel.to_entity.clone())
+                .or_default()
+                .push(rel.from_entity.clone());
+        }
+
+        // BFS for shortest path
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<(String, Vec<String>)> = VecDeque::new();
+
+        visited.insert(from.to_string());
+        queue.push_back((from.to_string(), vec![from.to_string()]));
+
+        while let Some((current, path)) = queue.pop_front() {
+            if let Some(neighbors) = adjacency.get(&current) {
+                for neighbor in neighbors {
+                    if neighbor == to {
+                        let mut final_path = path.clone();
+                        final_path.push(neighbor.clone());
+                        return Ok(Some(final_path));
+                    }
+
+                    if !visited.contains(neighbor) {
+                        visited.insert(neighbor.clone());
+                        let mut new_path = path.clone();
+                        new_path.push(neighbor.clone());
+                        queue.push_back((neighbor.clone(), new_path));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn get_entity_network(
+        &self,
+        session_id: Uuid,
+        center: &str,
+        max_depth: usize,
+    ) -> Result<EntityNetwork> {
+        use std::collections::HashSet;
+
+        let all_entities = self.load_session_entities(session_id).await?;
+        let all_relationships = self.load_session_relationships(session_id).await?;
+
+        // Build adjacency map
+        let mut adjacency: HashMap<String, Vec<(String, &StoredRelationship)>> = HashMap::new();
+        for rel in &all_relationships {
+            adjacency
+                .entry(rel.from_entity.clone())
+                .or_default()
+                .push((rel.to_entity.clone(), rel));
+            adjacency
+                .entry(rel.to_entity.clone())
+                .or_default()
+                .push((rel.from_entity.clone(), rel));
+        }
+
+        // BFS to collect entities within max_depth
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut current_level: Vec<String> = vec![center.to_string()];
+        visited.insert(center.to_string());
+
+        for _ in 0..max_depth {
+            let mut next_level = Vec::new();
+            for entity in &current_level {
+                if let Some(neighbors) = adjacency.get(entity) {
+                    for (neighbor, _) in neighbors {
+                        if !visited.contains(neighbor) {
+                            visited.insert(neighbor.clone());
+                            next_level.push(neighbor.clone());
+                        }
+                    }
+                }
+            }
+            if next_level.is_empty() {
+                break;
+            }
+            current_level = next_level;
+        }
+
+        // Collect entities in the network
+        let entities: BTreeMap<String, EntityData> = all_entities
+            .into_iter()
+            .filter(|e| visited.contains(&e.name))
+            .map(|e| (e.name.clone(), e.to_entity_data()))
+            .collect();
+
+        // Collect relationships where both endpoints are in the network
+        let relationships: Vec<EntityRelationship> = all_relationships
+            .into_iter()
+            .filter(|r| visited.contains(&r.from_entity) && visited.contains(&r.to_entity))
+            .map(|r| r.to_relationship())
+            .collect();
+
+        Ok(EntityNetwork {
+            center: center.to_string(),
+            entities,
+            relationships,
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SessionCheckpoint {
     pub id: Uuid,
@@ -1252,6 +1741,242 @@ mod tests {
                 .session_exists(session.id())
                 .await
                 .expect("Failed to check session existence after deletion")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_graph_storage_entities() {
+        use crate::core::context_update::EntityType;
+
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let storage = RealRocksDBStorage::new(temp_dir.path())
+            .await
+            .expect("Failed to create RocksDB storage");
+
+        let session_id = Uuid::new_v4();
+
+        // Create test entity
+        let entity = EntityData {
+            name: "Rust".to_string(),
+            entity_type: EntityType::Technology,
+            first_mentioned: Utc::now(),
+            last_mentioned: Utc::now(),
+            mention_count: 5,
+            importance_score: 0.8,
+            description: Some("A systems programming language".to_string()),
+        };
+
+        // Upsert entity
+        storage
+            .upsert_entity(session_id, &entity)
+            .await
+            .expect("Failed to upsert entity");
+
+        // Get entity
+        let loaded = storage
+            .get_entity(session_id, "Rust")
+            .await
+            .expect("Failed to get entity");
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.name, "Rust");
+        assert_eq!(loaded.mention_count, 5);
+
+        // List entities
+        let entities = storage
+            .list_entities(session_id)
+            .await
+            .expect("Failed to list entities");
+        assert_eq!(entities.len(), 1);
+
+        // Delete entity
+        storage
+            .delete_entity(session_id, "Rust")
+            .await
+            .expect("Failed to delete entity");
+
+        let deleted = storage
+            .get_entity(session_id, "Rust")
+            .await
+            .expect("Failed to check deleted entity");
+        assert!(deleted.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_graph_storage_relationships() {
+        use crate::core::context_update::EntityType;
+
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let storage = RealRocksDBStorage::new(temp_dir.path())
+            .await
+            .expect("Failed to create RocksDB storage");
+
+        let session_id = Uuid::new_v4();
+
+        // Create test entities
+        let rust = EntityData {
+            name: "Rust".to_string(),
+            entity_type: EntityType::Technology,
+            first_mentioned: Utc::now(),
+            last_mentioned: Utc::now(),
+            mention_count: 5,
+            importance_score: 0.8,
+            description: None,
+        };
+
+        let tokio = EntityData {
+            name: "Tokio".to_string(),
+            entity_type: EntityType::Technology,
+            first_mentioned: Utc::now(),
+            last_mentioned: Utc::now(),
+            mention_count: 3,
+            importance_score: 0.6,
+            description: None,
+        };
+
+        storage.upsert_entity(session_id, &rust).await.unwrap();
+        storage.upsert_entity(session_id, &tokio).await.unwrap();
+
+        // Create relationship
+        let relationship = EntityRelationship {
+            from_entity: "Tokio".to_string(),
+            to_entity: "Rust".to_string(),
+            relation_type: RelationType::DependsOn,
+            context: "Tokio is built on Rust".to_string(),
+        };
+
+        storage
+            .create_relationship(session_id, &relationship)
+            .await
+            .expect("Failed to create relationship");
+
+        // Find related entities
+        let related = storage
+            .find_related_entities(session_id, "Rust")
+            .await
+            .expect("Failed to find related entities");
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0], "Tokio");
+
+        // Find related by type
+        let related_by_type = storage
+            .find_related_by_type(session_id, "Rust", &RelationType::DependsOn)
+            .await
+            .expect("Failed to find related by type");
+        assert_eq!(related_by_type.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_graph_storage_shortest_path() {
+        use crate::core::context_update::EntityType;
+
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let storage = RealRocksDBStorage::new(temp_dir.path())
+            .await
+            .expect("Failed to create RocksDB storage");
+
+        let session_id = Uuid::new_v4();
+
+        // Create chain: A -> B -> C
+        for name in ["A", "B", "C"] {
+            let entity = EntityData {
+                name: name.to_string(),
+                entity_type: EntityType::Concept,
+                first_mentioned: Utc::now(),
+                last_mentioned: Utc::now(),
+                mention_count: 1,
+                importance_score: 0.5,
+                description: None,
+            };
+            storage.upsert_entity(session_id, &entity).await.unwrap();
+        }
+
+        // A -> B
+        storage
+            .create_relationship(
+                session_id,
+                &EntityRelationship {
+                    from_entity: "A".to_string(),
+                    to_entity: "B".to_string(),
+                    relation_type: RelationType::LeadsTo,
+                    context: String::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // B -> C
+        storage
+            .create_relationship(
+                session_id,
+                &EntityRelationship {
+                    from_entity: "B".to_string(),
+                    to_entity: "C".to_string(),
+                    relation_type: RelationType::LeadsTo,
+                    context: String::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Find shortest path A -> C
+        let path = storage
+            .find_shortest_path(session_id, "A", "C")
+            .await
+            .expect("Failed to find shortest path");
+        assert!(path.is_some());
+        let path = path.unwrap();
+        assert_eq!(path, vec!["A", "B", "C"]);
+
+        // No path exists to unconnected node
+        let entity_d = EntityData {
+            name: "D".to_string(),
+            entity_type: EntityType::Concept,
+            first_mentioned: Utc::now(),
+            last_mentioned: Utc::now(),
+            mention_count: 1,
+            importance_score: 0.5,
+            description: None,
+        };
+        storage.upsert_entity(session_id, &entity_d).await.unwrap();
+
+        let no_path = storage
+            .find_shortest_path(session_id, "A", "D")
+            .await
+            .expect("Failed to check no path");
+        assert!(no_path.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_rocksdb_embedding_dimension_validation() {
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let storage = RealRocksDBStorage::new(temp_dir.path())
+            .await
+            .expect("Failed to create RocksDB storage");
+
+        let metadata = VectorMetadata {
+            id: "test-id".to_string(),
+            text: "test text".to_string(),
+            source: Uuid::new_v4().to_string(),
+            content_type: "qa".to_string(),
+            timestamp: Utc::now(),
+            metadata: HashMap::new(),
+        };
+
+        // Valid dimension (384)
+        let valid_vector = vec![0.1f32; EMBEDDING_DIMENSION];
+        let result = storage.add_vector(valid_vector, metadata.clone()).await;
+        assert!(result.is_ok());
+
+        // Invalid dimension (wrong size)
+        let invalid_vector = vec![0.1f32; 100];
+        let result = storage.add_vector(invalid_vector, metadata).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid embedding dimension")
         );
     }
 }
