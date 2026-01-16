@@ -13,6 +13,7 @@
 
 use crate::ConversationMemorySystem;
 use crate::daemon::coerce::{CoercionError, coerce_and_validate};
+use crate::daemon::validate::*;
 use rmcp::{
     RoleServer, ServerHandler,
     handler::server::router::tool::ToolRouter,
@@ -43,11 +44,28 @@ pub struct PostCortexService {
 
 #[derive(Deserialize, JsonSchema, Debug)]
 pub struct SessionRequest {
-    #[schemars(description = "Action: create | list")]
+    #[schemars(description = r#"Action to perform: 'create' or 'list'.
+
+Examples:
+✅ "create" - Creates a new session and returns a UUID
+✅ "list" - Lists all existing sessions
+
+Note: Must be lowercase. Use 'create' to get a session_id before using other tools."#)]
     pub action: String,
-    #[schemars(description = "Session name (for create action)")]
+    #[schemars(description = r#"Optional session name (for create action).
+
+Examples:
+- "Feature: Authentication"
+- "Bug Fix: Memory Leak"
+- "Planning: API Design"
+
+Note: Only used when action='create'. Helps identify sessions later."#)]
     pub name: Option<String>,
-    #[schemars(description = "Session description (for create action)")]
+    #[schemars(description = r#"Optional session description (for create action).
+
+Example: "Working on implementing OAuth2 login flow"
+
+Note: Only used when action='create'. Provides context for the session."#)]
     pub description: Option<String>,
 }
 
@@ -57,30 +75,116 @@ pub struct SessionRequest {
 
 #[derive(Deserialize, JsonSchema, Debug, Clone)]
 pub struct ContextUpdateItem {
-    #[schemars(
-        description = "Type of interaction: qa, decision_made, problem_solved, code_change, requirement_added, concept_defined"
-    )]
+    #[schemars(description = r#"Type of interaction (must be exact lowercase value).
+
+Valid values:
+- qa: Questions and answers about the codebase
+- decision_made: Architectural decisions and trade-offs
+- problem_solved: Bug fixes and solutions to technical problems
+- code_change: Code modifications and refactoring
+- requirement_added: New requirements or constraints
+- concept_defined: Technical concepts and patterns explained
+
+Examples:
+✅ "decision_made" (correct)
+❌ "DecisionMade" (wrong - must be lowercase)
+❌ "made_decision" (wrong - use exact term)"#)]
     pub interaction_type: String,
-    #[schemars(description = "Content as key-value pairs")]
+    #[schemars(
+        description = r#"Content as key-value pairs (all values must be strings).
+
+Format: HashMap<String, String> where both keys and values are strings.
+
+Examples:
+Simple: {"decision": "Use Rust", "rationale": "Performance"}
+Complex: {"criteria": "{\"performance\": 9, \"safety\": 10}", "date": "2025-01-12"}
+
+Note: For complex nested data, stringify as JSON first. Do not pass nested objects directly."#
+    )]
     pub content: std::collections::HashMap<String, String>,
-    #[schemars(description = "Optional code reference")]
+    #[schemars(description = r#"Optional code reference for context.
+
+Can be a simple string or complex object:
+
+Examples:
+- Simple: "src/main.rs:42"
+- Complex: {"file": "src/main.rs", "line": 42, "function": "process_data"}
+
+Note: Helps link context to specific code locations."#)]
     pub code_reference: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, JsonSchema, Debug)]
 pub struct UpdateConversationContextRequest {
-    #[schemars(description = "Session ID")]
+    #[schemars(description = r#"Session ID (36-char UUID format with hyphens).
+
+Format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+How to get:
+1. Create session: Use session tool with action='create'
+2. Find session: Use semantic_search to search for previous sessions
+
+Example: "60c598e2-d602-4e07-a328-c458006d48c7"
+
+Note: Must be a string, not a number. UUIDs are always strings."#)]
     pub session_id: String,
     #[schemars(
-        description = "Type of interaction: qa, decision_made, problem_solved, code_change, requirement_added, concept_defined (for single update)"
+        description = r#"Type of interaction for single update (must be exact lowercase value).
+
+Valid values:
+- qa: Questions and answers about the codebase
+- decision_made: Architectural decisions and trade-offs
+- problem_solved: Bug fixes and solutions to technical problems
+- code_change: Code modifications and refactoring
+- requirement_added: New requirements or constraints
+- concept_defined: Technical concepts and patterns explained
+
+Note: Required for single update mode (when 'updates' array is not provided)."#
     )]
     pub interaction_type: Option<String>,
-    #[schemars(description = "Content as key-value pairs (for single update)")]
+    #[schemars(
+        description = r#"Content as key-value pairs for single update (all values must be strings).
+
+Format: HashMap<String, String> where both keys and values are strings.
+
+Examples:
+Simple: {"decision": "Use Rust", "rationale": "Performance"}
+Complex: {"criteria": "{\"performance\": 9}", "date": "2025-01-12"}
+
+Note: For complex nested data, stringify as JSON first. Required for single update mode."#
+    )]
     pub content: Option<std::collections::HashMap<String, String>>,
-    #[schemars(description = "Optional code reference (for single update)")]
+    #[schemars(description = r#"Optional code reference for single update.
+
+Can be a simple string or complex object:
+
+Examples:
+- Simple: "src/main.rs:42"
+- Complex: {"file": "src/main.rs", "line": 42, "function": "process_data"}"#)]
     pub code_reference: Option<serde_json::Value>,
     #[schemars(
-        description = "Array of updates for bulk operation (overrides single fields if provided)"
+        description = r#"Array of updates for bulk operation (overrides single fields if provided).
+
+Use this mode to add multiple updates at once.
+
+Format: Array of objects, each with interaction_type and content.
+
+Example:
+{
+  "session_id": "60c598e2-d602-4e07-a328-c458006d48c7",
+  "updates": [
+    {
+      "interaction_type": "decision_made",
+      "content": {"decision": "Use Rust", "rationale": "Performance"}
+    },
+    {
+      "interaction_type": "code_change",
+      "content": {"file": "main.rs", "change": "Add error handling"}
+    }
+  ]
+}
+
+Note: When provided, 'interaction_type' and 'content' fields are ignored."#
     )]
     pub updates: Option<Vec<ContextUpdateItem>>,
 }
@@ -91,21 +195,98 @@ pub struct UpdateConversationContextRequest {
 
 #[derive(Deserialize, JsonSchema, Debug)]
 pub struct SemanticSearchRequest {
-    #[schemars(description = "Search query")]
+    #[schemars(description = r#"Search query for semantic search.
+
+Examples:
+- "How did we handle authentication?"
+- "What were the performance issues?"
+- "decision_made API design"
+
+Note: Natural language queries work best. The search understands context."#)]
     pub query: String,
-    #[schemars(description = "Scope: session | workspace | global (default: global)")]
+    #[schemars(
+        description = r#"Search scope: 'session', 'workspace', or 'global' (default: 'global').
+
+Valid values:
+- session: Search within a specific session (requires scope_id)
+- workspace: Search within a workspace (requires scope_id)
+- global: Search across all data (default, no scope_id needed)
+
+Examples:
+✅ {"query": "performance", "scope": "global"} (default, searches everywhere)
+✅ {"query": "auth", "scope": "session", "scope_id": "60c598e2-d602-4e07-a328-c458006d48c7"} (search specific session)
+✅ {"query": "API", "scope": "workspace", "scope_id": "f1d2e3a4-b5c6-7d8e-9f0a-1b2c3d4e5f6f"} (search specific workspace)
+
+Note: scope must be lowercase. When using 'session' or 'workspace', you must provide scope_id."#
+    )]
     pub scope: Option<String>,
     #[schemars(
-        description = "Session ID or Workspace ID (required when scope is session/workspace)"
+        description = r#"Session ID or Workspace ID (required when scope is 'session' or 'workspace').
+
+Format: 36-char UUID string (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+
+When to use:
+- Required when scope='session' (provide session UUID)
+- Required when scope='workspace' (provide workspace UUID)
+- Ignored when scope='global' or not specified
+
+Examples:
+✅ {"scope": "session", "scope_id": "60c598e2-d602-4e07-a328-c458006d48c7"} (correct)
+❌ {"scope": "session"} (missing scope_id - will error)
+❌ {"scope": "global", "scope_id": "..."} (scope_id ignored for global)
+
+Note: Must be a valid UUID string. Use 'session' or 'semantic_search' tools to find UUIDs."#
     )]
     pub scope_id: Option<String>,
-    #[schemars(description = "Maximum number of results (default: 10)")]
+    #[schemars(
+        description = r#"Maximum number of results to return (default: 10, max: 100).
+
+Examples:
+- 5: Return top 5 most relevant results
+- 20: Return top 20 results
+- null or omit: Use default of 10
+
+Note: Higher values may slow down search. Maximum allowed is 100."#
+    )]
     pub limit: Option<usize>,
-    #[schemars(description = "Filter from date (ISO 8601)")]
+    #[schemars(
+        description = r#"Filter results from this date onwards (ISO 8601 format).
+
+Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ
+
+Examples:
+- "2025-01-01": Results from January 1st, 2025 onwards
+- "2025-01-15T10:00:00Z": Results from January 15th, 2025 at 10am UTC onwards
+
+Note: Use with date_to to specify a date range."#
+    )]
     pub date_from: Option<String>,
-    #[schemars(description = "Filter to date (ISO 8601)")]
+    #[schemars(description = r#"Filter results up to this date (ISO 8601 format).
+
+Format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ
+
+Examples:
+- "2025-01-31": Results up to January 31st, 2025
+- "2025-01-15T10:00:00Z": Results up to January 15th, 2025 at 10am UTC
+
+Note: Use with date_from to specify a date range."#)]
     pub date_to: Option<String>,
-    #[schemars(description = "Filter by interaction types")]
+    #[schemars(description = r#"Filter by interaction types (array of strings).
+
+Valid types:
+- qa: Questions and answers
+- decision_made: Architectural decisions
+- problem_solved: Bug fixes and solutions
+- code_change: Code modifications
+- requirement_added: New requirements
+- concept_defined: Technical concepts
+
+Examples:
+- ["decision_made"]: Only show decisions
+- ["decision_made", "problem_solved"]: Show decisions and solutions
+- null or omit: Show all interaction types
+
+Note: Must be exact lowercase values. Filters reduce results to only these types."#)]
     pub interaction_type: Option<Vec<String>>,
 }
 
@@ -157,20 +338,86 @@ pub struct QueryConversationContextRequest {
 
 #[derive(Deserialize, JsonSchema, Debug)]
 pub struct ManageWorkspaceRequest {
-    #[schemars(
-        description = "Action: create | list | get | delete | add_session | remove_session"
-    )]
+    #[schemars(description = r#"Action to perform on workspaces.
+
+Valid values:
+- create: Create a new workspace (requires name and description)
+- list: List all workspaces
+- get: Get workspace details (requires workspace_id)
+- delete: Delete a workspace (requires workspace_id)
+- add_session: Add a session to workspace (requires workspace_id, session_id, optional role)
+- remove_session: Remove a session from workspace (requires workspace_id, session_id)
+
+Examples:
+✅ {"action": "create", "name": "Auth Feature", "description": "OAuth2 work"}
+✅ {"action": "get", "workspace_id": "f1d2e3a4-..."}
+✅ {"action": "add_session", "workspace_id": "...", "session_id": "...", "role": "primary"}
+
+Note: Must be lowercase. Different actions require different parameters."#)]
     pub action: String,
-    #[schemars(description = "Workspace ID (for get/delete/add_session/remove_session)")]
+    #[schemars(
+        description = r#"Workspace ID (36-char UUID) for get/delete/add_session/remove_session actions.
+
+Format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+When to use:
+- Required for: get, delete, add_session, remove_session
+- Not used for: create, list
+
+How to get:
+- Use manage_workspace with action='list' to see all workspaces
+- Use semantic_search to find workspaces by name
+
+Example: "f1d2e3a4-b5c6-7d8e-9f0a-1b2c3d4e5f6f"
+
+Note: Must be a valid UUID string. Not a number."#
+    )]
     pub workspace_id: Option<String>,
-    #[schemars(description = "Session ID (for add_session/remove_session)")]
+    #[schemars(
+        description = r#"Session ID (36-char UUID) for add_session/remove_session actions.
+
+Format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+When to use:
+- Required for: add_session, remove_session
+- Not used for: create, list, get, delete
+
+How to get:
+- Use session tool with action='list' to see all sessions
+- Use semantic_search to find sessions
+
+Example: "60c598e2-d602-4e07-a328-c458006d48c7"
+
+Note: Must be a valid UUID string. Not a number."#
+    )]
     pub session_id: Option<String>,
-    #[schemars(description = "Workspace name (for create)")]
+    #[schemars(description = r#"Workspace name (for create action).
+
+Example: "Authentication Feature" or "API Design"
+
+Note: Only used when action='create'. Helps identify the workspace."#)]
     pub name: Option<String>,
-    #[schemars(description = "Workspace description (for create)")]
+    #[schemars(description = r#"Workspace description (for create action).
+
+Example: "Working on OAuth2 authentication and user management"
+
+Note: Only used when action='create'. Provides context for the workspace."#)]
     pub description: Option<String>,
     #[schemars(
-        description = "Session role: primary | related | dependency | shared (for add_session)"
+        description = r#"Session role in workspace (for add_session action, default: 'related').
+
+Valid values:
+- primary: Main session for this workspace
+- related: Related context session
+- dependency: Required dependency session
+- shared: Shared reference session
+
+Examples:
+✅ {"action": "add_session", "workspace_id": "...", "session_id": "...", "role": "primary"}
+✅ {"action": "add_session", "workspace_id": "...", "session_id": "...", "role": "related"}
+✅ {"action": "add_session", "workspace_id": "...", "session_id": "..."} (defaults to "related")
+
+Note: Only used when action='add_session'. Defaults to 'related' if omitted."#
     )]
     pub role: Option<String>,
 }
@@ -206,6 +453,8 @@ impl PostCortexService {
                 .with_hint("Use 'create' to create a new session or 'list' to see all sessions")
                 .to_mcp_error()
         })?;
+
+        validate_session_action(&req.action).map_err(|e| e.to_mcp_error())?;
 
         match req.action.to_lowercase().as_str() {
             "create" => {
@@ -277,17 +526,7 @@ impl PostCortexService {
                 }
             })?;
 
-        let uuid = Uuid::parse_str(&req.session_id).map_err(|e| {
-            CoercionError::new(
-                &format!("Invalid session_id format: '{}'", req.session_id),
-                e,
-                Some(req.session_id.clone().into()),
-            )
-            .with_parameter_path("session_id".to_string())
-            .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
-            .with_hint("Create a session first using the 'session' tool with action='create'")
-            .to_mcp_error()
-        })?;
+        let uuid = validate_session_id(&req.session_id).map_err(|e| e.to_mcp_error())?;
 
         // Bulk mode: if updates array is provided
         if let Some(ref updates) = req.updates {
@@ -321,6 +560,8 @@ impl PostCortexService {
                     .with_hint("For single update, provide 'interaction_type' and 'content'. For bulk updates, use 'updates' array instead.")
                     .to_mcp_error()
                 })?;
+
+            validate_interaction_type(interaction_type).map_err(|e| e.to_mcp_error())?;
             let content = req.content.as_ref()
                 .ok_or_else(|| {
                     CoercionError::new(
@@ -391,6 +632,12 @@ impl PostCortexService {
 
         let scope = req.scope.as_deref().unwrap_or("global");
 
+        validate_scope(scope).map_err(|e| e.to_mcp_error())?;
+
+        // Validate limit parameter (default: 10, max: 1000)
+        let validated_limit = validate_limits(req.limit, 10, 1000)
+            .map_err(|e| e.with_parameter_path("limit".to_string()).to_mcp_error())?;
+
         match scope.to_lowercase().as_str() {
             "session" => {
                 let session_id = req.scope_id.as_ref().ok_or_else(|| {
@@ -406,22 +653,13 @@ impl PostCortexService {
                     )
                     .to_mcp_error()
                 })?;
-                let uuid = Uuid::parse_str(session_id).map_err(|e| {
-                    CoercionError::new(
-                        &format!("Invalid scope_id format: '{}'", session_id),
-                        e,
-                        Some(session_id.clone().into()),
-                    )
-                    .with_parameter_path("scope_id".to_string())
-                    .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
-                    .with_hint("Provide a valid session UUID")
-                    .to_mcp_error()
-                })?;
+
+                let uuid = validate_session_id(session_id).map_err(|e| e.to_mcp_error())?;
 
                 match crate::tools::mcp::semantic_search_session(
                     uuid,
                     req.query.clone(),
-                    req.limit,
+                    Some(validated_limit),
                     req.date_from.clone(),
                     req.date_to.clone(),
                     req.interaction_type.clone(),
@@ -454,7 +692,7 @@ impl PostCortexService {
             "global" | _ => {
                 match crate::tools::mcp::semantic_search_global(
                     req.query.clone(),
-                    req.limit,
+                    Some(validated_limit),
                     req.date_from.clone(),
                     req.date_to.clone(),
                     req.interaction_type.clone(),
@@ -498,7 +736,6 @@ impl PostCortexService {
                 }
             })?;
 
-        // Validate session_id format
         let _uuid = Uuid::parse_str(&req.session_id).map_err(|e| {
             CoercionError::new(
                 &format!("Invalid session_id format: '{}'", req.session_id),
@@ -510,6 +747,28 @@ impl PostCortexService {
             .with_hint("Provide a valid session UUID")
             .to_mcp_error()
         })?;
+
+        // Validate all limit parameters
+        let validated_decisions_limit =
+            validate_limits(req.decisions_limit, 10, 100).map_err(|e| {
+                e.with_parameter_path("decisions_limit".to_string())
+                    .to_mcp_error()
+            })?;
+        let validated_entities_limit =
+            validate_limits(req.entities_limit, 20, 200).map_err(|e| {
+                e.with_parameter_path("entities_limit".to_string())
+                    .to_mcp_error()
+            })?;
+        let validated_questions_limit =
+            validate_limits(req.questions_limit, 5, 50).map_err(|e| {
+                e.with_parameter_path("questions_limit".to_string())
+                    .to_mcp_error()
+            })?;
+        let validated_concepts_limit =
+            validate_limits(req.concepts_limit, 10, 50).map_err(|e| {
+                e.with_parameter_path("concepts_limit".to_string())
+                    .to_mcp_error()
+            })?;
 
         // Determine which sections to include
         let include = req
@@ -540,10 +799,10 @@ impl PostCortexService {
         if include_all {
             match crate::tools::mcp::get_structured_summary(
                 req.session_id.clone(),
-                req.decisions_limit,
-                req.entities_limit,
-                req.questions_limit,
-                req.concepts_limit,
+                Some(validated_decisions_limit),
+                Some(validated_entities_limit),
+                Some(validated_questions_limit),
+                Some(validated_concepts_limit),
                 req.min_confidence,
                 req.compact,
             )
@@ -572,7 +831,7 @@ impl PostCortexService {
             if include_insights {
                 match crate::tools::mcp::get_key_insights(
                     req.session_id.clone(),
-                    req.decisions_limit, // reuse limit
+                    Some(validated_decisions_limit),
                 )
                 .await
                 {
@@ -743,6 +1002,8 @@ impl PostCortexService {
                 }
             })?;
 
+        validate_workspace_action(&req.action).map_err(|e| e.to_mcp_error())?;
+
         match req.action.to_lowercase().as_str() {
             "create" => {
                 let name = req.name.as_ref().ok_or_else(|| {
@@ -801,17 +1062,8 @@ impl PostCortexService {
                     )
                     .to_mcp_error()
                 })?;
-                let uuid = Uuid::parse_str(workspace_id).map_err(|e| {
-                    CoercionError::new(
-                        &format!("Invalid workspace_id format: '{}'", workspace_id),
-                        e,
-                        Some(workspace_id.clone().into()),
-                    )
-                    .with_parameter_path("workspace_id".to_string())
-                    .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
-                    .with_hint("Provide a valid workspace UUID")
-                    .to_mcp_error()
-                })?;
+
+                let uuid = validate_workspace_id(workspace_id).map_err(|e| e.to_mcp_error())?;
 
                 match crate::tools::mcp::get_workspace(uuid).await {
                     Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
@@ -835,17 +1087,8 @@ impl PostCortexService {
                     )
                     .to_mcp_error()
                 })?;
-                let uuid = Uuid::parse_str(workspace_id).map_err(|e| {
-                    CoercionError::new(
-                        &format!("Invalid workspace_id format: '{}'", workspace_id),
-                        e,
-                        Some(workspace_id.clone().into()),
-                    )
-                    .with_parameter_path("workspace_id".to_string())
-                    .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
-                    .with_hint("Provide a valid workspace UUID")
-                    .to_mcp_error()
-                })?;
+
+                let uuid = validate_workspace_id(workspace_id).map_err(|e| e.to_mcp_error())?;
 
                 match crate::tools::mcp::delete_workspace(uuid).await {
                     Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
@@ -883,28 +1126,10 @@ impl PostCortexService {
                 })?;
                 let role = req.role.clone().unwrap_or_else(|| "related".to_string());
 
-                let ws_uuid = Uuid::parse_str(workspace_id).map_err(|e| {
-                    CoercionError::new(
-                        &format!("Invalid workspace_id format: '{}'", workspace_id),
-                        e,
-                        Some(workspace_id.clone().into()),
-                    )
-                    .with_parameter_path("workspace_id".to_string())
-                    .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
-                    .with_hint("Provide a valid workspace UUID")
-                    .to_mcp_error()
-                })?;
-                let sess_uuid = Uuid::parse_str(session_id).map_err(|e| {
-                    CoercionError::new(
-                        &format!("Invalid session_id format: '{}'", session_id),
-                        e,
-                        Some(session_id.clone().into()),
-                    )
-                    .with_parameter_path("session_id".to_string())
-                    .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
-                    .with_hint("Provide a valid session UUID")
-                    .to_mcp_error()
-                })?;
+                let ws_uuid = validate_workspace_id(workspace_id).map_err(|e| e.to_mcp_error())?;
+                let sess_uuid = validate_session_id(session_id).map_err(|e| e.to_mcp_error())?;
+
+                validate_session_role(&role).map_err(|e| e.to_mcp_error())?;
 
                 match crate::tools::mcp::add_session_to_workspace(ws_uuid, sess_uuid, role).await {
                     Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
@@ -941,28 +1166,8 @@ impl PostCortexService {
                     .to_mcp_error()
                 })?;
 
-                let ws_uuid = Uuid::parse_str(workspace_id).map_err(|e| {
-                    CoercionError::new(
-                        &format!("Invalid workspace_id format: '{}'", workspace_id),
-                        e,
-                        Some(workspace_id.clone().into()),
-                    )
-                    .with_parameter_path("workspace_id".to_string())
-                    .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
-                    .with_hint("Provide a valid workspace UUID")
-                    .to_mcp_error()
-                })?;
-                let sess_uuid = Uuid::parse_str(session_id).map_err(|e| {
-                    CoercionError::new(
-                        &format!("Invalid session_id format: '{}'", session_id),
-                        e,
-                        Some(session_id.clone().into()),
-                    )
-                    .with_parameter_path("session_id".to_string())
-                    .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
-                    .with_hint("Provide a valid session UUID")
-                    .to_mcp_error()
-                })?;
+                let ws_uuid = validate_workspace_id(workspace_id).map_err(|e| e.to_mcp_error())?;
+                let sess_uuid = validate_session_id(session_id).map_err(|e| e.to_mcp_error())?;
 
                 match crate::tools::mcp::remove_session_from_workspace(ws_uuid, sess_uuid).await {
                     Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
