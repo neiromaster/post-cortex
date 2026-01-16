@@ -29,7 +29,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use std::sync::Arc;
 use tracing::info;
-use uuid::Uuid;
 
 /// Post-Cortex MCP Service
 #[derive(Clone)]
@@ -736,17 +735,7 @@ impl PostCortexService {
                 }
             })?;
 
-        let _uuid = Uuid::parse_str(&req.session_id).map_err(|e| {
-            CoercionError::new(
-                &format!("Invalid session_id format: '{}'", req.session_id),
-                e,
-                Some(req.session_id.clone().into()),
-            )
-            .with_parameter_path("session_id".to_string())
-            .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
-            .with_hint("Provide a valid session UUID")
-            .to_mcp_error()
-        })?;
+        validate_session_id(&req.session_id).map_err(|e| e.to_mcp_error())?;
 
         // Validate all limit parameters
         let validated_decisions_limit =
@@ -895,17 +884,7 @@ impl PostCortexService {
                 }
             })?;
 
-        let uuid = Uuid::parse_str(&req.session_id).map_err(|e| {
-            CoercionError::new(
-                &format!("Invalid session_id format: '{}'", req.session_id),
-                e,
-                Some(req.session_id.clone().into()),
-            )
-            .with_parameter_path("session_id".to_string())
-            .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
-            .with_hint("Provide a valid session UUID")
-            .to_mcp_error()
-        })?;
+        let uuid = validate_session_id(&req.session_id).map_err(|e| e.to_mcp_error())?;
 
         // Handle special query types that map to deprecated tools
         match req.query_type.to_lowercase().as_str() {
