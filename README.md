@@ -197,17 +197,29 @@ pcx import --input backup.json --overwrite
 
 ## Storage Backends
 
+Both backends provide **full feature parity** with identical capabilities:
+
+| Feature | RocksDB | SurrealDB |
+|---------|---------|-----------|
+| Vector Search | HNSW O(log n) | HNSW O(log n) |
+| Graph Storage | Persistent | Persistent |
+| Embedding Validation | 384 dimensions | 384 dimensions |
+| Setup | Zero config | Requires server |
+| Distribution | Embedded | Distributed |
+
 ### RocksDB (Default)
 
-Embedded key-value store, zero configuration:
+Embedded key-value store with in-memory HNSW index, zero configuration:
 
 ```bash
 pcx start  # Uses ~/.post-cortex/data
 ```
 
+**Architecture:** Hybrid storage with RocksDB for persistence and lock-free HNSW index for fast vector search. On startup, embeddings are loaded from disk to rebuild the HNSW index.
+
 ### SurrealDB
 
-Native graph database with advanced query capabilities:
+Distributed graph database with native HNSW support:
 
 1. Start SurrealDB:
 ```bash
@@ -228,6 +240,8 @@ surrealdb_database = "main"
 ```bash
 pcx start
 ```
+
+**Use SurrealDB when:** You need distributed storage, multiple Post-Cortex instances, or native graph queries.
 
 ## Environment Variables
 
