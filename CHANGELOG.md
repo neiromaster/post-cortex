@@ -5,6 +5,49 @@ All notable changes to Post-Cortex will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.16] - 2026-01-16
+
+### Added
+
+- **HNSW Index for RocksDB**: O(log n) vector search now available in RocksDB backend
+  - Hybrid architecture: in-memory HNSW index + RocksDB persistence
+  - On startup, embeddings are loaded from disk to rebuild the HNSW index
+  - Full feature parity with SurrealDB vector search performance
+
+- **Graph Storage for RocksDB**: Persistent entity and relationship storage
+  - `StoredEntity` and `StoredRelationship` structs for RocksDB persistence
+  - Full `GraphStorage` trait implementation (upsert_entity, get_entity, create_relationship, etc.)
+  - BFS-based `find_shortest_path` and `get_entity_network` implementations
+  - Embedding dimension validation (384 dimensions) matches SurrealDB
+
+- **MCP Type Coercion**: Better agent interaction with flexible parameter types
+  - Automatic type coercion for string/number/boolean parameters
+  - Structured error responses for invalid inputs
+  - Integration tests for type coercion scenarios
+
+- **MCP Input Schema**: Added `input_schema` field to tool definitions for better client compatibility
+
+### Fixed
+
+- **UTF-8 Safe String Truncation**: Prevent panic on multi-byte character boundaries
+  - Safe truncation for Bulgarian, Chinese, emoji, and other multi-byte characters
+
+- **Integration Test Race Conditions**: Added `serial_test` for reliable parallel test execution
+  - Tests no longer flake due to shared resource contention
+
+- **Session ID Format Consistency**: Consistent UUID formatting across all MCP responses
+
+- **Full UUIDs in Search Output**: `semantic_search_global` now displays complete UUIDs instead of truncated
+
+### Improved
+
+- **Storage Backend Feature Parity**: Both RocksDB and SurrealDB now support identical features
+  - Vector Search: HNSW O(log n) for both
+  - Graph Storage: Persistent for both
+  - Embedding Validation: 384 dimensions for both
+
+- **Storage Code Organization**: Reorganized imports and suppressed unused mut warnings
+
 ## [0.1.15] - 2025-12-22
 
 ### Fixed
