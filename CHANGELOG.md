@@ -27,7 +27,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **MCP Input Schema**: Added `input_schema` field to tool definitions for better client compatibility
 
+- **MCP Validation Layer**: Custom validation for business logic rules (PR #7)
+  - `validate_session_id()`, `validate_workspace_id()` - UUID format validation
+  - `validate_interaction_type()` - Enum validation (6 valid types)
+  - `validate_scope()` - Semantic search scope validation
+  - `validate_session_action()`, `validate_workspace_action()` - Action validation
+  - `validate_session_role()` - Workspace membership roles (4 roles)
+  - `validate_limits()` - Numeric bounds checking
+  - Enhanced parameter descriptions with examples and valid values
+  - 38 new tests (18 unit + 20 integration)
+
 ### Fixed
+
+- **RocksDB Session Serialization**: Changed from bincode to serde_json
+  - bincode doesn't support `deserialize_any` required by EdgeData custom deserializer
+  - Fixes "Serde(AnyNotSupported)" error when loading large sessions
+  - Note: Old RocksDB data (bincode format) must be deleted and re-imported
 
 - **UTF-8 Safe String Truncation**: Prevent panic on multi-byte character boundaries
   - Safe truncation for Bulgarian, Chinese, emoji, and other multi-byte characters
