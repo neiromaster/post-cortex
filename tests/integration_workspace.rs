@@ -1,5 +1,6 @@
 // Integration tests for workspace functionality with real RocksDB
 use post_cortex::{ConversationMemorySystem, SystemConfig};
+use serial_test::serial;
 use std::sync::Arc;
 use tempfile::TempDir;
 
@@ -13,6 +14,7 @@ async fn create_test_system() -> (Arc<ConversationMemorySystem>, TempDir) {
     (Arc::new(system), temp_dir)
 }
 
+#[serial]
 #[tokio::test]
 // #[ignore] // TODO: Implement workspace persistence in RocksDB
 async fn test_workspace_create_and_persist() {
@@ -65,6 +67,7 @@ async fn test_workspace_create_and_persist() {
     }
 }
 
+#[serial]
 #[tokio::test]
 async fn test_concurrent_workspace_and_session_operations() {
     let (system, _temp_dir) = create_test_system().await;
@@ -141,6 +144,7 @@ async fn test_concurrent_workspace_and_session_operations() {
     }
 }
 
+#[serial]
 #[tokio::test]
 async fn test_rocksdb_single_instance_enforcement() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -174,6 +178,7 @@ async fn test_rocksdb_single_instance_enforcement() {
     drop(system1);
 }
 
+#[serial]
 #[tokio::test]
 async fn test_workspace_session_relationships() {
     let (system, _temp_dir) = create_test_system().await;
@@ -251,6 +256,7 @@ async fn test_workspace_session_relationships() {
     assert_eq!(workspace.session_ids.len(), 2);
 }
 
+#[serial]
 #[tokio::test]
 async fn test_stress_concurrent_operations_no_deadlock() {
     let (system, _temp_dir) = create_test_system().await;

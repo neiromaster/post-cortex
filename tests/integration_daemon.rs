@@ -1,4 +1,5 @@
 // Integration tests for daemon HTTP server with in-memory testing
+// Tests are run serially to avoid race conditions with shared resources
 mod helpers;
 
 use helpers::TestApp;
@@ -8,6 +9,9 @@ use serde_json::json;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
+
+// Use serial_test to prevent race conditions
+use serial_test::serial;
 
 /// Setup test app without TCP server
 async fn setup_test_app() -> (TestApp, TempDir) {
@@ -66,6 +70,7 @@ async fn start_real_daemon() -> (u16, TempDir) {
     (port, temp_dir)
 }
 
+#[serial]
 #[tokio::test]
 async fn test_daemon_health_check() {
     let (app, _temp_dir) = setup_test_app().await;
@@ -79,6 +84,7 @@ async fn test_daemon_health_check() {
     assert_eq!(body["service"], "post-cortex-daemon");
 }
 
+#[serial]
 #[tokio::test]
 async fn test_daemon_stats_endpoint() {
     let (app, _temp_dir) = setup_test_app().await;
@@ -93,6 +99,7 @@ async fn test_daemon_stats_endpoint() {
     assert!(body["workspace_count"].is_number());
 }
 
+#[serial]
 #[tokio::test]
 async fn test_daemon_mcp_initialize() {
     let (app, _temp_dir) = setup_test_app().await;
@@ -115,6 +122,7 @@ async fn test_daemon_mcp_initialize() {
     assert!(body["result"]["serverInfo"].is_object());
 }
 
+#[serial]
 #[tokio::test]
 async fn test_multiple_concurrent_clients() {
     let (app, _temp_dir) = setup_test_app().await;
@@ -159,6 +167,7 @@ async fn test_multiple_concurrent_clients() {
     assert!(body["total_requests"].as_u64().unwrap() >= 10);
 }
 
+#[serial]
 #[tokio::test]
 async fn test_stress_concurrent_requests() {
     let (app, _temp_dir) = setup_test_app().await;
@@ -198,6 +207,7 @@ async fn test_stress_concurrent_requests() {
     assert!(body["total_requests"].as_u64().unwrap() >= 250);
 }
 
+#[serial]
 #[tokio::test]
 async fn test_create_session_tool() {
     let (app, _temp_dir) = setup_test_app().await;
@@ -234,6 +244,7 @@ async fn test_create_session_tool() {
     assert!(text.contains("-")); // UUID contains dashes
 }
 
+#[serial]
 #[tokio::test]
 async fn test_tools_list_includes_create_session() {
     let (app, _temp_dir) = setup_test_app().await;
@@ -263,6 +274,7 @@ async fn test_tools_list_includes_create_session() {
     assert!(tool["inputSchema"].is_object());
 }
 
+#[serial]
 #[tokio::test]
 async fn test_concurrent_create_sessions() {
     let (app, _temp_dir) = setup_test_app().await;
@@ -311,6 +323,7 @@ async fn test_concurrent_create_sessions() {
     }
 }
 
+#[serial]
 #[tokio::test]
 async fn test_daemon_shares_rocksdb() {
     // This test MUST use real TCP to verify RocksDB locking
@@ -346,6 +359,7 @@ async fn test_daemon_shares_rocksdb() {
     }
 }
 
+#[serial]
 #[tokio::test]
 async fn test_update_conversation_context_tool() {
     let (app, _temp_dir) = setup_test_app().await;
@@ -399,6 +413,7 @@ async fn test_update_conversation_context_tool() {
     assert!(body["result"].is_object());
 }
 
+#[serial]
 #[tokio::test]
 async fn test_semantic_search_session_tool() {
     let (app, _temp_dir) = setup_test_app().await;
@@ -446,6 +461,7 @@ async fn test_semantic_search_session_tool() {
     assert!(body["result"].is_object());
 }
 
+#[serial]
 #[tokio::test]
 async fn test_list_sessions_tool() {
     let (app, _temp_dir) = setup_test_app().await;
@@ -467,6 +483,7 @@ async fn test_list_sessions_tool() {
     assert!(body["result"].is_object());
 }
 
+#[serial]
 #[tokio::test]
 async fn test_list_sessions_debug() {
     let (app, _temp_dir) = setup_test_app().await;

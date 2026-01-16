@@ -1,10 +1,12 @@
 use anyhow::Result;
 use post_cortex::core::context_update::{ContextUpdate, UpdateContent, UpdateType};
 use post_cortex::core::lockfree_memory_system::{LockFreeConversationMemorySystem, SystemConfig};
+use serial_test::serial;
 use std::sync::Arc;
 use tempfile::tempdir;
 use uuid::Uuid;
 
+#[serial]
 #[tokio::test]
 async fn test_mcp_format_semantic_search() -> Result<()> {
     // Test that mimics EXACTLY how MCP tool adds data and searches
