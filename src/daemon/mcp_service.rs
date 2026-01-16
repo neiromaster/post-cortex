@@ -186,6 +186,22 @@ Example:
 Note: When provided, 'interaction_type' and 'content' fields are ignored."#
     )]
     pub updates: Option<Vec<ContextUpdateItem>>,
+    #[schemars(
+        description = r#"If true, validate the request without making any changes.
+
+When dry_run is true, the request will be validated and a preview of what would happen will be returned, but no data will be stored.
+
+Use cases:
+- Test if your request format is correct
+- Preview what would be stored
+- Validate interaction_type and content structure
+- Check if session exists
+
+Example: {"dry_run": true, "session_id": "...", "interaction_type": "decision_made", "content": {...}}
+
+Note: No changes are made to the session when dry_run is true."#
+    )]
+    pub dry_run: Option<bool>,
 }
 
 // =============================================================================
@@ -527,8 +543,34 @@ impl PostCortexService {
 
         let uuid = validate_session_id(&req.session_id).map_err(|e| e.to_mcp_error())?;
 
-        // Bulk mode: if updates array is provided
+        // Handle dry_run mode for bulk updates
         if let Some(ref updates) = req.updates {
+            if req.dry_run.unwrap_or(false) {
+                let preview: Vec<String> = updates
+                    .iter()
+                    .enumerate()
+                    .map(|(i, u)| {
+                        format!(
+                            "  [{}] {} - fields: {}",
+                            i + 1,
+                            u.interaction_type,
+                            u.content.keys().cloned().collect::<Vec<_>>().join(", ")
+                        )
+                    })
+                    .collect();
+
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "✅ Dry run - Bulk update validation successful\n\
+                     Session ID: {}\n\
+                     Total updates: {}\n\n\
+                     Preview:\n{}\n\n\
+                     No changes were made. Set dry_run to false or omit it to actually save these updates.",
+                    uuid,
+                    updates.len(),
+                    preview.join("\n")
+                ))]));
+            }
+
             let items: Vec<crate::tools::mcp::ContextUpdateItem> = updates
                 .iter()
                 .map(|u| crate::tools::mcp::ContextUpdateItem {
@@ -578,6 +620,22 @@ impl PostCortexService {
                 .code_reference
                 .as_ref()
                 .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+            // Handle dry_run mode for single updates
+            if req.dry_run.unwrap_or(false) {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "✅ Dry run - Request validation successful\n\
+                     Session ID: {}\n\
+                     Interaction Type: {}\n\
+                     Content fields: {}\n\
+                     Code Reference: {}\n\n\
+                     No changes were made. Set dry_run to false or omit it to actually save this update.",
+                    uuid,
+                    interaction_type,
+                    content.keys().cloned().collect::<Vec<_>>().join(", "),
+                    code_ref.as_ref().map(|_| "provided").unwrap_or("none")
+                ))]));
+            }
 
             match crate::tools::mcp::update_conversation_context(
                 interaction_type.clone(),
