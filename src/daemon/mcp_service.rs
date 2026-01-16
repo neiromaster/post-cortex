@@ -1063,19 +1063,7 @@ impl PostCortexService {
                     .to_mcp_error()
                 })?;
 
-                validate_workspace_id(workspace_id).map_err(|e| e.to_mcp_error())?;
-
-                let uuid = Uuid::parse_str(workspace_id).map_err(|e| {
-                    CoercionError::new(
-                        &format!("Invalid workspace_id format: '{}'", workspace_id),
-                        e,
-                        Some(workspace_id.clone().into()),
-                    )
-                    .with_parameter_path("workspace_id".to_string())
-                    .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
-                    .with_hint("Provide a valid workspace UUID")
-                    .to_mcp_error()
-                })?;
+                let uuid = validate_workspace_id(workspace_id).map_err(|e| e.to_mcp_error())?;
 
                 match crate::tools::mcp::get_workspace(uuid).await {
                     Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
@@ -1100,19 +1088,7 @@ impl PostCortexService {
                     .to_mcp_error()
                 })?;
 
-                validate_workspace_id(workspace_id).map_err(|e| e.to_mcp_error())?;
-
-                let uuid = Uuid::parse_str(workspace_id).map_err(|e| {
-                    CoercionError::new(
-                        &format!("Invalid workspace_id format: '{}'", workspace_id),
-                        e,
-                        Some(workspace_id.clone().into()),
-                    )
-                    .with_parameter_path("workspace_id".to_string())
-                    .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
-                    .with_hint("Provide a valid workspace UUID")
-                    .to_mcp_error()
-                })?;
+                let uuid = validate_workspace_id(workspace_id).map_err(|e| e.to_mcp_error())?;
 
                 match crate::tools::mcp::delete_workspace(uuid).await {
                     Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
