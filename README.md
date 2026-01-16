@@ -16,7 +16,7 @@ Post-Cortex is an MCP server that gives AI assistants long-term memory. It store
 - **Knowledge Graph** - Automatic entity and relationship extraction
 - **Privacy-First** - All processing runs locally, no external APIs
 - **Fast** - Lock-free Rust architecture, O(log n) vector search, <10ms queries
-- **Flexible Storage** - RocksDB (embedded) or SurrealDB (graph database)
+- **Flexible Storage** - RocksDB (embedded) or SurrealDB (distributed) with feature parity
 
 ## Installation
 

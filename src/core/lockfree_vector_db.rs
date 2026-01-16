@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Julius ML
+// Copyright (c) 2025, 2026 Julius ML
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -1298,6 +1298,16 @@ impl LockFreeVectorDB {
         self.stats.snapshot()
     }
 
+    /// Get total number of vectors in the database (lock-free)
+    pub fn len(&self) -> usize {
+        self.vectors.len()
+    }
+
+    /// Check if the database is empty (lock-free)
+    pub fn is_empty(&self) -> bool {
+        self.vectors.is_empty()
+    }
+
     /// Check if database has embeddings for a session (lock-free)
     pub fn has_session_embeddings(&self, session_id: &str) -> bool {
         self.metadata
@@ -1325,6 +1335,14 @@ impl LockFreeVectorDB {
         self.metadata
             .iter()
             .any(|entry| entry.value().id == update_id)
+    }
+
+    /// Find vector_id by content_id (for removal operations) - lock-free
+    pub fn find_vector_id_by_content_id(&self, content_id: &str) -> Option<u32> {
+        self.metadata
+            .iter()
+            .find(|entry| entry.value().id == content_id)
+            .map(|entry| *entry.key())
     }
 
     /// Get list of update IDs that exist in vector DB for a session - lock-free
@@ -1455,12 +1473,8 @@ impl LockFreeVectorDB {
             (search_k, SearchMode::Balanced, Some(dynamic_ef_search))
         };
 
-        let all_matches = self.search_with_mode(
-            query_vector,
-            search_limit,
-            search_mode,
-            ef_override,
-        )?;
+        let all_matches =
+            self.search_with_mode(query_vector, search_limit, search_mode, ef_override)?;
 
         debug!(
             "search_with_filter: got {} results before filtering",

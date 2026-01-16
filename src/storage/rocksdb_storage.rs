@@ -1,4 +1,4 @@
-// Copyright (c) 2025,2026 Julius ML
+// Copyright (c) 2025, 2026 Julius ML
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -18,7 +18,9 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 use crate::core::context_update::{ContextUpdate, EntityData, EntityRelationship, RelationType};
-use crate::core::lockfree_vector_db::{SearchMatch, VectorMetadata};
+use crate::core::lockfree_vector_db::{
+    LockFreeVectorDB, LockFreeVectorDbConfig, SearchMatch, VectorMetadata,
+};
 use crate::core::structured_context::StructuredContext;
 use crate::graph::entity_graph::EntityNetwork;
 use crate::session::active_session::{ActiveSession, ChangeRecord, CodeReference};
@@ -141,11 +143,17 @@ impl StoredRelationship {
 }
 
 /// Real RocksDB storage implementation for high performance
+///
+/// Uses a hybrid approach:
+/// - RocksDB for persistent storage on disk
+/// - In-memory LockFreeVectorDB with HNSW index for O(log n) vector search
 #[derive(Clone)]
 pub struct RealRocksDBStorage {
     db: Arc<DB>,
     #[allow(dead_code)]
     data_dir: PathBuf,
+    /// In-memory HNSW index for fast vector search
+    vector_index: Arc<LockFreeVectorDB>,
 }
 
 impl RealRocksDBStorage {
@@ -189,16 +197,68 @@ impl RealRocksDBStorage {
         opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(16));
 
         let db = DB::open(&opts, &db_path)?;
+        let db = Arc::new(db);
 
         info!(
             "RealRocksDBStorage: Initialized RocksDB at {}",
             db_path.display()
         );
 
-        Ok(Self {
-            db: Arc::new(db),
+        // Create in-memory HNSW index for fast vector search
+        let vector_config = LockFreeVectorDbConfig {
+            dimension: EMBEDDING_DIMENSION,
+            enable_hnsw_index: true,
+            max_connections: 16,
+            num_layers: 4,
+            ..Default::default()
+        };
+        let vector_index = Arc::new(LockFreeVectorDB::new(vector_config)?);
+
+        let storage = Self {
+            db: db.clone(),
             data_dir,
-        })
+            vector_index,
+        };
+
+        // Load existing embeddings from RocksDB into the in-memory HNSW index
+        storage.rebuild_hnsw_index().await?;
+
+        Ok(storage)
+    }
+
+    /// Rebuild the in-memory HNSW index from RocksDB embeddings
+    async fn rebuild_hnsw_index(&self) -> Result<()> {
+        let embeddings = self.load_all_embeddings().await?;
+        let count = embeddings.len();
+
+        if count == 0 {
+            info!("RealRocksDBStorage: No embeddings to load into HNSW index");
+            return Ok(());
+        }
+
+        info!(
+            "RealRocksDBStorage: Loading {} embeddings into HNSW index...",
+            count
+        );
+
+        for embedding in embeddings {
+            let metadata = embedding.to_metadata();
+            // Add to in-memory index (ignore errors for individual vectors)
+            if let Err(e) = self.vector_index.add_vector(embedding.vector, metadata) {
+                tracing::warn!(
+                    "Failed to add embedding {} to HNSW index: {}",
+                    embedding.content_id,
+                    e
+                );
+            }
+        }
+
+        info!(
+            "RealRocksDBStorage: HNSW index ready with {} vectors",
+            self.vector_index.len()
+        );
+
+        Ok(())
     }
 
     /// Save session to RocksDB
@@ -1038,6 +1098,7 @@ impl RealRocksDBStorage {
     }
 
     /// Load all embeddings from storage
+    /// Used for HNSW index rebuild and migration operations
     pub async fn load_all_embeddings(&self) -> Result<Vec<StoredEmbedding>> {
         let db = self.db.clone();
 
@@ -1093,23 +1154,6 @@ impl RealRocksDBStorage {
     }
 }
 
-/// Compute cosine similarity between two vectors
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() {
-        return 0.0;
-    }
-
-    let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-    if norm_a == 0.0 || norm_b == 0.0 {
-        0.0
-    } else {
-        dot_product / (norm_a * norm_b)
-    }
-}
-
 #[async_trait]
 impl VectorStorage for RealRocksDBStorage {
     async fn add_vector(&self, vector: Vec<f32>, metadata: VectorMetadata) -> Result<String> {
@@ -1122,8 +1166,15 @@ impl VectorStorage for RealRocksDBStorage {
             ));
         }
         let id = metadata.id.clone();
+
+        // Add to in-memory HNSW index for fast search
+        self.vector_index
+            .add_vector(vector.clone(), metadata.clone())?;
+
+        // Persist to RocksDB for durability
         let embedding = StoredEmbedding::new(vector, metadata);
         self.save_embedding(&embedding).await?;
+
         Ok(id)
     }
 
@@ -1139,102 +1190,75 @@ impl VectorStorage for RealRocksDBStorage {
         Ok(ids)
     }
 
+    /// Search using HNSW index - O(log n) complexity
     async fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchMatch>> {
-        let embeddings = self.load_all_embeddings().await?;
-
-        let mut matches: Vec<SearchMatch> = embeddings
-            .into_iter()
-            .map(|e| {
-                let similarity = cosine_similarity(query, &e.vector);
-                SearchMatch {
-                    vector_id: 0,
-                    similarity,
-                    metadata: e.to_metadata(),
-                }
-            })
-            .collect();
-
-        matches.sort_by(|a, b| {
-            b.similarity
-                .partial_cmp(&a.similarity)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        matches.truncate(k);
-
-        Ok(matches)
+        // Use HNSW index for fast approximate nearest neighbor search
+        self.vector_index.search(query, k)
     }
 
+    /// Search within a session using HNSW with post-filtering
     async fn search_in_session(
         &self,
         query: &[f32],
         k: usize,
         session_id: &str,
     ) -> Result<Vec<SearchMatch>> {
-        let embeddings = self.load_session_embeddings(session_id).await?;
+        // Use HNSW with post-filtering: fetch more results, filter by session
+        // This matches SurrealDB's approach for filtered queries
+        let fetch_multiplier = 5;
+        let results = self.vector_index.search(query, k * fetch_multiplier)?;
 
-        let mut matches: Vec<SearchMatch> = embeddings
+        // Filter by session and take top k
+        let filtered: Vec<SearchMatch> = results
             .into_iter()
-            .map(|e| {
-                let similarity = cosine_similarity(query, &e.vector);
-                SearchMatch {
-                    vector_id: 0,
-                    similarity,
-                    metadata: e.to_metadata(),
-                }
-            })
+            .filter(|m| m.metadata.source == session_id)
+            .take(k)
             .collect();
 
-        matches.sort_by(|a, b| {
-            b.similarity
-                .partial_cmp(&a.similarity)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        matches.truncate(k);
-
-        Ok(matches)
+        Ok(filtered)
     }
 
+    /// Search by content type using HNSW with post-filtering
     async fn search_by_content_type(
         &self,
         query: &[f32],
         k: usize,
         content_type: &str,
     ) -> Result<Vec<SearchMatch>> {
-        let embeddings = self.load_all_embeddings().await?;
+        // Use HNSW with post-filtering by content type
+        let fetch_multiplier = 5;
+        let results = self.vector_index.search(query, k * fetch_multiplier)?;
 
-        let mut matches: Vec<SearchMatch> = embeddings
+        // Filter by content type and take top k
+        let filtered: Vec<SearchMatch> = results
             .into_iter()
-            .filter(|e| e.content_type == content_type)
-            .map(|e| {
-                let similarity = cosine_similarity(query, &e.vector);
-                SearchMatch {
-                    vector_id: 0,
-                    similarity,
-                    metadata: e.to_metadata(),
-                }
-            })
+            .filter(|m| m.metadata.content_type == content_type)
+            .take(k)
             .collect();
 
-        matches.sort_by(|a, b| {
-            b.similarity
-                .partial_cmp(&a.similarity)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        matches.truncate(k);
-
-        Ok(matches)
+        Ok(filtered)
     }
 
     async fn remove_vector(&self, id: &str) -> Result<bool> {
-        // Parse id to find session_id:content_id
-        // The id format is typically the content_id, we need to search for it
+        // Find vector_id in HNSW index by content_id and remove it
+        let mut removed = false;
+        let vector_id = self.vector_index.find_vector_id_by_content_id(id);
+
+        if let Some(vid) = vector_id {
+            self.vector_index.remove_vector(vid)?;
+            removed = true;
+        }
+
+        // Remove from RocksDB
         let embeddings = self.load_all_embeddings().await?;
         for e in embeddings {
             if e.content_id == id {
-                return self.delete_embedding(&e.session_id, &e.content_id).await;
+                self.delete_embedding(&e.session_id, &e.content_id).await?;
+                return Ok(true);
             }
         }
-        Ok(false)
+
+        Ok(removed)
     }
 
     async fn has_session_embeddings(&self, session_id: &str) -> bool {
@@ -1246,10 +1270,7 @@ impl VectorStorage for RealRocksDBStorage {
     }
 
     async fn total_count(&self) -> usize {
-        self.load_all_embeddings()
-            .await
-            .map(|e| e.len())
-            .unwrap_or(0)
+        self.vector_index.len()
     }
 
     async fn get_session_vectors(
