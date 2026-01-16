@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **MCP Input Schema**: Added `input_schema` field to tool definitions for better client compatibility
 
-- **MCP Validation Layer**: Custom validation for business logic rules (PR #7)
+- **MCP Validation Layer**: Custom validation for business logic rules (PR #7) (thanks to neiromaster)
   - `validate_session_id()`, `validate_workspace_id()` - UUID format validation
   - `validate_interaction_type()` - Enum validation (6 valid types)
   - `validate_scope()` - Semantic search scope validation
@@ -47,10 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **UTF-8 Safe String Truncation**: Prevent panic on multi-byte character boundaries
   - Safe truncation for Bulgarian, Chinese, emoji, and other multi-byte characters
 
-- **Integration Test Race Conditions**: Added `serial_test` for reliable parallel test execution
+- **Integration Test Race Conditions**: Added `serial_test` for reliable parallel test execution (thanks to neiromaster)
   - Tests no longer flake due to shared resource contention
 
-- **Session ID Format Consistency**: Consistent UUID formatting across all MCP responses
+- **Session ID Format Consistency**: Consistent UUID formatting across all MCP responses (thanks to neiromaster)
 
 - **Full UUIDs in Search Output**: `semantic_search_global` now displays complete UUIDs instead of truncated
 
