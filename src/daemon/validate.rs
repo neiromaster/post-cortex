@@ -15,7 +15,7 @@
 use crate::daemon::coerce::CoercionError;
 use uuid::Uuid;
 
-/// Validate a session ID is a valid UUID.
+/// Validate a session ID is a valid UUID and return the parsed value.
 ///
 /// # Arguments
 ///
@@ -23,13 +23,14 @@ use uuid::Uuid;
 ///
 /// # Returns
 ///
-/// * `Ok(())` if the session ID is a valid UUID
+/// * `Ok(Uuid)` - The parsed UUID if valid
 /// * `Err(CoercionError)` with helpful message if invalid
 ///
 /// # Example
 ///
 /// ```rust
 /// use post_cortex::daemon::validate::validate_session_id;
+/// use uuid::Uuid;
 ///
 /// // Valid UUID
 /// assert!(validate_session_id("60c598e2-d602-4e07-a328-c458006d48c7").is_ok());
@@ -37,21 +38,18 @@ use uuid::Uuid;
 /// // Invalid UUID
 /// assert!(validate_session_id("invalid").is_err());
 /// ```
-pub fn validate_session_id(session_id: &str) -> Result<(), CoercionError> {
-    match Uuid::parse_str(session_id) {
-        Ok(_) => Ok(()),
-        Err(_) => Err(CoercionError::new(
-            &format!("Invalid UUID format: '{}'", session_id),
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid UUID"),
-            Some(session_id.into()),
-        )
-        .with_parameter_path("session_id".to_string())
-        .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 chars with hyphens)")
-        .with_hint("Create a session first using the 'session' tool with action='create', or search for existing sessions using 'semantic_search'")),
-    }
+pub fn validate_session_id(session_id: &str) -> Result<Uuid, CoercionError> {
+    Uuid::parse_str(session_id).map_err(|_| CoercionError::new(
+        &format!("Invalid UUID format: '{}'", session_id),
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid UUID"),
+        Some(session_id.into()),
+    )
+    .with_parameter_path("session_id".to_string())
+    .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 chars with hyphens)")
+    .with_hint("Create a session first using the 'session' tool with action='create', or search for existing sessions using 'semantic_search'"))
 }
 
-/// Validate a workspace ID is a valid UUID.
+/// Validate a workspace ID is a valid UUID and return the parsed value.
 ///
 /// # Arguments
 ///
@@ -59,20 +57,17 @@ pub fn validate_session_id(session_id: &str) -> Result<(), CoercionError> {
 ///
 /// # Returns
 ///
-/// * `Ok(())` if the workspace ID is a valid UUID
+/// * `Ok(Uuid)` - The parsed UUID if valid
 /// * `Err(CoercionError)` with helpful message if invalid
-pub fn validate_workspace_id(workspace_id: &str) -> Result<(), CoercionError> {
-    match Uuid::parse_str(workspace_id) {
-        Ok(_) => Ok(()),
-        Err(_) => Err(CoercionError::new(
-            &format!("Invalid workspace ID format: '{}'", workspace_id),
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid UUID"),
-            Some(workspace_id.into()),
-        )
-        .with_parameter_path("workspace_id".to_string())
-        .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 chars with hyphens)")
-        .with_hint("Use the 'manage_workspace' tool with action='list' to see available workspaces, or create one with action='create'")),
-    }
+pub fn validate_workspace_id(workspace_id: &str) -> Result<Uuid, CoercionError> {
+    Uuid::parse_str(workspace_id).map_err(|_| CoercionError::new(
+        &format!("Invalid workspace ID format: '{}'", workspace_id),
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid UUID"),
+        Some(workspace_id.into()),
+    )
+    .with_parameter_path("workspace_id".to_string())
+    .with_expected_type("UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 chars with hyphens)")
+    .with_hint("Use the 'manage_workspace' tool with action='list' to see available workspaces, or create one with action='create'"))
 }
 
 /// Validate an interaction type is one of the valid values.
@@ -104,7 +99,7 @@ pub fn validate_interaction_type(interaction_type: &str) -> Result<(), CoercionE
         "concept_defined",
     ];
 
-    if VALID_TYPES.contains(&interaction_type) {
+    if VALID_TYPES.contains(&interaction_type.to_lowercase().as_str()) {
         Ok(())
     } else {
         Err(CoercionError::new(
@@ -137,7 +132,7 @@ pub fn validate_interaction_type(interaction_type: &str) -> Result<(), CoercionE
 pub fn validate_scope(scope: &str) -> Result<(), CoercionError> {
     const VALID_SCOPES: &[&str] = &["session", "workspace", "global"];
 
-    if VALID_SCOPES.contains(&scope) {
+    if VALID_SCOPES.contains(&scope.to_lowercase().as_str()) {
         Ok(())
     } else {
         Err(CoercionError::new(
@@ -169,7 +164,7 @@ pub fn validate_scope(scope: &str) -> Result<(), CoercionError> {
 pub fn validate_session_action(action: &str) -> Result<(), CoercionError> {
     const VALID_ACTIONS: &[&str] = &["create", "list"];
 
-    if VALID_ACTIONS.contains(&action) {
+    if VALID_ACTIONS.contains(&action.to_lowercase().as_str()) {
         Ok(())
     } else {
         Err(CoercionError::new(
@@ -212,7 +207,7 @@ pub fn validate_workspace_action(action: &str) -> Result<(), CoercionError> {
         "remove_session",
     ];
 
-    if VALID_ACTIONS.contains(&action) {
+    if VALID_ACTIONS.contains(&action.to_lowercase().as_str()) {
         Ok(())
     } else {
         Err(CoercionError::new(
@@ -246,7 +241,7 @@ pub fn validate_workspace_action(action: &str) -> Result<(), CoercionError> {
 pub fn validate_session_role(role: &str) -> Result<(), CoercionError> {
     const VALID_ROLES: &[&str] = &["primary", "related", "dependency", "shared"];
 
-    if VALID_ROLES.contains(&role) {
+    if VALID_ROLES.contains(&role.to_lowercase().as_str()) {
         Ok(())
     } else {
         Err(CoercionError::new(
@@ -262,16 +257,19 @@ pub fn validate_session_role(role: &str) -> Result<(), CoercionError> {
 
 /// Validate a numeric limit is within acceptable bounds.
 ///
+/// This function validates that limit parameters are within safe ranges to prevent
+/// excessive resource consumption while maintaining flexibility for legitimate use cases.
+///
 /// # Arguments
 ///
 /// * `limit` - The limit value to validate (None means use default)
-/// * `default` - The default limit value
+/// * `default` - The default limit value (used when limit is None)
 /// * `max` - The maximum allowed limit value
 ///
 /// # Returns
 ///
 /// * `Ok(limit_value)` - The limit to use (either the provided value or default)
-/// * `Err(CoercionError)` with helpful message if limit exceeds maximum
+/// * `Err(CoercionError)` with helpful message if limit exceeds maximum or is zero
 ///
 /// # Example
 ///
@@ -301,7 +299,10 @@ pub fn validate_limits(
         )
         .with_parameter_path("limit".to_string())
         .with_expected_type(&format!("number between 1 and {}", max))
-        .with_hint(&format!("Use limit between 1 and {}, or omit for default ({})", max, default)))
+        .with_hint(&format!(
+            "Use limit between 1 and {}, or omit for default ({})",
+            max, default
+        )))
     } else if value == 0 {
         Err(CoercionError::new(
             "Limit must be at least 1",
@@ -310,7 +311,10 @@ pub fn validate_limits(
         )
         .with_parameter_path("limit".to_string())
         .with_expected_type(&format!("number between 1 and {}", max))
-        .with_hint(&format!("Use limit between 1 and {}, or omit for default ({})", max, default)))
+        .with_hint(&format!(
+            "Use limit between 1 and {}, or omit for default ({})",
+            max, default
+        )))
     } else {
         Ok(value)
     }

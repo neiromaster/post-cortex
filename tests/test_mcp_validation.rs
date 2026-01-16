@@ -22,7 +22,10 @@ fn test_validate_session_id_with_invalid_uuid() -> Result<()> {
     let error = result.unwrap_err();
     assert_eq!(error.parameter_path, Some("session_id".to_string()));
     assert!(error.expected_type.as_ref().unwrap().contains("UUID"));
-    assert!(error.hint.as_ref().unwrap().contains("create") || error.hint.as_ref().unwrap().contains("semantic"));
+    assert!(
+        error.hint.as_ref().unwrap().contains("create")
+            || error.hint.as_ref().unwrap().contains("semantic")
+    );
 
     println!("✓ Invalid UUID rejected with helpful error");
     println!("  Error: {}", error.message);
@@ -82,7 +85,13 @@ fn test_validate_interaction_type_with_invalid_type() -> Result<()> {
     assert!(result.is_err());
     let error = result.unwrap_err();
     assert_eq!(error.parameter_path, Some("interaction_type".to_string()));
-    assert!(error.expected_type.as_ref().unwrap().contains("qa, decision_made"));
+    assert!(
+        error
+            .expected_type
+            .as_ref()
+            .unwrap()
+            .contains("qa, decision_made")
+    );
     assert!(error.hint.as_ref().unwrap().contains("decision_made"));
 
     println!("✓ Invalid interaction_type rejected with correction hint");
@@ -111,7 +120,13 @@ fn test_validate_scope_with_invalid_scope() -> Result<()> {
     assert!(result.is_err());
     let error = result.unwrap_err();
     assert_eq!(error.parameter_path, Some("scope".to_string()));
-    assert!(error.expected_type.as_ref().unwrap().contains("session, workspace, global"));
+    assert!(
+        error
+            .expected_type
+            .as_ref()
+            .unwrap()
+            .contains("session, workspace, global")
+    );
     assert!(error.hint.as_ref().unwrap().contains("global"));
 
     println!("✓ Invalid scope rejected with valid options");
@@ -138,7 +153,10 @@ fn test_validate_session_action_with_invalid_action() -> Result<()> {
     assert!(result.is_err());
     let error = result.unwrap_err();
     assert_eq!(error.parameter_path, Some("action".to_string()));
-    assert!(error.hint.as_ref().unwrap().contains("create") && error.hint.as_ref().unwrap().contains("list"));
+    assert!(
+        error.hint.as_ref().unwrap().contains("create")
+            && error.hint.as_ref().unwrap().contains("list")
+    );
 
     println!("✓ Invalid session action rejected");
     println!("  Hint lists valid actions: create, list");
@@ -172,7 +190,10 @@ fn test_validate_workspace_action_with_invalid_action() -> Result<()> {
 
     assert!(result.is_err());
     let error = result.unwrap_err();
-    assert!(error.hint.as_ref().unwrap().contains("create") && error.hint.as_ref().unwrap().contains("add_session"));
+    assert!(
+        error.hint.as_ref().unwrap().contains("create")
+            && error.hint.as_ref().unwrap().contains("add_session")
+    );
 
     println!("✓ Invalid workspace action rejected");
     println!("  Hint lists all 6 valid actions");
@@ -298,7 +319,10 @@ fn test_common_mistakes_have_helpful_hints() -> Result<()> {
     let result3 = validate_session_action("delete");
     assert!(result3.is_err());
     let error3 = result3.unwrap_err();
-    assert!(error3.hint.as_ref().unwrap().contains("create") && error3.hint.as_ref().unwrap().contains("list"));
+    assert!(
+        error3.hint.as_ref().unwrap().contains("create")
+            && error3.hint.as_ref().unwrap().contains("list")
+    );
 
     println!("✓ Common mistakes have helpful, corrective hints");
 
