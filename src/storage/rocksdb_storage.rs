@@ -272,8 +272,8 @@ impl RealRocksDBStorage {
         let session = session.clone();
 
         tokio::task::spawn_blocking(move || -> Result<()> {
-            // Serialize session data
-            let session_data = bincode::serde::encode_to_vec(&session, bincode::config::standard())
+            // Serialize session data with serde_json (bincode doesn't support deserialize_any)
+            let session_data = serde_json::to_vec(&session)
                 .map_err(|e| anyhow::anyhow!("Failed to serialize session: {}", e))?;
 
             info!(
@@ -314,9 +314,8 @@ impl RealRocksDBStorage {
                         data.len()
                     );
 
-                    let (session, _): (ActiveSession, usize) =
-                        bincode::serde::decode_from_slice(&data, bincode::config::standard())
-                            .map_err(|e| anyhow::anyhow!("Failed to deserialize session: {}", e))?;
+                    let session: ActiveSession = serde_json::from_slice(&data)
+                        .map_err(|e| anyhow::anyhow!("Failed to deserialize session: {}", e))?;
 
                     info!("RealRocksDBStorage: Session deserialized successfully");
                     Ok(session)
