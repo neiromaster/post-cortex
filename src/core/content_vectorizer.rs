@@ -909,6 +909,13 @@ impl ContentVectorizer {
             .max(0.0)   // Prevent negative values (causes exponential growth)
             .min(10.0); // Prevent extreme values (causes underflow to zero)
 
+        // Create score adjuster if recency bias is enabled
+        let score_adjuster: Option<Box<dyn crate::core::scoring::ScoreAdjuster>> = if recency_bias > 0.0 {
+            Some(Box::new(crate::core::scoring::TemporalDecayAdjuster::new(recency_bias, now)))
+        } else {
+            None
+        };
+
         // Convert to semantic search results
         let mut results = Vec::new();
         for result in search_results {
@@ -920,21 +927,11 @@ impl ContentVectorizer {
             let importance_weight = content_type.importance_weight();
             let base_score = result.similarity.mul_add(0.7, importance_weight * 0.3);
 
-            // Apply temporal decay if recency_bias is enabled
-            let combined_score = if recency_bias > 0.0 {
-                // Calculate days since the content was created
-                let days_since = (now - result.metadata.timestamp)
-                    .num_days()
-                    .max(0) as f32;
-
-                // Exponential decay: e^(-lambda * delta_t / 365)
-                // Normalize delta_t to years for more intuitive lambda values
-                let decay_factor = (-recency_bias * days_since / 365.0).exp();
-
-                // Apply decay factor to base score
-                base_score * decay_factor
+            // Apply score adjustment using the strategy (e.g., temporal decay)
+            let combined_score = if let Some(ref adjuster) = score_adjuster {
+                adjuster.adjust(base_score, &result.metadata)
             } else {
-                // No temporal decay, use base score directly
+                // No adjustment, use base score directly
                 base_score
             };
 
