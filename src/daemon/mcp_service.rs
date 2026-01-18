@@ -686,6 +686,32 @@ impl PostCortexService {
 
                 let uuid = validate_session_id(session_id).map_err(|e| e.to_mcp_error())?;
 
+                // Parse date range if provided
+                let date_range = match (req.date_from.clone(), req.date_to.clone()) {
+                    (Some(from_str), Some(to_str)) => {
+                        let from = chrono::DateTime::parse_from_rfc3339(&from_str)
+                            .map_err(|_| McpError::invalid_params(
+                                format!("Invalid date_from format: '{}'. Expected RFC3339 format (e.g., 2024-01-01T00:00:00Z)", from_str),
+                                Some(serde_json::Value::String("date_from".to_string())),
+                            ))?
+                            .with_timezone(&chrono::Utc);
+                        let to = chrono::DateTime::parse_from_rfc3339(&to_str)
+                            .map_err(|_| McpError::invalid_params(
+                                format!("Invalid date_to format: '{}'. Expected RFC3339 format (e.g., 2024-12-31T23:59:59Z)", to_str),
+                                Some(serde_json::Value::String("date_to".to_string())),
+                            ))?
+                            .with_timezone(&chrono::Utc);
+                        Some((from, to))
+                    }
+                    (Some(_), None) | (None, Some(_)) => {
+                        return Err(McpError::invalid_params(
+                            "Both date_from and date_to must be provided together".to_string(),
+                            Some(serde_json::Value::String("date_from,date_to".to_string())),
+                        ));
+                    }
+                    (None, None) => None,
+                };
+
                 // Validate recency_bias if provided
                 let validated_recency_bias = validate_recency_bias(req.recency_bias)
                     .map_err(|e| e.to_mcp_error())?;
@@ -706,7 +732,7 @@ impl PostCortexService {
                             uuid,
                             &req.query,
                             Some(validated_limit),
-                            None, // date_range - TODO: parse from date_from/date_to
+                            date_range,  // ✅ Pass parsed date_range
                             bias,
                         )
                         .await
@@ -772,6 +798,32 @@ impl PostCortexService {
                     .map(|(id, _)| id)
                     .collect();
 
+                // Parse date range if provided
+                let date_range = match (req.date_from.clone(), req.date_to.clone()) {
+                    (Some(from_str), Some(to_str)) => {
+                        let from = chrono::DateTime::parse_from_rfc3339(&from_str)
+                            .map_err(|_| McpError::invalid_params(
+                                format!("Invalid date_from format: '{}'. Expected RFC3339 format (e.g., 2024-01-01T00:00:00Z)", from_str),
+                                Some(serde_json::Value::String("date_from".to_string())),
+                            ))?
+                            .with_timezone(&chrono::Utc);
+                        let to = chrono::DateTime::parse_from_rfc3339(&to_str)
+                            .map_err(|_| McpError::invalid_params(
+                                format!("Invalid date_to format: '{}'. Expected RFC3339 format (e.g., 2024-12-31T23:59:59Z)", to_str),
+                                Some(serde_json::Value::String("date_to".to_string())),
+                            ))?
+                            .with_timezone(&chrono::Utc);
+                        Some((from, to))
+                    }
+                    (Some(_), None) | (None, Some(_)) => {
+                        return Err(McpError::invalid_params(
+                            "Both date_from and date_to must be provided together".to_string(),
+                            Some(serde_json::Value::String("date_from,date_to".to_string())),
+                        ));
+                    }
+                    (None, None) => None,
+                };
+
                 // Validate recency_bias if provided
                 let validated_recency_bias = validate_recency_bias(req.recency_bias)
                     .map_err(|e| e.to_mcp_error())?;
@@ -789,7 +841,7 @@ impl PostCortexService {
                             &session_ids,
                             &req.query,
                             Some(validated_limit),
-                            None, // date_range
+                            date_range,  // ✅ Pass parsed date_range
                             bias,
                         )
                         .await
@@ -833,6 +885,32 @@ impl PostCortexService {
                 Ok(CallToolResult::success(vec![Content::text(search_results.message)]))
             }
             "global" | _ => {
+                // Parse date range if provided
+                let date_range = match (req.date_from.clone(), req.date_to.clone()) {
+                    (Some(from_str), Some(to_str)) => {
+                        let from = chrono::DateTime::parse_from_rfc3339(&from_str)
+                            .map_err(|_| McpError::invalid_params(
+                                format!("Invalid date_from format: '{}'. Expected RFC3339 format (e.g., 2024-01-01T00:00:00Z)", from_str),
+                                Some(serde_json::Value::String("date_from".to_string())),
+                            ))?
+                            .with_timezone(&chrono::Utc);
+                        let to = chrono::DateTime::parse_from_rfc3339(&to_str)
+                            .map_err(|_| McpError::invalid_params(
+                                format!("Invalid date_to format: '{}'. Expected RFC3339 format (e.g., 2024-12-31T23:59:59Z)", to_str),
+                                Some(serde_json::Value::String("date_to".to_string())),
+                            ))?
+                            .with_timezone(&chrono::Utc);
+                        Some((from, to))
+                    }
+                    (Some(_), None) | (None, Some(_)) => {
+                        return Err(McpError::invalid_params(
+                            "Both date_from and date_to must be provided together".to_string(),
+                            Some(serde_json::Value::String("date_from,date_to".to_string())),
+                        ));
+                    }
+                    (None, None) => None,
+                };
+
                 // Validate recency_bias if provided
                 let validated_recency_bias = validate_recency_bias(req.recency_bias)
                     .map_err(|e| e.to_mcp_error())?;
@@ -851,7 +929,7 @@ impl PostCortexService {
                         .semantic_search_global_with_recency(
                             &req.query,
                             Some(validated_limit),
-                            None, // date_range
+                            date_range,  // ✅ Pass parsed date_range
                             bias,
                         )
                         .await
