@@ -255,6 +255,77 @@ pub fn validate_session_role(role: &str) -> Result<(), CoercionError> {
     }
 }
 
+/// Validate a recency_bias parameter is within acceptable bounds.
+///
+/// The recency_bias parameter controls temporal decay in semantic search. Invalid values
+/// can cause exponential growth (negatives), underflow to zero (extreme values), or
+/// corrupt rankings (NaN, Infinity).
+///
+/// # Arguments
+///
+/// * `recency_bias` - The recency_bias value to validate (None means disabled)
+///
+/// # Returns
+///
+/// * `Ok(Some(value))` - The validated recency_bias value
+/// * `Ok(None)` - If recency_bias was None (disabled)
+/// * `Err(CoercionError)` with helpful message if invalid
+///
+/// # Valid Range
+///
+/// - `[0.0, 10.0]` - 0.0 disables decay, 10.0 is maximum practical decay rate
+/// - Rejects: negative values, NaN, Infinity, NegInfinity
+///
+/// # Example
+///
+/// ```rust
+/// use post_cortex::daemon::validate::validate_recency_bias;
+///
+/// // Valid values
+/// assert_eq!(validate_recency_bias(Some(0.0)).unwrap(), Some(0.0));
+/// assert_eq!(validate_recency_bias(Some(0.5)).unwrap(), Some(0.5));
+/// assert_eq!(validate_recency_bias(Some(10.0)).unwrap(), Some(10.0));
+/// assert_eq!(validate_recency_bias(None).unwrap(), None);
+///
+/// // Invalid values
+/// assert!(validate_recency_bias(Some(-1.0)).is_err());
+/// assert!(validate_recency_bias(Some(f32::NAN)).is_err());
+/// assert!(validate_recency_bias(Some(f32::INFINITY)).is_err());
+/// ```
+pub fn validate_recency_bias(recency_bias: Option<f32>) -> Result<Option<f32>, CoercionError> {
+    const MAX_RECENCY_BIAS: f32 = 10.0;
+    const MIN_RECENCY_BIAS: f32 = 0.0;
+
+    if let Some(value) = recency_bias {
+        if value.is_nan() || value.is_infinite() {
+            return Err(CoercionError::new(
+                "Invalid recency_bias value",
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "NaN or Infinity not allowed"),
+                Some(serde_json::Value::String(value.to_string())),
+            )
+            .with_parameter_path("recency_bias".to_string())
+            .with_expected_type("finite f32 between 0.0 and 10.0")
+            .with_hint("Use a finite value between 0.0 (disabled) and 10.0 (aggressive decay). Recommended: 0.0-1.0 for most use cases."));
+        }
+        if value < MIN_RECENCY_BIAS || value > MAX_RECENCY_BIAS {
+            return Err(CoercionError::new(
+                "recency_bias out of range",
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "Value must be between 0.0 and 10.0"),
+                Some(serde_json::Value::String(value.to_string())),
+            )
+            .with_parameter_path("recency_bias".to_string())
+            .with_expected_type("f32 in range [0.0, 10.0]")
+            .with_hint(&format!(
+                "Use recency_bias between {} and {}, or omit for default (0.0 = disabled)",
+                MIN_RECENCY_BIAS, MAX_RECENCY_BIAS
+            )));
+        }
+        Ok(Some(value))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Validate a numeric limit is within acceptable bounds.
 ///
 /// This function validates that limit parameters are within safe ranges to prevent
@@ -461,5 +532,54 @@ mod tests {
         assert!(result.is_err());
         let error = result.unwrap_err();
         assert!(error.message.contains("at least 1"));
+    }
+
+    #[test]
+    fn test_validate_recency_bias_valid() {
+        // Valid values
+        assert_eq!(validate_recency_bias(Some(0.0)).unwrap(), Some(0.0));
+        assert_eq!(validate_recency_bias(Some(0.5)).unwrap(), Some(0.5));
+        assert_eq!(validate_recency_bias(Some(1.0)).unwrap(), Some(1.0));
+        assert_eq!(validate_recency_bias(Some(10.0)).unwrap(), Some(10.0));
+    }
+
+    #[test]
+    fn test_validate_recency_bias_none() {
+        assert_eq!(validate_recency_bias(None).unwrap(), None);
+    }
+
+    #[test]
+    fn test_validate_recency_bias_negative() {
+        let result = validate_recency_bias(Some(-1.0));
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.parameter_path, Some("recency_bias".to_string()));
+        assert!(error.message.contains("out of range"));
+    }
+
+    #[test]
+    fn test_validate_recency_bias_nan() {
+        let result = validate_recency_bias(Some(f32::NAN));
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.parameter_path, Some("recency_bias".to_string()));
+        assert!(error.message.contains("Invalid recency_bias value"));
+    }
+
+    #[test]
+    fn test_validate_recency_bias_infinity() {
+        let result = validate_recency_bias(Some(f32::INFINITY));
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.message.contains("NaN or Infinity not allowed"));
+    }
+
+    #[test]
+    fn test_validate_recency_bias_exceeds_maximum() {
+        let result = validate_recency_bias(Some(100.0));
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(error.message.contains("out of range"));
+        assert_eq!(error.parameter_path, Some("recency_bias".to_string()));
     }
 }

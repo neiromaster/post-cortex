@@ -820,7 +820,12 @@ impl ContentVectorizer {
         recency_bias_override: Option<f32>,
     ) -> Result<Vec<SemanticSearchResult>> {
         let now = Utc::now();
-        let recency_bias = recency_bias_override.unwrap_or(self.config.recency_bias);
+        // Defense-in-depth: Clamp recency_bias to prevent negative values or extreme values
+        // This provides a safety net even if validation is bypassed elsewhere
+        let recency_bias = recency_bias_override
+            .unwrap_or(self.config.recency_bias)
+            .max(0.0)   // Prevent negative values (causes exponential growth)
+            .min(10.0); // Prevent extreme values (causes underflow to zero)
 
         // Convert to semantic search results
         let mut results = Vec::new();

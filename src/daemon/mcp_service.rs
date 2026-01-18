@@ -686,8 +686,12 @@ impl PostCortexService {
 
                 let uuid = validate_session_id(session_id).map_err(|e| e.to_mcp_error())?;
 
+                // Validate recency_bias if provided
+                let validated_recency_bias = validate_recency_bias(req.recency_bias)
+                    .map_err(|e| e.to_mcp_error())?;
+
                 // Use recency_bias if provided
-                if let Some(bias) = req.recency_bias {
+                if let Some(bias) = validated_recency_bias {
                     // Get engine and use _with_recency method
                     let system = get_memory_system().await
                         .map_err(|e| McpError::internal_error(format!("Failed to get memory system: {}", e), None))?;
@@ -768,8 +772,12 @@ impl PostCortexService {
                     .map(|(id, _)| id)
                     .collect();
 
+                // Validate recency_bias if provided
+                let validated_recency_bias = validate_recency_bias(req.recency_bias)
+                    .map_err(|e| e.to_mcp_error())?;
+
                 // Use recency_bias if provided
-                let search_results = if let Some(bias) = req.recency_bias {
+                let search_results = if let Some(bias) = validated_recency_bias {
                     let engine = system
                         .semantic_query_engine
                         .get()
@@ -825,8 +833,12 @@ impl PostCortexService {
                 Ok(CallToolResult::success(vec![Content::text(search_results.message)]))
             }
             "global" | _ => {
+                // Validate recency_bias if provided
+                let validated_recency_bias = validate_recency_bias(req.recency_bias)
+                    .map_err(|e| e.to_mcp_error())?;
+
                 // Use recency_bias if provided
-                if let Some(bias) = req.recency_bias {
+                if let Some(bias) = validated_recency_bias {
                     let system = get_memory_system().await
                         .map_err(|e| McpError::internal_error(format!("Failed to get memory system: {}", e), None))?;
 
