@@ -220,7 +220,10 @@ impl SemanticQueryEngine {
     }
 
     /// Search within a specific set of sessions with custom recency bias
-    pub async fn semantic_search_multisession_with_recency(
+    ///
+    /// This optimized version performs a single vector database search across all sessions
+    /// instead of searching each session separately, avoiding O(n²) complexity.
+    pub async fn semantic_search_multisession_with_recency_bias(
         &self,
         session_ids: &[Uuid],
         query: &str,
@@ -231,46 +234,24 @@ impl SemanticQueryEngine {
         let search_limit = limit.unwrap_or(self.config.max_context_results);
 
         debug!(
-            "Performing multisession semantic search with recency_bias={} in {} sessions for: '{}'",
+            "Performing optimized multisession semantic search with recency_bias={} in {} sessions for: '{}'",
             recency_bias, session_ids.len(), query
         );
 
-        // For multisession search, we need to call the vectorizer with recency bias
-        // Since ContentVectorizer.multisession doesn't support recency bias directly,
-        // we need to use semantic_search_with_recency_bias for each session or add support
-        // For now, let's create a workaround by searching with filters
-        let engine = self.vectorizer.clone();
-
-        // Use search_in_source with recency bias for each session
-        // This is less efficient but ensures recency bias is applied
-        let mut all_results = Vec::new();
-
-        for session_id in session_ids {
-            let session_results = engine
-                .semantic_search_with_recency_bias(
-                    query,
-                    search_limit / session_ids.len().max(1), // Distribute limit across sessions
-                    Some(*session_id),
-                    date_range,
-                    Some(recency_bias),
-                )
-                .await?;
-
-            all_results.extend(session_results);
-        }
-
-        // Sort by combined score
-        all_results.sort_by(|a, b| {
-            b.combined_score
-                .partial_cmp(&a.combined_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // Truncate to limit
-        all_results.truncate(search_limit);
+        // Use the optimized single-search implementation
+        let results = self
+            .vectorizer
+            .semantic_search_multisession_with_recency_bias(
+                query,
+                search_limit,
+                session_ids,
+                date_range,
+                Some(recency_bias),
+            )
+            .await?;
 
         // Filter by similarity threshold
-        let filtered_results: Vec<_> = all_results
+        let filtered_results: Vec<_> = results
             .into_iter()
             .filter(|r| r.similarity_score >= self.config.similarity_threshold)
             .collect();
@@ -284,7 +265,7 @@ impl SemanticQueryEngine {
     }
 
     /// Perform semantic search across all sessions with custom recency bias
-    pub async fn semantic_search_global_with_recency(
+    pub async fn semantic_search_global_with_recency_bias(
         &self,
         query: &str,
         limit: Option<usize>,

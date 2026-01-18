@@ -817,6 +817,94 @@ impl ContentVectorizer {
         self.process_search_results(search_results, None)
     }
 
+    /// Perform semantic search within a specific set of sessions with optional recency bias
+    ///
+    /// This is an optimized version that performs a single vector database search across all
+    /// sessions, then applies recency bias in post-processing. This avoids the O(n²) complexity
+    /// of searching each session separately.
+    pub async fn semantic_search_multisession_with_recency(
+        &self,
+        query: &str,
+        limit: usize,
+        allowed_sessions: &[Uuid],
+        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        recency_bias: Option<f32>,
+    ) -> Result<Vec<SemanticSearchResult>> {
+        debug!(
+            "Performing multisession semantic search with recency_bias={:?} for: '{}'",
+            recency_bias, query
+        );
+
+        // Create a hash of search parameters for cache key
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        query.hash(&mut hasher);
+        limit.hash(&mut hasher);
+        for session_id in allowed_sessions {
+            session_id.hash(&mut hasher);
+        }
+        if let Some(ref range) = date_range {
+            range.0.timestamp().hash(&mut hasher);
+            range.1.timestamp().hash(&mut hasher);
+        }
+        if let Some(bias) = recency_bias {
+            bias.to_bits().hash(&mut hasher);
+        }
+        let params_hash = hasher.finish();
+
+        // Check query cache first
+        let query_embedding = if let Some(ref cache) = self.query_cache {
+            let query_embedding = self.embedding_engine.encode_text(query).await?;
+
+            if let Some(cached_results) = cache.search(query, &query_embedding, params_hash).await {
+                debug!("Cache hit for multisession semantic search query: '{}'", query);
+                return Ok(cached_results);
+            }
+            query_embedding
+        } else {
+            self.embedding_engine.encode_text(query).await?
+        };
+
+        // Pre-calculate valid session strings for fast lookup
+        let valid_sessions: std::collections::HashSet<String> = allowed_sessions
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+
+        // Perform single search with filter across all sessions
+        let search_results = if let Some((start, end)) = date_range {
+            self.vector_db
+                .search_with_filter(&query_embedding, limit, |metadata| {
+                    valid_sessions.contains(&metadata.source)
+                        && metadata.timestamp >= start
+                        && metadata.timestamp <= end
+                })?
+        } else {
+            self.vector_db
+                .search_with_filter(&query_embedding, limit, |metadata| {
+                    valid_sessions.contains(&metadata.source)
+                })?
+        };
+
+        let results = self.process_search_results(search_results, recency_bias)?;
+
+        // Cache the results
+        if let Some(ref cache) = self.query_cache
+            && let Err(e) = cache
+                .cache_results(
+                    query.to_string(),
+                    query_embedding,
+                    results.clone(),
+                    params_hash,
+                    None, // No session_filter for multisession
+                )
+                .await
+        {
+            warn!("Failed to cache search results: {}", e);
+        }
+
+        Ok(results)
+    }
+
     /// Process raw vector search results into semantic results
     fn process_search_results(
         &self,
