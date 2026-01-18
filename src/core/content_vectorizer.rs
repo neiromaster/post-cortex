@@ -711,6 +711,10 @@ impl ContentVectorizer {
             range.0.timestamp().hash(&mut hasher);
             range.1.timestamp().hash(&mut hasher);
         }
+        // Include recency_bias in cache key to prevent collisions
+        if let Some(bias) = recency_bias {
+            bias.to_bits().hash(&mut hasher);
+        }
         let params_hash = hasher.finish();
 
         // Check query cache first
