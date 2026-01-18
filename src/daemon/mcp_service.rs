@@ -662,6 +662,7 @@ impl PostCortexService {
                     req.date_from.clone(),
                     req.date_to.clone(),
                     req.interaction_type.clone(),
+                    None, // recency_bias
                 )
                 .await
                 {
@@ -695,6 +696,7 @@ impl PostCortexService {
                     req.date_from.clone(),
                     req.date_to.clone(),
                     req.interaction_type.clone(),
+                    None, // recency_bias
                 )
                 .await
                 {

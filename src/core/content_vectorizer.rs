@@ -147,6 +147,11 @@ pub struct ContentVectorizerConfig {
     pub enable_cross_session_search: bool,
     pub query_cache_config: QueryCacheConfig,
     pub enable_query_caching: bool,
+    /// Temporal decay factor for recency bias in search results
+    /// 0.0 = disabled (default, backward compatible)
+    /// 0.1-0.5 = soft bias toward recent content
+    /// 1.0+ = aggressive bias toward recent content
+    pub recency_bias: f32,
 }
 
 impl Default for ContentVectorizerConfig {
@@ -161,6 +166,7 @@ impl Default for ContentVectorizerConfig {
             enable_cross_session_search: true,
             query_cache_config: QueryCacheConfig::default(),
             enable_query_caching: true,
+            recency_bias: 0.0, // Disabled by default for backward compatibility
         }
     }
 }
@@ -676,6 +682,22 @@ impl ContentVectorizer {
         session_filter: Option<Uuid>,
         date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
     ) -> Result<Vec<SemanticSearchResult>> {
+        self.semantic_search_with_recency_bias(query, limit, session_filter, date_range, None)
+            .await
+    }
+
+    /// Perform semantic search with optional recency bias override
+    /// # Errors
+    ///
+    /// Returns an error if the query cannot be embedded or if the vector database search fails
+    pub async fn semantic_search_with_recency_bias(
+        &self,
+        query: &str,
+        limit: usize,
+        session_filter: Option<Uuid>,
+        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        recency_bias: Option<f32>,
+    ) -> Result<Vec<SemanticSearchResult>> {
         debug!("Performing semantic search for: '{}'", query);
 
         // Create a hash of search parameters for cache key
@@ -734,7 +756,7 @@ impl ContentVectorizer {
             _ => return Ok(Vec::new()),
         };
 
-        let results = self.process_search_results(search_results)?;
+        let results = self.process_search_results(search_results, recency_bias)?;
 
         // Cache the results
         if let Some(ref cache) = self.query_cache
@@ -788,14 +810,18 @@ impl ContentVectorizer {
                 })?
         };
 
-        self.process_search_results(search_results)
+        self.process_search_results(search_results, None)
     }
 
     /// Process raw vector search results into semantic results
     fn process_search_results(
         &self,
         search_results: Vec<crate::core::vector_db::SearchMatch>,
+        recency_bias_override: Option<f32>,
     ) -> Result<Vec<SemanticSearchResult>> {
+        let now = Utc::now();
+        let recency_bias = recency_bias_override.unwrap_or(self.config.recency_bias);
+
         // Convert to semantic search results
         let mut results = Vec::new();
         for result in search_results {
@@ -805,7 +831,25 @@ impl ContentVectorizer {
 
             // Calculate combined score (similarity + importance + content type weight)
             let importance_weight = content_type.importance_weight();
-            let combined_score = result.similarity.mul_add(0.7, importance_weight * 0.3);
+            let base_score = result.similarity.mul_add(0.7, importance_weight * 0.3);
+
+            // Apply temporal decay if recency_bias is enabled
+            let combined_score = if recency_bias > 0.0 {
+                // Calculate days since the content was created
+                let days_since = (now - result.metadata.timestamp)
+                    .num_days()
+                    .max(0) as f32;
+
+                // Exponential decay: e^(-lambda * delta_t / 365)
+                // Normalize delta_t to years for more intuitive lambda values
+                let decay_factor = (-recency_bias * days_since / 365.0).exp();
+
+                // Apply decay factor to base score
+                base_score * decay_factor
+            } else {
+                // No temporal decay, use base score directly
+                base_score
+            };
 
             results.push(SemanticSearchResult {
                 content_id: result.metadata.id,

@@ -72,6 +72,8 @@ pub struct SemanticQueryConfig {
     pub cross_session_enabled: bool,
     pub insight_confidence_threshold: f32,
     pub max_context_results: usize,
+    /// Temporal decay factor for recency bias (0.0 = disabled)
+    pub recency_bias: f32,
 }
 
 impl Default for SemanticQueryConfig {
@@ -82,6 +84,7 @@ impl Default for SemanticQueryConfig {
             cross_session_enabled: true,
             insight_confidence_threshold: 0.6,
             max_context_results: 20,
+            recency_bias: 0.0, // Disabled by default for backward compatibility
         }
     }
 }
@@ -209,6 +212,97 @@ impl SemanticQueryEngine {
 
         debug!(
             "Multisession semantic search returned {} results (filtered from threshold {})",
+            filtered_results.len(),
+            self.config.similarity_threshold
+        );
+
+        Ok(filtered_results)
+    }
+
+    /// Perform semantic search across all sessions with custom recency bias
+    pub async fn semantic_search_global_with_recency(
+        &self,
+        query: &str,
+        limit: Option<usize>,
+        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        recency_bias: f32,
+    ) -> Result<Vec<SemanticSearchResult>> {
+        let search_limit = limit.unwrap_or(self.config.max_context_results);
+
+        info!(
+            "Performing global semantic search with recency_bias={}: '{}'",
+            recency_bias, query
+        );
+        if let Some((start, end)) = date_range {
+            info!("  Date range filter: {} to {}", start, end);
+        }
+
+        let results = self
+            .vectorizer
+            .semantic_search_with_recency_bias(
+                query,
+                search_limit,
+                None,
+                date_range,
+                Some(recency_bias),
+            )
+            .await
+            .context("Failed to perform semantic search")?;
+
+        // Filter by similarity threshold
+        let filtered_results: Vec<_> = results
+            .into_iter()
+            .filter(|r| r.similarity_score >= self.config.similarity_threshold)
+            .collect();
+
+        debug!(
+            "Global semantic search returned {} results (filtered from threshold {})",
+            filtered_results.len(),
+            self.config.similarity_threshold
+        );
+
+        Ok(filtered_results)
+    }
+
+    /// Search within a specific session with custom recency bias
+    pub async fn semantic_search_session_with_recency(
+        &self,
+        session_id: Uuid,
+        query: &str,
+        limit: Option<usize>,
+        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        recency_bias: f32,
+    ) -> Result<Vec<SemanticSearchResult>> {
+        let search_limit = limit.unwrap_or(self.config.max_context_results);
+
+        debug!(
+            "Performing session-specific semantic search with recency_bias={} in {} for: '{}'",
+            recency_bias, session_id, query
+        );
+        if let Some((start, end)) = date_range {
+            debug!("  Date range filter: {} to {}", start, end);
+        }
+
+        let results = self
+            .vectorizer
+            .semantic_search_with_recency_bias(
+                query,
+                search_limit,
+                Some(session_id),
+                date_range,
+                Some(recency_bias),
+            )
+            .await
+            .context("Failed to perform session semantic search")?;
+
+        // Filter by similarity threshold (consistent with global search)
+        let filtered_results: Vec<_> = results
+            .into_iter()
+            .filter(|r| r.similarity_score >= self.config.similarity_threshold)
+            .collect();
+
+        debug!(
+            "Session semantic search returned {} results (filtered from threshold {})",
             filtered_results.len(),
             self.config.similarity_threshold
         );
