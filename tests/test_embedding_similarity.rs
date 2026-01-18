@@ -194,7 +194,7 @@ async fn test_end_to_end_semantic_search_pipeline() -> Result<()> {
 
     // Search with the question
     let results = system
-        .semantic_search_session(session_id, question, Some(5), None)
+        .semantic_search_session(session_id, question, Some(5), None, None)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 

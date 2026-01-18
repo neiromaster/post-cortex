@@ -83,7 +83,7 @@ async fn test_recency_bias_zero_has_no_effect() -> Result<()> {
     let engine = system.ensure_semantic_engine_initialized().await
         .map_err(|e| anyhow::anyhow!(e))?;
     let results = engine
-        .semantic_search_session_with_recency_bias(session_id, "authentication system", None, None, 0.0)
+        .semantic_search_session(session_id, "authentication system", None, None, Some(0.0))
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -149,12 +149,12 @@ async fn test_recency_bias_prioritizes_recent_content() -> Result<()> {
 
     // Use more specific query that should match the content
     let results_no_bias = engine
-        .semantic_search_session_with_recency_bias(session_id, "JWT tokens authentication", None, None, 0.0)
+        .semantic_search_session(session_id, "JWT tokens authentication", None, None, Some(0.0))
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
     let results_with_bias = engine
-        .semantic_search_session_with_recency_bias(session_id, "JWT tokens authentication", None, None, 1.0)
+        .semantic_search_session(session_id, "JWT tokens authentication", None, None, Some(1.0))
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -253,12 +253,12 @@ async fn test_recency_bias_multisession() -> Result<()> {
     // Search across both sessions with recency bias
     let session_ids = vec![session1, session2];
     let results_no_bias = engine
-        .semantic_search_multisession_with_recency_bias(&session_ids, "semantic search embeddings", None, None, 0.0)
+        .semantic_search_multisession(&session_ids, "semantic search embeddings", None, None, Some(0.0))
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
     let results_with_bias = engine
-        .semantic_search_multisession_with_recency_bias(&session_ids, "semantic search embeddings", None, None, 1.0)
+        .semantic_search_multisession(&session_ids, "semantic search embeddings", None, None, Some(1.0))
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -328,12 +328,12 @@ async fn test_recency_bias_formula_consistency() -> Result<()> {
 
     for lambda in lambda_values {
         let results = engine
-            .semantic_search_session_with_recency_bias(
+            .semantic_search_session(
                 session_id,
                 "exponential decay content",
                 None,
                 None,
-                lambda,
+                Some(lambda),
             )
             .await
             .map_err(|e| anyhow::anyhow!(e))?;

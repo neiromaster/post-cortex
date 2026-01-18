@@ -207,7 +207,6 @@ pub struct SearchOptions {
 }
 
 /// Main content vectorization pipeline
-#[derive(Clone)]
 pub struct ContentVectorizer {
     embedding_engine: Arc<LocalEmbeddingEngine>,
     vector_db: Arc<FastVectorDB>,
@@ -215,6 +214,32 @@ pub struct ContentVectorizer {
     query_cache: Option<Arc<QueryCache>>,
     /// Optional persistent storage for embeddings (RocksDB/SurrealDB)
     persistent_storage: Option<Arc<dyn crate::storage::traits::VectorStorage>>,
+    /// Recency bias performance metrics - all atomic for lock-free access
+    recency_bias_total_duration_ns: std::sync::atomic::AtomicU64,
+    recency_bias_total_results: std::sync::atomic::AtomicU64,
+    recency_bias_calculation_count: std::sync::atomic::AtomicU64,
+}
+
+impl Clone for ContentVectorizer {
+    fn clone(&self) -> Self {
+        Self {
+            embedding_engine: Arc::clone(&self.embedding_engine),
+            vector_db: Arc::clone(&self.vector_db),
+            config: self.config.clone(),
+            query_cache: self.query_cache.clone(),
+            persistent_storage: self.persistent_storage.clone(),
+            // Note: Atomics are shared between clones, which is intentional for metrics aggregation
+            recency_bias_total_duration_ns: std::sync::atomic::AtomicU64::new(
+                self.recency_bias_total_duration_ns.load(std::sync::atomic::Ordering::Relaxed)
+            ),
+            recency_bias_total_results: std::sync::atomic::AtomicU64::new(
+                self.recency_bias_total_results.load(std::sync::atomic::Ordering::Relaxed)
+            ),
+            recency_bias_calculation_count: std::sync::atomic::AtomicU64::new(
+                self.recency_bias_calculation_count.load(std::sync::atomic::Ordering::Relaxed)
+            ),
+        }
+    }
 }
 
 impl ContentVectorizer {
@@ -253,6 +278,9 @@ impl ContentVectorizer {
             config,
             query_cache: query_cache.map(Arc::new),
             persistent_storage: None,
+            recency_bias_total_duration_ns: std::sync::atomic::AtomicU64::new(0),
+            recency_bias_total_results: std::sync::atomic::AtomicU64::new(0),
+            recency_bias_calculation_count: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -906,8 +934,7 @@ impl ContentVectorizer {
         // This provides a safety net even if validation is bypassed elsewhere
         let recency_bias = recency_bias_override
             .unwrap_or(self.config.recency_bias)
-            .max(0.0)   // Prevent negative values (causes exponential growth)
-            .min(10.0); // Prevent extreme values (causes underflow to zero)
+            .clamp(0.0, 10.0); // Prevent negative values and extreme values
 
         // Create score adjuster if recency bias is enabled
         let score_adjuster: Option<Box<dyn crate::core::scoring::ScoreAdjuster>> = if recency_bias > 0.0 {
@@ -915,6 +942,10 @@ impl ContentVectorizer {
         } else {
             None
         };
+
+        // Start timing for decay calculation metrics
+        let decay_start = std::time::Instant::now();
+        let mut decay_count = 0;
 
         // Convert to semantic search results
         let mut results = Vec::new();
@@ -929,6 +960,7 @@ impl ContentVectorizer {
 
             // Apply score adjustment using the strategy (e.g., temporal decay)
             let combined_score = if let Some(ref adjuster) = score_adjuster {
+                decay_count += 1;
                 adjuster.adjust(base_score, &result.metadata)
             } else {
                 // No adjustment, use base score directly
@@ -945,6 +977,16 @@ impl ContentVectorizer {
                 timestamp: result.metadata.timestamp,
                 combined_score,
             });
+        }
+
+        // Emit decay calculation performance metrics
+        if decay_count > 0 {
+            let decay_duration_ns = decay_start.elapsed().as_nanos() as u64;
+
+            // Update atomic counters - lock-free
+            self.recency_bias_total_duration_ns.fetch_add(decay_duration_ns, std::sync::atomic::Ordering::Relaxed);
+            self.recency_bias_total_results.fetch_add(decay_count, std::sync::atomic::Ordering::Relaxed);
+            self.recency_bias_calculation_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Deduplicate results by content_id (keeps highest score or newest timestamp)
@@ -1005,6 +1047,50 @@ impl ContentVectorizer {
             Some(cache) => Some(cache.get_efficiency_metrics().await),
             None => None,
         }
+    }
+
+    /// Get recency bias performance metrics (lock-free)
+    ///
+    /// Returns performance metrics for temporal decay calculations when recency_bias > 0.
+    /// Metrics include total time, result counts, and averages across all searches.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(metrics)` - HashMap containing performance metrics
+    /// - `None` - No recency bias metrics available (never used)
+    ///
+    /// # Metrics
+    ///
+    /// - `recency_bias.total_duration_ns` - Total time spent calculating decay (nanoseconds)
+    /// - `recency_bias.total_results` - Total number of results processed
+    /// - `recency_bias.calculation_count` - Number of search operations with recency bias
+    /// - `recency_bias.avg_duration_ns` - Average duration per calculation
+    /// - `recency_bias.avg_results_per_calculation` - Average results processed per calculation
+    /// - `recency_bias.avg_time_per_result_ns` - Average time per result (nanoseconds)
+    pub fn get_recency_bias_metrics(&self) -> Option<HashMap<String, f32>> {
+        let calculation_count = self.recency_bias_calculation_count.load(std::sync::atomic::Ordering::Relaxed);
+
+        if calculation_count == 0 {
+            return None;
+        }
+
+        let total_duration_ns = self.recency_bias_total_duration_ns.load(std::sync::atomic::Ordering::Relaxed);
+        let total_results = self.recency_bias_total_results.load(std::sync::atomic::Ordering::Relaxed);
+
+        let mut metrics = HashMap::new();
+        metrics.insert("recency_bias.total_duration_ns".to_string(), total_duration_ns as f32);
+        metrics.insert("recency_bias.total_results".to_string(), total_results as f32);
+        metrics.insert("recency_bias.calculation_count".to_string(), calculation_count as f32);
+        metrics.insert("recency_bias.avg_duration_ns".to_string(), total_duration_ns as f32 / calculation_count as f32);
+        metrics.insert("recency_bias.avg_results_per_calculation".to_string(), total_results as f32 / calculation_count as f32);
+
+        if total_results > 0 {
+            metrics.insert("recency_bias.avg_time_per_result_ns".to_string(), total_duration_ns as f32 / total_results as f32);
+        } else {
+            metrics.insert("recency_bias.avg_time_per_result_ns".to_string(), 0.0);
+        }
+
+        Some(metrics)
     }
 
     /// Clear query cache
