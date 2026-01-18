@@ -744,12 +744,12 @@ impl PostCortexService {
                         .ok_or_else(|| McpError::internal_error("Semantic engine not initialized".to_string(), None))?;
 
                     let results = engine
-                        .semantic_search_session_with_recency_bias(
+                        .semantic_search_session(
                             uuid,
                             &req.query,
                             Some(validated_limit),
                             date_range,
-                            bias,
+                            Some(bias),
                         )
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -843,12 +843,12 @@ impl PostCortexService {
                         .ok_or_else(|| McpError::internal_error("Semantic engine not initialized".to_string(), None))?;
 
                     let results = engine
-                        .semantic_search_multisession_with_recency_bias(
+                        .semantic_search_multisession(
                             &session_ids,
                             &req.query,
                             Some(validated_limit),
                             date_range,
-                            bias,
+                            Some(bias),
                         )
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -909,11 +909,11 @@ impl PostCortexService {
                         .ok_or_else(|| McpError::internal_error("Semantic engine not initialized".to_string(), None))?;
 
                     let results = engine
-                        .semantic_search_global_with_recency_bias(
+                        .semantic_search_global(
                             &req.query,
                             Some(validated_limit),
                             date_range,
-                            bias,
+                            Some(bias),
                         )
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;

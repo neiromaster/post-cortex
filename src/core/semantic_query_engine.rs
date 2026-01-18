@@ -114,6 +114,7 @@ impl SemanticQueryEngine {
         query: &str,
         limit: Option<usize>,
         date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        recency_bias: Option<f32>,
     ) -> Result<Vec<SemanticSearchResult>> {
         let search_limit = limit.unwrap_or(self.config.max_context_results);
 
@@ -122,9 +123,15 @@ impl SemanticQueryEngine {
             info!("  Date range filter: {} to {}", start, end);
         }
 
+        let options = crate::core::content_vectorizer::SearchOptions {
+            limit: Some(search_limit),
+            date_range,
+            recency_bias,
+        };
+
         let results = self
             .vectorizer
-            .semantic_search(query, search_limit, None, date_range)
+            .semantic_search(query, search_limit, None, options)
             .await
             .context("Failed to perform semantic search")?;
 
@@ -150,6 +157,7 @@ impl SemanticQueryEngine {
         query: &str,
         limit: Option<usize>,
         date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        recency_bias: Option<f32>,
     ) -> Result<Vec<SemanticSearchResult>> {
         let search_limit = limit.unwrap_or(self.config.max_context_results);
 
@@ -161,9 +169,15 @@ impl SemanticQueryEngine {
             debug!("  Date range filter: {} to {}", start, end);
         }
 
+        let options = crate::core::content_vectorizer::SearchOptions {
+            limit: Some(search_limit),
+            date_range,
+            recency_bias,
+        };
+
         let results = self
             .vectorizer
-            .semantic_search(query, search_limit, Some(session_id), date_range)
+            .semantic_search(query, search_limit, Some(session_id), options)
             .await
             .context("Failed to perform session semantic search")?;
 
@@ -189,6 +203,7 @@ impl SemanticQueryEngine {
         query: &str,
         limit: Option<usize>,
         date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        recency_bias: Option<f32>,
     ) -> Result<Vec<SemanticSearchResult>> {
         let search_limit = limit.unwrap_or(self.config.max_context_results);
 
@@ -198,9 +213,15 @@ impl SemanticQueryEngine {
             query
         );
 
+        let options = crate::core::content_vectorizer::SearchOptions {
+            limit: Some(search_limit),
+            date_range,
+            recency_bias,
+        };
+
         let results = self
             .vectorizer
-            .semantic_search_multisession(query, search_limit, session_ids, date_range)
+            .semantic_search_multisession(query, search_limit, session_ids, options)
             .await
             .context("Failed to perform multisession semantic search")?;
 
@@ -212,142 +233,6 @@ impl SemanticQueryEngine {
 
         debug!(
             "Multisession semantic search returned {} results (filtered from threshold {})",
-            filtered_results.len(),
-            self.config.similarity_threshold
-        );
-
-        Ok(filtered_results)
-    }
-
-    /// Search within a specific set of sessions with custom recency bias
-    ///
-    /// This optimized version performs a single vector database search across all sessions
-    /// instead of searching each session separately, avoiding O(n²) complexity.
-    pub async fn semantic_search_multisession_with_recency_bias(
-        &self,
-        session_ids: &[Uuid],
-        query: &str,
-        limit: Option<usize>,
-        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
-        recency_bias: f32,
-    ) -> Result<Vec<SemanticSearchResult>> {
-        let search_limit = limit.unwrap_or(self.config.max_context_results);
-
-        debug!(
-            "Performing optimized multisession semantic search with recency_bias={} in {} sessions for: '{}'",
-            recency_bias, session_ids.len(), query
-        );
-
-        // Use the optimized single-search implementation
-        let results = self
-            .vectorizer
-            .semantic_search_multisession_with_recency_bias(
-                query,
-                search_limit,
-                session_ids,
-                date_range,
-                Some(recency_bias),
-            )
-            .await?;
-
-        // Filter by similarity threshold
-        let filtered_results: Vec<_> = results
-            .into_iter()
-            .filter(|r| r.similarity_score >= self.config.similarity_threshold)
-            .collect();
-
-        debug!(
-            "Multisession semantic search with recency returned {} results",
-            filtered_results.len()
-        );
-
-        Ok(filtered_results)
-    }
-
-    /// Perform semantic search across all sessions with custom recency bias
-    pub async fn semantic_search_global_with_recency_bias(
-        &self,
-        query: &str,
-        limit: Option<usize>,
-        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
-        recency_bias: f32,
-    ) -> Result<Vec<SemanticSearchResult>> {
-        let search_limit = limit.unwrap_or(self.config.max_context_results);
-
-        info!(
-            "Performing global semantic search with recency_bias={}: '{}'",
-            recency_bias, query
-        );
-        if let Some((start, end)) = date_range {
-            info!("  Date range filter: {} to {}", start, end);
-        }
-
-        let results = self
-            .vectorizer
-            .semantic_search_with_recency_bias(
-                query,
-                search_limit,
-                None,
-                date_range,
-                Some(recency_bias),
-            )
-            .await
-            .context("Failed to perform semantic search")?;
-
-        // Filter by similarity threshold
-        let filtered_results: Vec<_> = results
-            .into_iter()
-            .filter(|r| r.similarity_score >= self.config.similarity_threshold)
-            .collect();
-
-        debug!(
-            "Global semantic search returned {} results (filtered from threshold {})",
-            filtered_results.len(),
-            self.config.similarity_threshold
-        );
-
-        Ok(filtered_results)
-    }
-
-    /// Search within a specific session with custom recency bias
-    pub async fn semantic_search_session_with_recency_bias(
-        &self,
-        session_id: Uuid,
-        query: &str,
-        limit: Option<usize>,
-        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
-        recency_bias: f32,
-    ) -> Result<Vec<SemanticSearchResult>> {
-        let search_limit = limit.unwrap_or(self.config.max_context_results);
-
-        debug!(
-            "Performing session-specific semantic search with recency_bias={} in {} for: '{}'",
-            recency_bias, session_id, query
-        );
-        if let Some((start, end)) = date_range {
-            debug!("  Date range filter: {} to {}", start, end);
-        }
-
-        let results = self
-            .vectorizer
-            .semantic_search_with_recency_bias(
-                query,
-                search_limit,
-                Some(session_id),
-                date_range,
-                Some(recency_bias),
-            )
-            .await
-            .context("Failed to perform session semantic search")?;
-
-        // Filter by similarity threshold (consistent with global search)
-        let filtered_results: Vec<_> = results
-            .into_iter()
-            .filter(|r| r.similarity_score >= self.config.similarity_threshold)
-            .collect();
-
-        debug!(
-            "Session semantic search returned {} results (filtered from threshold {})",
             filtered_results.len(),
             self.config.similarity_threshold
         );
@@ -373,7 +258,7 @@ impl SemanticQueryEngine {
         // Get semantic search results
         let search_results = self
             .vectorizer
-            .semantic_search(topic, self.config.max_related_experiences * 2, None, None)
+            .semantic_search(topic, self.config.max_related_experiences * 2, None, crate::core::content_vectorizer::SearchOptions::default())
             .await?;
 
         let mut related_experiences = Vec::new();
@@ -437,7 +322,7 @@ impl SemanticQueryEngine {
 
         // Search within current session
         let primary_content = self
-            .semantic_search_session(session_id, context_hint, Some(10), None)
+            .semantic_search_session(session_id, context_hint, Some(10), None, None)
             .await?;
 
         // Find related experiences from other sessions
@@ -474,10 +359,10 @@ impl SemanticQueryEngine {
         debug!("Generating semantic insights for topic: '{}'", topic);
 
         let search_results = if let Some(session_id) = session_filter {
-            self.semantic_search_session(session_id, topic, Some(50), None)
+            self.semantic_search_session(session_id, topic, Some(50), None, None)
                 .await?
         } else {
-            self.semantic_search_global(topic, Some(50), None).await?
+            self.semantic_search_global(topic, Some(50), None, None).await?
         };
 
         // Group results by content type and analyze patterns
@@ -548,7 +433,7 @@ impl SemanticQueryEngine {
         for query in &semantic_queries {
             let results = self
                 .vectorizer
-                .semantic_search(query, 5, Some(reference_session_id), None)
+                .semantic_search(query, 5, Some(reference_session_id), crate::core::content_vectorizer::SearchOptions::default())
                 .await
                 .unwrap_or_default();
             all_reference_content.extend(results);
@@ -570,7 +455,7 @@ impl SemanticQueryEngine {
         let mut session_similarities: HashMap<Uuid, Vec<f32>> = HashMap::new();
 
         for theme in &reference_themes {
-            let similar_results = self.semantic_search_global(theme, Some(50), None).await?;
+            let similar_results = self.semantic_search_global(theme, Some(50), None, None).await?;
 
             for result in similar_results {
                 if result.session_id != reference_session_id {

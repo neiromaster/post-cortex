@@ -1489,7 +1489,7 @@ pub async fn semantic_search(
                 let session_id = scope_id
                     .ok_or_else(|| anyhow::anyhow!("Missing session ID for session scope"))?;
                 engine
-                    .semantic_search_session(session_id, &query, None, None)
+                    .semantic_search_session(session_id, &query, None, None, None)
                     .await
             }
             "workspace" => {
@@ -1507,10 +1507,10 @@ pub async fn semantic_search(
                     .collect();
 
                 engine
-                    .semantic_search_multisession(&session_ids, &query, None, None)
+                    .semantic_search_multisession(&session_ids, &query, None, None, None)
                     .await
             }
-            "global" => engine.semantic_search_global(&query, None, None).await,
+            "global" => engine.semantic_search_global(&query, None, None, None).await,
             _ => {
                 return Ok(MCPToolResult::error(format!(
                     "Invalid search scope type: {}",
@@ -2471,11 +2471,11 @@ pub async fn semantic_search_global(
             .semantic_query_engine
             .get()
             .ok_or_else(|| anyhow::anyhow!("Semantic engine not initialized"))?
-            .semantic_search_global_with_recency_bias(&query, search_limit, date_range, bias)
+            .semantic_search_global(&query, search_limit, date_range, Some(bias))
             .await?
     } else {
         system
-            .semantic_search_global(&query, search_limit, date_range)
+            .semantic_search_global(&query, search_limit, date_range, None)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?
     };
@@ -2651,11 +2651,11 @@ pub async fn semantic_search_session(
             .semantic_query_engine
             .get()
             .ok_or_else(|| anyhow::anyhow!("Semantic engine not initialized"))?
-            .semantic_search_session_with_recency_bias(session_id, &query, search_limit, date_range, bias)
+            .semantic_search_session(session_id, &query, search_limit, date_range, Some(bias))
             .await?
     } else {
         system
-            .semantic_search_session(session_id, &query, search_limit, date_range)
+            .semantic_search_session(session_id, &query, search_limit, date_range, None)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?
     };

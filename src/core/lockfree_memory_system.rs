@@ -2562,6 +2562,7 @@ impl LockFreeConversationMemorySystem {
         query: &str,
         limit: Option<usize>,
         date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        recency_bias: Option<f32>,
     ) -> Result<Vec<crate::core::content_vectorizer::SemanticSearchResult>, String> {
         let _timer = self
             .performance_monitor
@@ -2570,8 +2571,14 @@ impl LockFreeConversationMemorySystem {
         // Lazy-initialize vectorizer if needed
         let vectorizer = self.ensure_vectorizer_initialized().await?;
 
+        let options = crate::core::content_vectorizer::SearchOptions {
+            limit: Some(limit.unwrap_or(20)),
+            date_range,
+            recency_bias,
+        };
+
         match vectorizer
-            .semantic_search(query, limit.unwrap_or(20), None, date_range)
+            .semantic_search(query, limit.unwrap_or(20), None, options)
             .await
         {
             Ok(results) => Ok(results),
@@ -2587,6 +2594,7 @@ impl LockFreeConversationMemorySystem {
         query: &str,
         limit: Option<usize>,
         date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        recency_bias: Option<f32>,
     ) -> Result<Vec<crate::core::content_vectorizer::SemanticSearchResult>, String> {
         let _timer = self
             .performance_monitor
@@ -2615,8 +2623,14 @@ impl LockFreeConversationMemorySystem {
             }
         }
 
+        let options = crate::core::content_vectorizer::SearchOptions {
+            limit: Some(limit.unwrap_or(20)),
+            date_range,
+            recency_bias,
+        };
+
         match vectorizer
-            .semantic_search(query, limit.unwrap_or(20), Some(session_id), date_range)
+            .semantic_search(query, limit.unwrap_or(20), Some(session_id), options)
             .await
         {
             Ok(results) => {

@@ -173,6 +173,39 @@ impl Default for ContentVectorizerConfig {
 
 use std::sync::Arc;
 
+/// Search options for semantic queries
+///
+/// This struct consolidates all optional parameters for semantic search,
+/// eliminating the need for multiple method variants (e.g., _with_recency).
+///
+/// # Examples
+///
+/// ```
+/// // Search with recency bias
+/// let options = SearchOptions {
+///     limit: Some(10),
+///     recency_bias: Some(0.5),
+///     ..Default::default()
+/// };
+///
+/// // Search with date range
+/// let options = SearchOptions {
+///     date_range: Some((start, end)),
+///     ..Default::default()
+/// };
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct SearchOptions {
+    /// Maximum number of results to return (None = use default)
+    pub limit: Option<usize>,
+
+    /// Optional date range filter (start, end)
+    pub date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+
+    /// Recency bias parameter (0.0 = disabled, higher = more recent content preferred)
+    pub recency_bias: Option<f32>,
+}
+
 /// Main content vectorization pipeline
 #[derive(Clone)]
 pub struct ContentVectorizer {
@@ -672,6 +705,10 @@ impl ContentVectorizer {
     }
 
     /// Perform semantic search across all vectorized content
+    ///
+    /// This is the main search method that consolidates all search parameters
+    /// into a single SearchOptions struct, eliminating method proliferation.
+    ///
     /// # Errors
     ///
     /// Returns an error if the query cannot be embedded or if the vector database search fails
@@ -680,24 +717,11 @@ impl ContentVectorizer {
         query: &str,
         limit: usize,
         session_filter: Option<Uuid>,
-        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        options: SearchOptions,
     ) -> Result<Vec<SemanticSearchResult>> {
-        self.semantic_search_with_recency_bias(query, limit, session_filter, date_range, None)
-            .await
-    }
+        let recency_bias = options.recency_bias.unwrap_or(self.config.recency_bias);
+        let date_range = options.date_range;
 
-    /// Perform semantic search with optional recency bias override
-    /// # Errors
-    ///
-    /// Returns an error if the query cannot be embedded or if the vector database search fails
-    pub async fn semantic_search_with_recency_bias(
-        &self,
-        query: &str,
-        limit: usize,
-        session_filter: Option<Uuid>,
-        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
-        recency_bias: Option<f32>,
-    ) -> Result<Vec<SemanticSearchResult>> {
         debug!("Performing semantic search for: '{}'", query);
 
         // Create a hash of search parameters for cache key
@@ -712,8 +736,8 @@ impl ContentVectorizer {
             range.1.timestamp().hash(&mut hasher);
         }
         // Include recency_bias in cache key to prevent collisions
-        if let Some(bias) = recency_bias {
-            bias.to_bits().hash(&mut hasher);
+        if recency_bias != 0.0 {
+            recency_bias.to_bits().hash(&mut hasher);
         }
         let params_hash = hasher.finish();
 
@@ -760,7 +784,7 @@ impl ContentVectorizer {
             _ => return Ok(Vec::new()),
         };
 
-        let results = self.process_search_results(search_results, recency_bias)?;
+        let results = self.process_search_results(search_results, Some(recency_bias))?;
 
         // Cache the results
         if let Some(ref cache) = self.query_cache
@@ -781,55 +805,21 @@ impl ContentVectorizer {
     }
 
     /// Perform semantic search within a specific set of sessions
+    ///
+    /// This optimized version performs a single vector database search across all
+    /// sessions, then applies optional scoring adjustments (recency bias, etc.) in post-processing.
+    ///
+    /// This avoids the O(n²) complexity of searching each session separately.
     pub async fn semantic_search_multisession(
         &self,
         query: &str,
         limit: usize,
         allowed_sessions: &[Uuid],
-        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        options: SearchOptions,
     ) -> Result<Vec<SemanticSearchResult>> {
-        debug!("Performing multisession semantic search for: '{}'", query);
+        let recency_bias = options.recency_bias.unwrap_or(self.config.recency_bias);
+        let date_range = options.date_range;
 
-        // Check query cache first (simplified key generation for now)
-        // Ideally we should hash the allowed_sessions too
-        let query_embedding = self.embedding_engine.encode_text(query).await?;
-
-        // Pre-calculate valid session strings for fast lookup
-        let valid_sessions: std::collections::HashSet<String> = allowed_sessions
-            .iter()
-            .map(|id| id.to_string())
-            .collect();
-
-        let search_results = if let Some((start, end)) = date_range {
-            self.vector_db
-                .search_with_filter(&query_embedding, limit, |metadata| {
-                    valid_sessions.contains(&metadata.source)
-                        && metadata.timestamp >= start
-                        && metadata.timestamp <= end
-                })?
-        } else {
-            self.vector_db
-                .search_with_filter(&query_embedding, limit, |metadata| {
-                    valid_sessions.contains(&metadata.source)
-                })?
-        };
-
-        self.process_search_results(search_results, None)
-    }
-
-    /// Perform semantic search within a specific set of sessions with optional recency bias
-    ///
-    /// This is an optimized version that performs a single vector database search across all
-    /// sessions, then applies recency bias in post-processing. This avoids the O(n²) complexity
-    /// of searching each session separately.
-    pub async fn semantic_search_multisession_with_recency_bias(
-        &self,
-        query: &str,
-        limit: usize,
-        allowed_sessions: &[Uuid],
-        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
-        recency_bias: Option<f32>,
-    ) -> Result<Vec<SemanticSearchResult>> {
         debug!(
             "Performing multisession semantic search with recency_bias={:?} for: '{}'",
             recency_bias, query
@@ -846,8 +836,8 @@ impl ContentVectorizer {
             range.0.timestamp().hash(&mut hasher);
             range.1.timestamp().hash(&mut hasher);
         }
-        if let Some(bias) = recency_bias {
-            bias.to_bits().hash(&mut hasher);
+        if recency_bias != 0.0 {
+            recency_bias.to_bits().hash(&mut hasher);
         }
         let params_hash = hasher.finish();
 
@@ -885,7 +875,7 @@ impl ContentVectorizer {
                 })?
         };
 
-        let results = self.process_search_results(search_results, recency_bias)?;
+        let results = self.process_search_results(search_results, Some(recency_bias))?;
 
         // Cache the results
         if let Some(ref cache) = self.query_cache
@@ -1064,7 +1054,7 @@ impl ContentVectorizer {
         topic: &str,
         limit: usize,
     ) -> Result<Vec<SemanticSearchResult>> {
-        let results = self.semantic_search(topic, limit * 2, None, None).await?;
+        let results = self.semantic_search(topic, limit * 2, None, SearchOptions::default()).await?;
 
         // Filter out current session and return top results
         let filtered: Vec<_> = results
