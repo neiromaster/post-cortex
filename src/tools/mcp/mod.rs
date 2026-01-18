@@ -2471,7 +2471,7 @@ pub async fn semantic_search_global(
             .semantic_query_engine
             .get()
             .ok_or_else(|| anyhow::anyhow!("Semantic engine not initialized"))?
-            .semantic_search_global_with_recency(&query, search_limit, date_range, bias)
+            .semantic_search_global_with_recency_bias(&query, search_limit, date_range, bias)
             .await?
     } else {
         system
@@ -2651,7 +2651,7 @@ pub async fn semantic_search_session(
             .semantic_query_engine
             .get()
             .ok_or_else(|| anyhow::anyhow!("Semantic engine not initialized"))?
-            .semantic_search_session_with_recency(session_id, &query, search_limit, date_range, bias)
+            .semantic_search_session_with_recency_bias(session_id, &query, search_limit, date_range, bias)
             .await?
     } else {
         system

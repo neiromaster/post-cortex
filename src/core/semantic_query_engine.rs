@@ -310,7 +310,7 @@ impl SemanticQueryEngine {
     }
 
     /// Search within a specific session with custom recency bias
-    pub async fn semantic_search_session_with_recency(
+    pub async fn semantic_search_session_with_recency_bias(
         &self,
         session_id: Uuid,
         query: &str,

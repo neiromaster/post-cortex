@@ -822,7 +822,7 @@ impl ContentVectorizer {
     /// This is an optimized version that performs a single vector database search across all
     /// sessions, then applies recency bias in post-processing. This avoids the O(n²) complexity
     /// of searching each session separately.
-    pub async fn semantic_search_multisession_with_recency(
+    pub async fn semantic_search_multisession_with_recency_bias(
         &self,
         query: &str,
         limit: usize,

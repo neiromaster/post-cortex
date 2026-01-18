@@ -453,6 +453,45 @@ Note: Only used when action='add_session'. Defaults to 'related' if omitted."#
 }
 
 // =============================================================================
+// Helper Functions
+// =============================================================================
+
+/// Parse date range from request parameters
+///
+/// Returns Ok(Some((from, to))) if both dates are provided and valid
+/// Returns Ok(None) if neither date is provided
+/// Returns Err if only one date is provided or if parsing fails
+fn parse_date_range(
+    date_from: Option<String>,
+    date_to: Option<String>,
+) -> Result<Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>, McpError> {
+    match (date_from, date_to) {
+        (Some(from_str), Some(to_str)) => {
+            let from = chrono::DateTime::parse_from_rfc3339(&from_str)
+                .map_err(|_| McpError::invalid_params(
+                    format!("Invalid date_from format: '{}'. Expected RFC3339 format (e.g., 2024-01-01T00:00:00Z)", from_str),
+                    Some(serde_json::Value::String("date_from".to_string())),
+                ))?
+                .with_timezone(&chrono::Utc);
+            let to = chrono::DateTime::parse_from_rfc3339(&to_str)
+                .map_err(|_| McpError::invalid_params(
+                    format!("Invalid date_to format: '{}'. Expected RFC3339 format (e.g., 2024-12-31T23:59:59Z)", to_str),
+                    Some(serde_json::Value::String("date_to".to_string())),
+                ))?
+                .with_timezone(&chrono::Utc);
+            Ok(Some((from, to)))
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            Err(McpError::invalid_params(
+                "Both date_from and date_to must be provided together".to_string(),
+                Some(serde_json::Value::String("date_from,date_to".to_string())),
+            ))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+// =============================================================================
 // Tool Implementations
 // =============================================================================
 
@@ -687,37 +726,14 @@ impl PostCortexService {
                 let uuid = validate_session_id(session_id).map_err(|e| e.to_mcp_error())?;
 
                 // Parse date range if provided
-                let date_range = match (req.date_from.clone(), req.date_to.clone()) {
-                    (Some(from_str), Some(to_str)) => {
-                        let from = chrono::DateTime::parse_from_rfc3339(&from_str)
-                            .map_err(|_| McpError::invalid_params(
-                                format!("Invalid date_from format: '{}'. Expected RFC3339 format (e.g., 2024-01-01T00:00:00Z)", from_str),
-                                Some(serde_json::Value::String("date_from".to_string())),
-                            ))?
-                            .with_timezone(&chrono::Utc);
-                        let to = chrono::DateTime::parse_from_rfc3339(&to_str)
-                            .map_err(|_| McpError::invalid_params(
-                                format!("Invalid date_to format: '{}'. Expected RFC3339 format (e.g., 2024-12-31T23:59:59Z)", to_str),
-                                Some(serde_json::Value::String("date_to".to_string())),
-                            ))?
-                            .with_timezone(&chrono::Utc);
-                        Some((from, to))
-                    }
-                    (Some(_), None) | (None, Some(_)) => {
-                        return Err(McpError::invalid_params(
-                            "Both date_from and date_to must be provided together".to_string(),
-                            Some(serde_json::Value::String("date_from,date_to".to_string())),
-                        ));
-                    }
-                    (None, None) => None,
-                };
+                let date_range = parse_date_range(req.date_from.clone(), req.date_to.clone())?;
 
                 // Validate recency_bias if provided
                 let validated_recency_bias = validate_recency_bias(req.recency_bias)
                     .map_err(|e| e.to_mcp_error())?;
 
                 // Use recency_bias if provided
-                if let Some(bias) = validated_recency_bias {
+                let search_results = if let Some(bias) = validated_recency_bias {
                     // Get engine and use _with_recency method
                     let system = get_memory_system().await
                         .map_err(|e| McpError::internal_error(format!("Failed to get memory system: {}", e), None))?;
@@ -728,21 +744,36 @@ impl PostCortexService {
                         .ok_or_else(|| McpError::internal_error("Semantic engine not initialized".to_string(), None))?;
 
                     let results = engine
-                        .semantic_search_session_with_recency(
+                        .semantic_search_session_with_recency_bias(
                             uuid,
                             &req.query,
                             Some(validated_limit),
-                            date_range,  // ✅ Pass parsed date_range
+                            date_range,
                             bias,
                         )
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-                    // Convert SemanticSearchResult to MCPToolResult format
-                    let message = format!("Found {} results", results.len());
-                    Ok(CallToolResult::success(vec![Content::text(message)]))
+                    // Format results consistently with JSON
+                    let formatted: Vec<serde_json::Value> = results
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "content": r.text_content,
+                                "score": r.combined_score,
+                                "session_id": r.session_id,
+                                "type": format!("{:?}", r.content_type),
+                                "timestamp": r.timestamp.to_rfc3339()
+                            })
+                        })
+                        .collect();
+
+                    MCPToolResult::success(
+                        format!("Found {} results", results.len()),
+                        Some(serde_json::json!({ "results": formatted })),
+                    )
                 } else {
-                    match crate::tools::mcp::semantic_search_session(
+                    crate::tools::mcp::semantic_search_session(
                         uuid,
                         req.query.clone(),
                         Some(validated_limit),
@@ -752,11 +783,10 @@ impl PostCortexService {
                         None,
                     )
                     .await
-                    {
-                        Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
-                        Err(e) => Err(McpError::internal_error(e.to_string(), None)),
-                    }
-                }
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
+                };
+
+                Ok(CallToolResult::success(vec![Content::text(search_results.message)]))
             }
             "workspace" => {
                 // For workspace search, we need to get workspace sessions and search with recency bias
@@ -799,30 +829,7 @@ impl PostCortexService {
                     .collect();
 
                 // Parse date range if provided
-                let date_range = match (req.date_from.clone(), req.date_to.clone()) {
-                    (Some(from_str), Some(to_str)) => {
-                        let from = chrono::DateTime::parse_from_rfc3339(&from_str)
-                            .map_err(|_| McpError::invalid_params(
-                                format!("Invalid date_from format: '{}'. Expected RFC3339 format (e.g., 2024-01-01T00:00:00Z)", from_str),
-                                Some(serde_json::Value::String("date_from".to_string())),
-                            ))?
-                            .with_timezone(&chrono::Utc);
-                        let to = chrono::DateTime::parse_from_rfc3339(&to_str)
-                            .map_err(|_| McpError::invalid_params(
-                                format!("Invalid date_to format: '{}'. Expected RFC3339 format (e.g., 2024-12-31T23:59:59Z)", to_str),
-                                Some(serde_json::Value::String("date_to".to_string())),
-                            ))?
-                            .with_timezone(&chrono::Utc);
-                        Some((from, to))
-                    }
-                    (Some(_), None) | (None, Some(_)) => {
-                        return Err(McpError::invalid_params(
-                            "Both date_from and date_to must be provided together".to_string(),
-                            Some(serde_json::Value::String("date_from,date_to".to_string())),
-                        ));
-                    }
-                    (None, None) => None,
-                };
+                let date_range = parse_date_range(req.date_from.clone(), req.date_to.clone())?;
 
                 // Validate recency_bias if provided
                 let validated_recency_bias = validate_recency_bias(req.recency_bias)
@@ -835,19 +842,18 @@ impl PostCortexService {
                         .get()
                         .ok_or_else(|| McpError::internal_error("Semantic engine not initialized".to_string(), None))?;
 
-                    // Format results similar to semantic_search response
                     let results = engine
-                        .semantic_search_multisession_with_recency(
+                        .semantic_search_multisession_with_recency_bias(
                             &session_ids,
                             &req.query,
                             Some(validated_limit),
-                            date_range,  // ✅ Pass parsed date_range
+                            date_range,
                             bias,
                         )
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-                    // Convert to MCPToolResult format
+                    // Format results consistently
                     let formatted: Vec<serde_json::Value> = results
                         .iter()
                         .map(|r| {
@@ -886,37 +892,14 @@ impl PostCortexService {
             }
             "global" | _ => {
                 // Parse date range if provided
-                let date_range = match (req.date_from.clone(), req.date_to.clone()) {
-                    (Some(from_str), Some(to_str)) => {
-                        let from = chrono::DateTime::parse_from_rfc3339(&from_str)
-                            .map_err(|_| McpError::invalid_params(
-                                format!("Invalid date_from format: '{}'. Expected RFC3339 format (e.g., 2024-01-01T00:00:00Z)", from_str),
-                                Some(serde_json::Value::String("date_from".to_string())),
-                            ))?
-                            .with_timezone(&chrono::Utc);
-                        let to = chrono::DateTime::parse_from_rfc3339(&to_str)
-                            .map_err(|_| McpError::invalid_params(
-                                format!("Invalid date_to format: '{}'. Expected RFC3339 format (e.g., 2024-12-31T23:59:59Z)", to_str),
-                                Some(serde_json::Value::String("date_to".to_string())),
-                            ))?
-                            .with_timezone(&chrono::Utc);
-                        Some((from, to))
-                    }
-                    (Some(_), None) | (None, Some(_)) => {
-                        return Err(McpError::invalid_params(
-                            "Both date_from and date_to must be provided together".to_string(),
-                            Some(serde_json::Value::String("date_from,date_to".to_string())),
-                        ));
-                    }
-                    (None, None) => None,
-                };
+                let date_range = parse_date_range(req.date_from.clone(), req.date_to.clone())?;
 
                 // Validate recency_bias if provided
                 let validated_recency_bias = validate_recency_bias(req.recency_bias)
                     .map_err(|e| e.to_mcp_error())?;
 
                 // Use recency_bias if provided
-                if let Some(bias) = validated_recency_bias {
+                let search_results = if let Some(bias) = validated_recency_bias {
                     let system = get_memory_system().await
                         .map_err(|e| McpError::internal_error(format!("Failed to get memory system: {}", e), None))?;
 
@@ -926,19 +909,35 @@ impl PostCortexService {
                         .ok_or_else(|| McpError::internal_error("Semantic engine not initialized".to_string(), None))?;
 
                     let results = engine
-                        .semantic_search_global_with_recency(
+                        .semantic_search_global_with_recency_bias(
                             &req.query,
                             Some(validated_limit),
-                            date_range,  // ✅ Pass parsed date_range
+                            date_range,
                             bias,
                         )
                         .await
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-                    let message = format!("Found {} results", results.len());
-                    Ok(CallToolResult::success(vec![Content::text(message)]))
+                    // Format results consistently with JSON
+                    let formatted: Vec<serde_json::Value> = results
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "content": r.text_content,
+                                "score": r.combined_score,
+                                "session_id": r.session_id,
+                                "type": format!("{:?}", r.content_type),
+                                "timestamp": r.timestamp.to_rfc3339()
+                            })
+                        })
+                        .collect();
+
+                    MCPToolResult::success(
+                        format!("Found {} results", results.len()),
+                        Some(serde_json::json!({ "results": formatted })),
+                    )
                 } else {
-                    match crate::tools::mcp::semantic_search_global(
+                    crate::tools::mcp::semantic_search_global(
                         req.query.clone(),
                         Some(validated_limit),
                         req.date_from.clone(),
@@ -947,11 +946,10 @@ impl PostCortexService {
                         None,
                     )
                     .await
-                    {
-                        Ok(result) => Ok(CallToolResult::success(vec![Content::text(result.message)])),
-                        Err(e) => Err(McpError::internal_error(e.to_string(), None)),
-                    }
-                }
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
+                };
+
+                Ok(CallToolResult::success(vec![Content::text(search_results.message)]))
             }
         }
     }
