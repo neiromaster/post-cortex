@@ -824,97 +824,49 @@ impl PostCortexService {
                 let validated_recency_bias = validate_recency_bias(req.recency_bias)
                     .map_err(|e| e.to_mcp_error())?;
 
-                // Use recency_bias if provided
-                let search_results = if let Some(bias) = validated_recency_bias {
-                    let engine = system
-                        .semantic_query_engine
-                        .get()
-                        .ok_or_else(|| McpError::internal_error("Semantic engine not initialized".to_string(), None))?;
+                // Use semantic_search_multisession (handles recency_bias internally with 0.0 default)
+                let engine = system
+                    .semantic_query_engine
+                    .get()
+                    .ok_or_else(|| McpError::internal_error("Semantic engine not initialized".to_string(), None))?;
 
-                    let results = engine
-                        .semantic_search_multisession(
-                            &session_ids,
-                            &req.query,
-                            Some(validated_limit),
-                            date_range,
-                            Some(bias),
-                        )
-                        .await
-                        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-                    // Format results consistently
-                    let formatted = crate::daemon::format_helpers::format_search_results(&results);
-
-                    MCPToolResult::success(
-                        format!("Found {} results", results.len()),
-                        Some(serde_json::json!({ "results": formatted })),
+                let results = engine
+                    .semantic_search_multisession(
+                        &session_ids,
+                        &req.query,
+                        Some(validated_limit),
+                        date_range,
+                        validated_recency_bias,
                     )
-                } else {
-                    // Use existing universal semantic_search for backward compatibility
-                    let scope_json = {
-                        let mut scope = serde_json::Map::new();
-                        scope.insert(
-                            "scope_type".to_string(),
-                            serde_json::Value::String("workspace".to_string()),
-                        );
-                        scope.insert("id".to_string(), serde_json::Value::String(ws_id.clone()));
-                        Some(serde_json::Value::Object(scope))
-                    };
+                    .await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-                    crate::tools::mcp::semantic_search(req.query.clone(), scope_json)
-                        .await
-                        .map_err(|e| McpError::internal_error(e.to_string(), None))?
-                };
+                // Format results consistently
+                let formatted = crate::daemon::format_helpers::format_search_results(&results);
+
+                let search_results = MCPToolResult::success(
+                    format!("Found {} results", results.len()),
+                    Some(serde_json::json!({ "results": formatted })),
+                );
 
                 Ok(CallToolResult::success(vec![Content::text(search_results.message)]))
             }
             "global" | _ => {
-                // Parse date range if provided
-                let date_range = parse_date_range(req.date_from.clone(), req.date_to.clone())?;
-
                 // Validate recency_bias if provided
                 let validated_recency_bias = validate_recency_bias(req.recency_bias)
                     .map_err(|e| e.to_mcp_error())?;
 
-                // Use recency_bias if provided
-                let search_results = if let Some(bias) = validated_recency_bias {
-                    let system = get_memory_system().await
-                        .map_err(|e| McpError::internal_error(format!("Failed to get memory system: {}", e), None))?;
-
-                    let engine = system
-                        .semantic_query_engine
-                        .get()
-                        .ok_or_else(|| McpError::internal_error("Semantic engine not initialized".to_string(), None))?;
-
-                    let results = engine
-                        .semantic_search_global(
-                            &req.query,
-                            Some(validated_limit),
-                            date_range,
-                            Some(bias),
-                        )
-                        .await
-                        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-                    // Format results consistently with JSON
-                    let formatted = crate::daemon::format_helpers::format_search_results(&results);
-
-                    MCPToolResult::success(
-                        format!("Found {} results", results.len()),
-                        Some(serde_json::json!({ "results": formatted })),
-                    )
-                } else {
-                    crate::tools::mcp::semantic_search_global(
-                        req.query.clone(),
-                        Some(validated_limit),
-                        req.date_from.clone(),
-                        req.date_to.clone(),
-                        req.interaction_type.clone(),
-                        None,
-                    )
-                    .await
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
-                };
+                // Use semantic_search_global (handles recency_bias internally with 0.0 default)
+                let search_results = crate::tools::mcp::semantic_search_global(
+                    req.query.clone(),
+                    Some(validated_limit),
+                    req.date_from.clone(),
+                    req.date_to.clone(),
+                    req.interaction_type.clone(),
+                    validated_recency_bias,
+                )
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
                 Ok(CallToolResult::success(vec![Content::text(search_results.message)]))
             }

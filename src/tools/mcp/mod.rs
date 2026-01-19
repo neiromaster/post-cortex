@@ -2465,20 +2465,14 @@ pub async fn semantic_search_global(
         limit
     };
 
-    // Use recency_bias if provided
-    let search_results = if let Some(bias) = recency_bias {
-        system
-            .semantic_query_engine
-            .get()
-            .ok_or_else(|| anyhow::anyhow!("Semantic engine not initialized"))?
-            .semantic_search_global(&query, search_limit, date_range, Some(bias))
-            .await?
-    } else {
-        system
-            .semantic_search_global(&query, search_limit, date_range, None)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-    };
+    // Use recency_bias (defaults to 0.0 = disabled if not provided)
+    let bias = recency_bias.unwrap_or(0.0);
+    let search_results = system
+        .semantic_query_engine
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("Semantic engine not initialized"))?
+        .semantic_search_global(&query, search_limit, date_range, Some(bias))
+        .await?;
 
     let mut results = search_results;
     let results_before_filter = results.len();
@@ -2645,20 +2639,14 @@ pub async fn semantic_search_session(
         limit
     };
 
-    // Use recency_bias if provided
-    let search_results = if let Some(bias) = recency_bias {
-        system
-            .semantic_query_engine
-            .get()
-            .ok_or_else(|| anyhow::anyhow!("Semantic engine not initialized"))?
-            .semantic_search_session(session_id, &query, search_limit, date_range, Some(bias))
-            .await?
-    } else {
-        system
-            .semantic_search_session(session_id, &query, search_limit, date_range, None)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?
-    };
+    // Use recency_bias (defaults to 0.0 = disabled if not provided)
+    let bias = recency_bias.unwrap_or(0.0);
+    let search_results = system
+        .semantic_query_engine
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("Semantic engine not initialized"))?
+        .semantic_search_session(session_id, &query, search_limit, date_range, Some(bias))
+        .await?;
 
     let mut results = search_results;
     let results_before_filter = results.len();
