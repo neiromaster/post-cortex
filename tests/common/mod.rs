@@ -25,7 +25,7 @@ use post_cortex::core::lockfree_memory_system::{
     LockFreeConversationMemorySystem, SystemConfig,
 };
 use std::sync::Arc;
-use tempfile::TempDir;
+use tempfile::{tempdir, TempDir};
 use uuid::Uuid;
 
 /// Test fixture builder pattern for creating test systems with content
@@ -64,7 +64,7 @@ impl TestFixture {
 
     /// Create fixture and add content
     pub async fn with_content(content: &[&str]) -> Result<Self> {
-        let mut fixture = Self::new().await?;
+        let fixture = Self::new().await?;
 
         for text in content {
             fixture
@@ -82,15 +82,19 @@ impl TestFixture {
 
     /// Create fixture with named session
     pub async fn with_session_name(name: &str, description: &str) -> Result<Self> {
-        let mut fixture = Self::new().await?;
+        let fixture = Self::new().await?;
 
-        fixture.session_id = fixture
+        let session_id = fixture
             .system
             .create_session(Some(name.to_string()), Some(description.to_string()))
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
 
-        Ok(fixture)
+        Ok(Self {
+            system: fixture.system,
+            session_id,
+            _temp_dir: fixture._temp_dir,
+        })
     }
 
     /// Search with recency bias

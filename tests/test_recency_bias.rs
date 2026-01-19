@@ -21,9 +21,32 @@
 //! Tests for temporal decay (recency bias) in semantic search
 
 use anyhow::Result;
+use post_cortex::core::lockfree_memory_system::{
+    LockFreeConversationMemorySystem, SystemConfig,
+};
+use serial_test::serial;
+use std::sync::Arc;
+use tempfile::tempdir;
+
 mod common;
 use common::TestFixture;
-use serial_test::serial;
+
+/// Helper to create test system
+async fn create_test_system() -> Result<(Arc<LockFreeConversationMemorySystem>, tempfile::TempDir)> {
+    let temp_dir = tempdir()?;
+    let mut config = SystemConfig::default();
+    config.data_directory = temp_dir.path().to_str().unwrap().to_string();
+    config.enable_embeddings = true;
+    config.auto_vectorize_on_update = true;
+
+    let system = Arc::new(
+        LockFreeConversationMemorySystem::new(config)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?,
+    );
+
+    Ok((system, temp_dir))
+}
 
 #[serial]
 #[tokio::test]
@@ -96,7 +119,8 @@ async fn test_recency_bias_prioritizes_recent_content() -> Result<()> {
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     // Search with different recency_bias values
-    let engine = system.ensure_semantic_engine_initialized().await
+    let engine: Arc<post_cortex::core::semantic_query_engine::SemanticQueryEngine> =
+        system.ensure_semantic_engine_initialized().await
         .map_err(|e| anyhow::anyhow!(e))?;
 
     // Use more specific query that should match the content
@@ -199,7 +223,8 @@ async fn test_recency_bias_multisession() -> Result<()> {
     // Wait for vectorization
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    let engine = system.ensure_semantic_engine_initialized().await
+    let engine: Arc<post_cortex::core::semantic_query_engine::SemanticQueryEngine> =
+        system.ensure_semantic_engine_initialized().await
         .map_err(|e| anyhow::anyhow!(e))?;
 
     // Search across both sessions with recency bias
@@ -269,7 +294,8 @@ async fn test_recency_bias_formula_consistency() -> Result<()> {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    let engine = system.ensure_semantic_engine_initialized().await
+    let engine: Arc<post_cortex::core::semantic_query_engine::SemanticQueryEngine> =
+        system.ensure_semantic_engine_initialized().await
         .map_err(|e| anyhow::anyhow!(e))?;
 
     // Search with different lambda values and verify monotonic behavior
@@ -355,7 +381,8 @@ async fn test_recency_bias_cache_collision() -> Result<()> {
     tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
     // Ensure semantic engine is initialized
-    let engine = system.ensure_semantic_engine_initialized().await
+    let engine: Arc<post_cortex::core::semantic_query_engine::SemanticQueryEngine> =
+        system.ensure_semantic_engine_initialized().await
         .map_err(|e| anyhow::anyhow!(e))?;
 
     let query = "JWT tokens authentication";
