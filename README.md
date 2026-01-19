@@ -302,6 +302,34 @@ cargo test
 RUST_LOG=debug pcx start
 ```
 
+### Benchmarks
+
+Post-Cortex includes microbenchmarks for performance regression testing using Criterion:
+
+```bash
+# Run all benchmarks
+cargo bench
+
+# Run specific benchmark
+cargo bench --bench recency_decay
+
+# Save baseline for comparison
+cargo bench -- --save-baseline main
+
+# Compare against baseline
+cargo bench -- --baseline main
+
+# Generate HTML report
+cargo bench -- --output-format html
+```
+
+**Benchmark results (for reference):**
+- Decay calculation: ~317 ps
+- Score adjustment: ~317 ps
+- Batch processing (1000 results): ~74 ns
+
+Benchmarks are automatically run on CI to detect performance regressions.
+
 ## License
 
 MIT
