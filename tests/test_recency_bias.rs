@@ -21,71 +21,23 @@
 //! Tests for temporal decay (recency bias) in semantic search
 
 use anyhow::Result;
-use post_cortex::core::lockfree_memory_system::{
-    LockFreeConversationMemorySystem, SystemConfig,
-};
+mod common;
+use common::TestFixture;
 use serial_test::serial;
-use std::sync::Arc;
-use tempfile::tempdir;
-use uuid::Uuid;
-
-/// Helper to create test system
-async fn create_test_system() -> Result<(Arc<LockFreeConversationMemorySystem>, tempfile::TempDir)> {
-    let temp_dir = tempdir()?;
-    let mut config = SystemConfig::default();
-    config.data_directory = temp_dir.path().to_str().unwrap().to_string();
-    config.enable_embeddings = true;
-    config.auto_vectorize_on_update = true;
-
-    let system = Arc::new(
-        LockFreeConversationMemorySystem::new(config)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?,
-    );
-
-    Ok((system, temp_dir))
-}
 
 #[serial]
 #[tokio::test]
 async fn test_recency_bias_zero_has_no_effect() -> Result<()> {
     // Test that recency_bias=0.0 doesn't affect ranking (backward compatibility)
 
-    let (system, _temp_dir) = create_test_system().await?;
+    let content = [
+        "Authentication system uses JWT tokens for secure access",
+        "Authentication system uses OAuth2 for secure access",
+    ];
 
-    // Create session
-    let session_id = system
-        .create_session(
-            Some("test-session".to_string()),
-            Some("Test session for recency bias".to_string()),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let fixture = TestFixture::with_content(&content).await?;
 
-    // Add two pieces of similar content at the same time
-    let text1 = "Authentication system uses JWT tokens for secure access";
-    let text2 = "Authentication system uses OAuth2 for secure access";
-
-    system
-        .add_incremental_update(session_id, text1.to_string(), None)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
-
-    system
-        .add_incremental_update(session_id, text2.to_string(), None)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
-
-    // Wait for vectorization
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-    // Ensure semantic engine is initialized
-    let engine = system.ensure_semantic_engine_initialized().await
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let results = engine
-        .semantic_search_session(session_id, "authentication system", None, None, Some(0.0))
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let results = fixture.search_with_bias("authentication system", 0.0).await?;
 
     println!("\nTest: recency_bias=0.0 (should not affect ranking)");
     println!("Found {} results", results.len());

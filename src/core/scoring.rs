@@ -6,46 +6,7 @@
 //! # Overview
 //!
 //! The [`ScoreAdjuster`] trait allows you to compose multiple scoring strategies
-//! without modifying the core search logic. Each adjuster takes a base score and
-//! metadata, then returns an adjusted score.
-//!
-//! # Examples
-//!
-//! ## Using a Single Adjuster
-//!
-//! ```ignore
-//! use post_cortex::core::scoring::TemporalDecayAdjuster;
-//! use chrono::Utc;
-//!
-//! let adjuster = TemporalDecayAdjuster::new(0.5, Utc::now());
-//! let adjusted_score = adjuster.adjust(0.8, &metadata);
-//! ```
-//!
-//! ## Combining Multiple Adjusters
-//!
-//! ```ignore
-//! use post_cortex::core::scoring::{CompositeScoreAdjuster, TemporalDecayAdjuster};
-//!
-//! let composite = CompositeScoreAdjuster::new(vec![
-//!     Box::new(TemporalDecayAdjuster::new(0.5, Utc::now())),
-//!     Box::new(CustomPopularityAdjuster::new(0.2)),
-//! ]);
-//! let adjusted_score = composite.adjust(0.8, &metadata);
-//! ```
-//!
-//! ## Creating Custom Adjusters
-//!
-//! ```ignore
-//! use post_cortex::core::scoring::{ScoreAdjuster, VectorMetadata};
-//!
-//! struct MyCustomAdjuster { boost_factor: f32 }
-//!
-//! impl ScoreAdjuster for MyCustomAdjuster {
-//!     fn adjust(&self, base_score: f32, metadata: &VectorMetadata) -> f32 {
-//!         base_score * (1.0 + self.boost_factor)
-//!     }
-//! }
-//! ```
+//! without modifying the core search logic.
 
 use chrono::{DateTime, Utc};
 use crate::core::vector_db::VectorMetadata;
