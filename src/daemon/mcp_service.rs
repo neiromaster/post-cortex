@@ -755,18 +755,7 @@ impl PostCortexService {
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
                     // Format results consistently with JSON
-                    let formatted: Vec<serde_json::Value> = results
-                        .iter()
-                        .map(|r| {
-                            serde_json::json!({
-                                "content": r.text_content,
-                                "score": r.combined_score,
-                                "session_id": r.session_id,
-                                "type": format!("{:?}", r.content_type),
-                                "timestamp": r.timestamp.to_rfc3339()
-                            })
-                        })
-                        .collect();
+                    let formatted = crate::daemon::format_helpers::format_search_results(&results);
 
                     MCPToolResult::success(
                         format!("Found {} results", results.len()),
@@ -854,18 +843,7 @@ impl PostCortexService {
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
                     // Format results consistently
-                    let formatted: Vec<serde_json::Value> = results
-                        .iter()
-                        .map(|r| {
-                            serde_json::json!({
-                                "content": r.text_content,
-                                "score": r.combined_score,
-                                "session_id": r.session_id,
-                                "type": format!("{:?}", r.content_type),
-                                "timestamp": r.timestamp.to_rfc3339()
-                            })
-                        })
-                        .collect();
+                    let formatted = crate::daemon::format_helpers::format_search_results(&results);
 
                     MCPToolResult::success(
                         format!("Found {} results", results.len()),
@@ -919,18 +897,7 @@ impl PostCortexService {
                         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
                     // Format results consistently with JSON
-                    let formatted: Vec<serde_json::Value> = results
-                        .iter()
-                        .map(|r| {
-                            serde_json::json!({
-                                "content": r.text_content,
-                                "score": r.combined_score,
-                                "session_id": r.session_id,
-                                "type": format!("{:?}", r.content_type),
-                                "timestamp": r.timestamp.to_rfc3339()
-                            })
-                        })
-                        .collect();
+                    let formatted = crate::daemon::format_helpers::format_search_results(&results);
 
                     MCPToolResult::success(
                         format!("Found {} results", results.len()),

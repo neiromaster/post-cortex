@@ -25,6 +25,7 @@
 
 pub mod config;
 pub mod coerce;
+pub mod format_helpers;
 pub mod mcp_service;
 pub mod rmcp_server;
 pub mod server;
