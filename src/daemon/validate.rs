@@ -70,6 +70,16 @@ pub fn validate_workspace_id(workspace_id: &str) -> Result<Uuid, CoercionError> 
     .with_hint("Use the 'manage_workspace' tool with action='list' to see available workspaces, or create one with action='create'"))
 }
 
+/// Valid interaction type values
+pub const VALID_INTERACTION_TYPES: &[&str] = &[
+    "qa",
+    "decision_made",
+    "problem_solved",
+    "code_change",
+    "requirement_added",
+    "concept_defined",
+];
+
 /// Validate an interaction type is one of the valid values.
 ///
 /// # Arguments
@@ -89,17 +99,6 @@ pub fn validate_workspace_id(workspace_id: &str) -> Result<Uuid, CoercionError> 
 ///
 /// * `Ok(())` if the interaction type is valid
 /// * `Err(CoercionError)` with helpful message if invalid
-
-/// Valid interaction type values
-pub const VALID_INTERACTION_TYPES: &[&str] = &[
-    "qa",
-    "decision_made",
-    "problem_solved",
-    "code_change",
-    "requirement_added",
-    "concept_defined",
-];
-
 pub fn validate_interaction_type(interaction_type: &str) -> Result<(), CoercionError> {
     if VALID_INTERACTION_TYPES.contains(&interaction_type.to_lowercase().as_str()) {
         Ok(())
