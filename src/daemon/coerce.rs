@@ -10,6 +10,8 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+pub use crate::daemon::validate::VALID_INTERACTION_TYPES;
+
 /// Coerce and validate a JSON value into the target type.
 ///
 /// This function attempts to deserialize the value directly first (fast path).
@@ -149,15 +151,15 @@ pub fn generate_recovery_suggestions(
         suggestions.push("Create a new session using the 'session' tool with action='create' to get a valid UUID".to_string());
 
         if let Some(Value::String(s)) = received_value {
-            if s.len() < 36 {
-                suggestions.push(format!("Your session_id '{}' is too short. UUIDs must be 36 characters with hyphens.", s));
+            if s.len() != 36 {
+                suggestions.push(format!("Your session_id '{}' has {} characters, but UUIDs require exactly 36 characters with hyphens.", s, s.len()));
             }
         }
     }
 
     // Pattern: interaction_type validation
     if error_message.contains("interaction_type") || error_message.contains("Unknown interaction type") {
-        suggestions.push("Valid interaction_type values are: qa, decision_made, problem_solved, code_change, requirement_added, concept_defined".to_string());
+        suggestions.push(format!("Valid interaction_type values are: {}", VALID_INTERACTION_TYPES.join(", ")));
         suggestions.push("Use lowercase with underscores, not CamelCase or spaces".to_string());
         suggestions.push("Examples: ✅ 'decision_made' ❌ 'DecisionMade' ❌ 'made decision'".to_string());
     }

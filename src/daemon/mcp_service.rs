@@ -38,6 +38,31 @@ pub struct PostCortexService {
 }
 
 // =============================================================================
+// Helper Functions
+// =============================================================================
+
+async fn check_session_exists_for_dry_run(
+    memory_system: &Arc<ConversationMemorySystem>,
+    session_id: uuid::Uuid,
+) -> Result<(), McpError> {
+    match memory_system.storage_actor.load_session(session_id).await {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(CoercionError::new(
+            "Session not found",
+            std::io::Error::new(std::io::ErrorKind::NotFound, "session does not exist"),
+            Some(serde_json::Value::String(session_id.to_string())),
+        )
+        .with_parameter_path("session_id".to_string())
+        .with_hint("Create a session first using the 'session' tool with action='create'")
+        .to_mcp_error()),
+        Err(e) => Err(McpError::internal_error(
+            format!("Failed to check session existence: {}", e),
+            None,
+        )),
+    }
+}
+
+// =============================================================================
 // Tool 1: session (create/list)
 // =============================================================================
 
@@ -546,6 +571,14 @@ impl PostCortexService {
         // Handle dry_run mode for bulk updates
         if let Some(ref updates) = req.updates {
             if req.dry_run.unwrap_or(false) {
+                for (i, update) in updates.iter().enumerate() {
+                    validate_interaction_type(&update.interaction_type).map_err(|e| {
+                        e.clone()
+                            .with_parameter_path(format!("updates[{}].interaction_type", i))
+                            .to_mcp_error()
+                    })?;
+                }
+
                 let preview: Vec<String> = updates
                     .iter()
                     .enumerate()
@@ -558,6 +591,8 @@ impl PostCortexService {
                         )
                     })
                     .collect();
+
+                check_session_exists_for_dry_run(&self.memory_system, uuid).await?;
 
                 return Ok(CallToolResult::success(vec![Content::text(format!(
                     "✅ Dry run - Bulk update validation successful\n\
@@ -623,6 +658,8 @@ impl PostCortexService {
 
             // Handle dry_run mode for single updates
             if req.dry_run.unwrap_or(false) {
+                check_session_exists_for_dry_run(&self.memory_system, uuid).await?;
+
                 return Ok(CallToolResult::success(vec![Content::text(format!(
                     "✅ Dry run - Request validation successful\n\
                      Session ID: {}\n\
