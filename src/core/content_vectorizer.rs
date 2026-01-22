@@ -215,9 +215,9 @@ pub struct ContentVectorizer {
     /// Optional persistent storage for embeddings (RocksDB/SurrealDB)
     persistent_storage: Option<Arc<dyn crate::storage::traits::VectorStorage>>,
     /// Recency bias performance metrics - all atomic for lock-free access
-    recency_bias_total_duration_ns: std::sync::atomic::AtomicU64,
-    recency_bias_total_results: std::sync::atomic::AtomicU64,
-    recency_bias_calculation_count: std::sync::atomic::AtomicU64,
+    recency_bias_total_duration_ns: Arc<std::sync::atomic::AtomicU64>,
+    recency_bias_total_results: Arc<std::sync::atomic::AtomicU64>,
+    recency_bias_calculation_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Clone for ContentVectorizer {
@@ -228,16 +228,10 @@ impl Clone for ContentVectorizer {
             config: self.config.clone(),
             query_cache: self.query_cache.clone(),
             persistent_storage: self.persistent_storage.clone(),
-            // Note: Atomics are shared between clones, which is intentional for metrics aggregation
-            recency_bias_total_duration_ns: std::sync::atomic::AtomicU64::new(
-                self.recency_bias_total_duration_ns.load(std::sync::atomic::Ordering::Relaxed)
-            ),
-            recency_bias_total_results: std::sync::atomic::AtomicU64::new(
-                self.recency_bias_total_results.load(std::sync::atomic::Ordering::Relaxed)
-            ),
-            recency_bias_calculation_count: std::sync::atomic::AtomicU64::new(
-                self.recency_bias_calculation_count.load(std::sync::atomic::Ordering::Relaxed)
-            ),
+            // Note: Atomics are shared between clones via Arc for metrics aggregation
+            recency_bias_total_duration_ns: Arc::clone(&self.recency_bias_total_duration_ns),
+            recency_bias_total_results: Arc::clone(&self.recency_bias_total_results),
+            recency_bias_calculation_count: Arc::clone(&self.recency_bias_calculation_count),
         }
     }
 }
@@ -278,9 +272,9 @@ impl ContentVectorizer {
             config,
             query_cache: query_cache.map(Arc::new),
             persistent_storage: None,
-            recency_bias_total_duration_ns: std::sync::atomic::AtomicU64::new(0),
-            recency_bias_total_results: std::sync::atomic::AtomicU64::new(0),
-            recency_bias_calculation_count: std::sync::atomic::AtomicU64::new(0),
+            recency_bias_total_duration_ns: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            recency_bias_total_results: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            recency_bias_calculation_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
