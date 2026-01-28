@@ -31,6 +31,7 @@ pub mod lockfree_vector_db;
 pub mod ner_engine;
 pub mod query_cache;
 pub mod query_cache_compat;
+pub mod scoring;
 pub mod semantic_query_engine;
 pub mod structured_context;
 pub mod timeout_utils;

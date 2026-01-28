@@ -147,6 +147,11 @@ pub struct ContentVectorizerConfig {
     pub enable_cross_session_search: bool,
     pub query_cache_config: QueryCacheConfig,
     pub enable_query_caching: bool,
+    /// Temporal decay factor for recency bias in search results
+    /// 0.0 = disabled (default, backward compatible)
+    /// 0.1-0.5 = soft bias toward recent content
+    /// 1.0+ = aggressive bias toward recent content
+    pub recency_bias: f32,
 }
 
 impl Default for ContentVectorizerConfig {
@@ -161,14 +166,47 @@ impl Default for ContentVectorizerConfig {
             enable_cross_session_search: true,
             query_cache_config: QueryCacheConfig::default(),
             enable_query_caching: true,
+            recency_bias: 0.0, // Disabled by default for backward compatibility
         }
     }
 }
 
 use std::sync::Arc;
 
+/// Search options for semantic queries
+///
+/// This struct consolidates all optional parameters for semantic search,
+/// eliminating the need for multiple method variants (e.g., _with_recency).
+///
+/// # Examples
+///
+/// ```
+/// // Search with recency bias
+/// let options = SearchOptions {
+///     limit: Some(10),
+///     recency_bias: Some(0.5),
+///     ..Default::default()
+/// };
+///
+/// // Search with date range
+/// let options = SearchOptions {
+///     date_range: Some((start, end)),
+///     ..Default::default()
+/// };
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct SearchOptions {
+    /// Maximum number of results to return (None = use default)
+    pub limit: Option<usize>,
+
+    /// Optional date range filter (start, end)
+    pub date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+
+    /// Recency bias parameter (0.0 = disabled, higher = more recent content preferred)
+    pub recency_bias: Option<f32>,
+}
+
 /// Main content vectorization pipeline
-#[derive(Clone)]
 pub struct ContentVectorizer {
     embedding_engine: Arc<LocalEmbeddingEngine>,
     vector_db: Arc<FastVectorDB>,
@@ -176,6 +214,26 @@ pub struct ContentVectorizer {
     query_cache: Option<Arc<QueryCache>>,
     /// Optional persistent storage for embeddings (RocksDB/SurrealDB)
     persistent_storage: Option<Arc<dyn crate::storage::traits::VectorStorage>>,
+    /// Recency bias performance metrics - all atomic for lock-free access
+    recency_bias_total_duration_ns: Arc<std::sync::atomic::AtomicU64>,
+    recency_bias_total_results: Arc<std::sync::atomic::AtomicU64>,
+    recency_bias_calculation_count: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Clone for ContentVectorizer {
+    fn clone(&self) -> Self {
+        Self {
+            embedding_engine: Arc::clone(&self.embedding_engine),
+            vector_db: Arc::clone(&self.vector_db),
+            config: self.config.clone(),
+            query_cache: self.query_cache.clone(),
+            persistent_storage: self.persistent_storage.clone(),
+            // Note: Atomics are shared between clones via Arc for metrics aggregation
+            recency_bias_total_duration_ns: Arc::clone(&self.recency_bias_total_duration_ns),
+            recency_bias_total_results: Arc::clone(&self.recency_bias_total_results),
+            recency_bias_calculation_count: Arc::clone(&self.recency_bias_calculation_count),
+        }
+    }
 }
 
 impl ContentVectorizer {
@@ -214,6 +272,9 @@ impl ContentVectorizer {
             config,
             query_cache: query_cache.map(Arc::new),
             persistent_storage: None,
+            recency_bias_total_duration_ns: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            recency_bias_total_results: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            recency_bias_calculation_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -666,6 +727,10 @@ impl ContentVectorizer {
     }
 
     /// Perform semantic search across all vectorized content
+    ///
+    /// This is the main search method that consolidates all search parameters
+    /// into a single SearchOptions struct, eliminating method proliferation.
+    ///
     /// # Errors
     ///
     /// Returns an error if the query cannot be embedded or if the vector database search fails
@@ -674,8 +739,11 @@ impl ContentVectorizer {
         query: &str,
         limit: usize,
         session_filter: Option<Uuid>,
-        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        options: SearchOptions,
     ) -> Result<Vec<SemanticSearchResult>> {
+        let recency_bias = options.recency_bias.unwrap_or(self.config.recency_bias);
+        let date_range = options.date_range;
+
         debug!("Performing semantic search for: '{}'", query);
 
         // Create a hash of search parameters for cache key
@@ -688,6 +756,10 @@ impl ContentVectorizer {
         if let Some(ref range) = date_range {
             range.0.timestamp().hash(&mut hasher);
             range.1.timestamp().hash(&mut hasher);
+        }
+        // Include recency_bias in cache key to prevent collisions
+        if recency_bias != 0.0 {
+            recency_bias.to_bits().hash(&mut hasher);
         }
         let params_hash = hasher.finish();
 
@@ -734,7 +806,7 @@ impl ContentVectorizer {
             _ => return Ok(Vec::new()),
         };
 
-        let results = self.process_search_results(search_results)?;
+        let results = self.process_search_results(search_results, Some(recency_bias))?;
 
         // Cache the results
         if let Some(ref cache) = self.query_cache
@@ -755,18 +827,54 @@ impl ContentVectorizer {
     }
 
     /// Perform semantic search within a specific set of sessions
+    ///
+    /// This optimized version performs a single vector database search across all
+    /// sessions, then applies optional scoring adjustments (recency bias, etc.) in post-processing.
+    ///
+    /// This avoids the O(n²) complexity of searching each session separately.
     pub async fn semantic_search_multisession(
         &self,
         query: &str,
         limit: usize,
         allowed_sessions: &[Uuid],
-        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        options: SearchOptions,
     ) -> Result<Vec<SemanticSearchResult>> {
-        debug!("Performing multisession semantic search for: '{}'", query);
+        let recency_bias = options.recency_bias.unwrap_or(self.config.recency_bias);
+        let date_range = options.date_range;
 
-        // Check query cache first (simplified key generation for now)
-        // Ideally we should hash the allowed_sessions too
-        let query_embedding = self.embedding_engine.encode_text(query).await?;
+        debug!(
+            "Performing multisession semantic search with recency_bias={:?} for: '{}'",
+            recency_bias, query
+        );
+
+        // Create a hash of search parameters for cache key
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        query.hash(&mut hasher);
+        limit.hash(&mut hasher);
+        for session_id in allowed_sessions {
+            session_id.hash(&mut hasher);
+        }
+        if let Some(ref range) = date_range {
+            range.0.timestamp().hash(&mut hasher);
+            range.1.timestamp().hash(&mut hasher);
+        }
+        if recency_bias != 0.0 {
+            recency_bias.to_bits().hash(&mut hasher);
+        }
+        let params_hash = hasher.finish();
+
+        // Check query cache first
+        let query_embedding = if let Some(ref cache) = self.query_cache {
+            let query_embedding = self.embedding_engine.encode_text(query).await?;
+
+            if let Some(cached_results) = cache.search(query, &query_embedding, params_hash).await {
+                debug!("Cache hit for multisession semantic search query: '{}'", query);
+                return Ok(cached_results);
+            }
+            query_embedding
+        } else {
+            self.embedding_engine.encode_text(query).await?
+        };
 
         // Pre-calculate valid session strings for fast lookup
         let valid_sessions: std::collections::HashSet<String> = allowed_sessions
@@ -774,6 +882,7 @@ impl ContentVectorizer {
             .map(|id| id.to_string())
             .collect();
 
+        // Perform single search with filter across all sessions
         let search_results = if let Some((start, end)) = date_range {
             self.vector_db
                 .search_with_filter(&query_embedding, limit, |metadata| {
@@ -788,14 +897,50 @@ impl ContentVectorizer {
                 })?
         };
 
-        self.process_search_results(search_results)
+        let results = self.process_search_results(search_results, Some(recency_bias))?;
+
+        // Cache the results
+        if let Some(ref cache) = self.query_cache
+            && let Err(e) = cache
+                .cache_results(
+                    query.to_string(),
+                    query_embedding,
+                    results.clone(),
+                    params_hash,
+                    None, // No session_filter for multisession
+                )
+                .await
+        {
+            warn!("Failed to cache search results: {}", e);
+        }
+
+        Ok(results)
     }
 
     /// Process raw vector search results into semantic results
     fn process_search_results(
         &self,
         search_results: Vec<crate::core::vector_db::SearchMatch>,
+        recency_bias_override: Option<f32>,
     ) -> Result<Vec<SemanticSearchResult>> {
+        let now = Utc::now();
+        // Defense-in-depth: Clamp recency_bias to prevent negative values or extreme values
+        // This provides a safety net even if validation is bypassed elsewhere
+        let recency_bias = recency_bias_override
+            .unwrap_or(self.config.recency_bias)
+            .clamp(0.0, 10.0); // Prevent negative values and extreme values
+
+        // Create score adjuster if recency bias is enabled
+        let score_adjuster: Option<Box<dyn crate::core::scoring::ScoreAdjuster>> = if recency_bias > 0.0 {
+            Some(Box::new(crate::core::scoring::TemporalDecayAdjuster::new(recency_bias, now)))
+        } else {
+            None
+        };
+
+        // Start timing for decay calculation metrics
+        let decay_start = std::time::Instant::now();
+        let mut decay_count = 0;
+
         // Convert to semantic search results
         let mut results = Vec::new();
         for result in search_results {
@@ -805,7 +950,16 @@ impl ContentVectorizer {
 
             // Calculate combined score (similarity + importance + content type weight)
             let importance_weight = content_type.importance_weight();
-            let combined_score = result.similarity.mul_add(0.7, importance_weight * 0.3);
+            let base_score = result.similarity.mul_add(0.7, importance_weight * 0.3);
+
+            // Apply score adjustment using the strategy (e.g., temporal decay)
+            let combined_score = if let Some(ref adjuster) = score_adjuster {
+                decay_count += 1;
+                adjuster.adjust(base_score, &result.metadata)
+            } else {
+                // No adjustment, use base score directly
+                base_score
+            };
 
             results.push(SemanticSearchResult {
                 content_id: result.metadata.id,
@@ -817,6 +971,16 @@ impl ContentVectorizer {
                 timestamp: result.metadata.timestamp,
                 combined_score,
             });
+        }
+
+        // Emit decay calculation performance metrics
+        if decay_count > 0 {
+            let decay_duration_ns = decay_start.elapsed().as_nanos() as u64;
+
+            // Update atomic counters - lock-free
+            self.recency_bias_total_duration_ns.fetch_add(decay_duration_ns, std::sync::atomic::Ordering::Relaxed);
+            self.recency_bias_total_results.fetch_add(decay_count, std::sync::atomic::Ordering::Relaxed);
+            self.recency_bias_calculation_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Deduplicate results by content_id (keeps highest score or newest timestamp)
@@ -879,6 +1043,50 @@ impl ContentVectorizer {
         }
     }
 
+    /// Get recency bias performance metrics (lock-free)
+    ///
+    /// Returns performance metrics for temporal decay calculations when recency_bias > 0.
+    /// Metrics include total time, result counts, and averages across all searches.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(metrics)` - HashMap containing performance metrics
+    /// - `None` - No recency bias metrics available (never used)
+    ///
+    /// # Metrics
+    ///
+    /// - `recency_bias.total_duration_ns` - Total time spent calculating decay (nanoseconds)
+    /// - `recency_bias.total_results` - Total number of results processed
+    /// - `recency_bias.calculation_count` - Number of search operations with recency bias
+    /// - `recency_bias.avg_duration_ns` - Average duration per calculation
+    /// - `recency_bias.avg_results_per_calculation` - Average results processed per calculation
+    /// - `recency_bias.avg_time_per_result_ns` - Average time per result (nanoseconds)
+    pub fn get_recency_bias_metrics(&self) -> Option<HashMap<String, f32>> {
+        let calculation_count = self.recency_bias_calculation_count.load(std::sync::atomic::Ordering::Relaxed);
+
+        if calculation_count == 0 {
+            return None;
+        }
+
+        let total_duration_ns = self.recency_bias_total_duration_ns.load(std::sync::atomic::Ordering::Relaxed);
+        let total_results = self.recency_bias_total_results.load(std::sync::atomic::Ordering::Relaxed);
+
+        let mut metrics = HashMap::new();
+        metrics.insert("recency_bias.total_duration_ns".to_string(), total_duration_ns as f32);
+        metrics.insert("recency_bias.total_results".to_string(), total_results as f32);
+        metrics.insert("recency_bias.calculation_count".to_string(), calculation_count as f32);
+        metrics.insert("recency_bias.avg_duration_ns".to_string(), total_duration_ns as f32 / calculation_count as f32);
+        metrics.insert("recency_bias.avg_results_per_calculation".to_string(), total_results as f32 / calculation_count as f32);
+
+        if total_results > 0 {
+            metrics.insert("recency_bias.avg_time_per_result_ns".to_string(), total_duration_ns as f32 / total_results as f32);
+        } else {
+            metrics.insert("recency_bias.avg_time_per_result_ns".to_string(), 0.0);
+        }
+
+        Some(metrics)
+    }
+
     /// Clear query cache
     ///
     /// # Errors
@@ -923,7 +1131,7 @@ impl ContentVectorizer {
         topic: &str,
         limit: usize,
     ) -> Result<Vec<SemanticSearchResult>> {
-        let results = self.semantic_search(topic, limit * 2, None, None).await?;
+        let results = self.semantic_search(topic, limit * 2, None, SearchOptions::default()).await?;
 
         // Filter out current session and return top results
         let filtered: Vec<_> = results

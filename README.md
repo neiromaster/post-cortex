@@ -98,7 +98,32 @@ semantic_search(query: "authentication", scope: "workspace", scope_id: "ws-uuid"
 
 // Search everything
 semantic_search(query: "performance issues", scope: "global")
+
+// Search with recency bias (prioritize recent content)
+semantic_search(query: "API changes", scope: "session", scope_id: "uuid", recency_bias: 0.5)
+
+// Search with date range
+semantic_search(
+  query: "authentication",
+  scope: "global",
+  date_from: "2024-01-01T00:00:00Z",
+  date_to: "2024-12-31T23:59:59Z"
+)
 ```
+
+**Temporal Decay (Recency Bias):**
+
+The `recency_bias` parameter prioritizes recent content using exponential decay.
+
+| Value | Effect | Use Case |
+|-------|--------|----------|
+| `0.0` (default) | Disabled | Architecture docs, timeless concepts |
+| `0.1 - 0.3` | Very soft bias | General search with slight recency preference |
+| `0.3 - 0.5` | Soft bias | Finding recent solutions, debugging |
+| `0.5 - 1.0` | Moderate bias | Current context, recent issues |
+| `1.0+` | Aggressive bias | Latest changes only |
+
+**Formula:** `adjusted_score = base_score × e^(-λ × days/365)` where λ is the recency_bias value
 
 ### `get_structured_summary` - Session Overview
 
@@ -276,6 +301,34 @@ cargo test
 # Run with logging
 RUST_LOG=debug pcx start
 ```
+
+### Benchmarks
+
+Post-Cortex includes microbenchmarks for performance regression testing using Criterion:
+
+```bash
+# Run all benchmarks
+cargo bench
+
+# Run specific benchmark
+cargo bench --bench recency_decay
+
+# Save baseline for comparison
+cargo bench -- --save-baseline main
+
+# Compare against baseline
+cargo bench -- --baseline main
+
+# Generate HTML report
+cargo bench -- --output-format html
+```
+
+**Benchmark results (for reference):**
+- Decay calculation: ~317 ps
+- Score adjustment: ~317 ps
+- Batch processing (1000 results): ~74 ns
+
+Benchmarks are automatically run on CI to detect performance regressions.
 
 ## License
 

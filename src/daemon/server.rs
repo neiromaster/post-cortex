@@ -596,6 +596,11 @@ async fn handle_semantic_search(
                 .collect::<Vec<String>>()
         });
 
+    let recency_bias = arguments
+        .get("recency_bias")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+
     let result = semantic_search_session(
         session_id,
         query,
@@ -603,6 +608,7 @@ async fn handle_semantic_search(
         date_from,
         date_to,
         interaction_type,
+        recency_bias,
     )
     .await
     .map_err(|e| format!("Failed to search: {}", e))?;
@@ -744,7 +750,12 @@ async fn handle_semantic_search_global(
                 .collect::<Vec<String>>()
         });
 
-    let result = semantic_search_global(query, limit, date_from, date_to, interaction_type)
+    let recency_bias = arguments
+        .get("recency_bias")
+        .and_then(|v| v.as_f64())
+        .map(|v| v as f32);
+
+    let result = semantic_search_global(query, limit, date_from, date_to, interaction_type, recency_bias)
         .await
         .map_err(|e| format!("Failed to search globally: {}", e))?;
 

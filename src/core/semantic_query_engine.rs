@@ -72,6 +72,8 @@ pub struct SemanticQueryConfig {
     pub cross_session_enabled: bool,
     pub insight_confidence_threshold: f32,
     pub max_context_results: usize,
+    /// Temporal decay factor for recency bias (0.0 = disabled)
+    pub recency_bias: f32,
 }
 
 impl Default for SemanticQueryConfig {
@@ -82,6 +84,7 @@ impl Default for SemanticQueryConfig {
             cross_session_enabled: true,
             insight_confidence_threshold: 0.6,
             max_context_results: 20,
+            recency_bias: 0.0, // Disabled by default for backward compatibility
         }
     }
 }
@@ -111,6 +114,7 @@ impl SemanticQueryEngine {
         query: &str,
         limit: Option<usize>,
         date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        recency_bias: Option<f32>,
     ) -> Result<Vec<SemanticSearchResult>> {
         let search_limit = limit.unwrap_or(self.config.max_context_results);
 
@@ -119,9 +123,15 @@ impl SemanticQueryEngine {
             info!("  Date range filter: {} to {}", start, end);
         }
 
+        let options = crate::core::content_vectorizer::SearchOptions {
+            limit: Some(search_limit),
+            date_range,
+            recency_bias,
+        };
+
         let results = self
             .vectorizer
-            .semantic_search(query, search_limit, None, date_range)
+            .semantic_search(query, search_limit, None, options)
             .await
             .context("Failed to perform semantic search")?;
 
@@ -147,6 +157,7 @@ impl SemanticQueryEngine {
         query: &str,
         limit: Option<usize>,
         date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        recency_bias: Option<f32>,
     ) -> Result<Vec<SemanticSearchResult>> {
         let search_limit = limit.unwrap_or(self.config.max_context_results);
 
@@ -158,9 +169,15 @@ impl SemanticQueryEngine {
             debug!("  Date range filter: {} to {}", start, end);
         }
 
+        let options = crate::core::content_vectorizer::SearchOptions {
+            limit: Some(search_limit),
+            date_range,
+            recency_bias,
+        };
+
         let results = self
             .vectorizer
-            .semantic_search(query, search_limit, Some(session_id), date_range)
+            .semantic_search(query, search_limit, Some(session_id), options)
             .await
             .context("Failed to perform session semantic search")?;
 
@@ -186,6 +203,7 @@ impl SemanticQueryEngine {
         query: &str,
         limit: Option<usize>,
         date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        recency_bias: Option<f32>,
     ) -> Result<Vec<SemanticSearchResult>> {
         let search_limit = limit.unwrap_or(self.config.max_context_results);
 
@@ -195,9 +213,15 @@ impl SemanticQueryEngine {
             query
         );
 
+        let options = crate::core::content_vectorizer::SearchOptions {
+            limit: Some(search_limit),
+            date_range,
+            recency_bias,
+        };
+
         let results = self
             .vectorizer
-            .semantic_search_multisession(query, search_limit, session_ids, date_range)
+            .semantic_search_multisession(query, search_limit, session_ids, options)
             .await
             .context("Failed to perform multisession semantic search")?;
 
@@ -234,7 +258,7 @@ impl SemanticQueryEngine {
         // Get semantic search results
         let search_results = self
             .vectorizer
-            .semantic_search(topic, self.config.max_related_experiences * 2, None, None)
+            .semantic_search(topic, self.config.max_related_experiences * 2, None, crate::core::content_vectorizer::SearchOptions::default())
             .await?;
 
         let mut related_experiences = Vec::new();
@@ -298,7 +322,7 @@ impl SemanticQueryEngine {
 
         // Search within current session
         let primary_content = self
-            .semantic_search_session(session_id, context_hint, Some(10), None)
+            .semantic_search_session(session_id, context_hint, Some(10), None, None)
             .await?;
 
         // Find related experiences from other sessions
@@ -335,10 +359,10 @@ impl SemanticQueryEngine {
         debug!("Generating semantic insights for topic: '{}'", topic);
 
         let search_results = if let Some(session_id) = session_filter {
-            self.semantic_search_session(session_id, topic, Some(50), None)
+            self.semantic_search_session(session_id, topic, Some(50), None, None)
                 .await?
         } else {
-            self.semantic_search_global(topic, Some(50), None).await?
+            self.semantic_search_global(topic, Some(50), None, None).await?
         };
 
         // Group results by content type and analyze patterns
@@ -409,7 +433,7 @@ impl SemanticQueryEngine {
         for query in &semantic_queries {
             let results = self
                 .vectorizer
-                .semantic_search(query, 5, Some(reference_session_id), None)
+                .semantic_search(query, 5, Some(reference_session_id), crate::core::content_vectorizer::SearchOptions::default())
                 .await
                 .unwrap_or_default();
             all_reference_content.extend(results);
@@ -431,7 +455,7 @@ impl SemanticQueryEngine {
         let mut session_similarities: HashMap<Uuid, Vec<f32>> = HashMap::new();
 
         for theme in &reference_themes {
-            let similar_results = self.semantic_search_global(theme, Some(50), None).await?;
+            let similar_results = self.semantic_search_global(theme, Some(50), None, None).await?;
 
             for result in similar_results {
                 if result.session_id != reference_session_id {

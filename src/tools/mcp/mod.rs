@@ -1489,7 +1489,7 @@ pub async fn semantic_search(
                 let session_id = scope_id
                     .ok_or_else(|| anyhow::anyhow!("Missing session ID for session scope"))?;
                 engine
-                    .semantic_search_session(session_id, &query, None, None)
+                    .semantic_search_session(session_id, &query, None, None, None)
                     .await
             }
             "workspace" => {
@@ -1507,10 +1507,10 @@ pub async fn semantic_search(
                     .collect();
 
                 engine
-                    .semantic_search_multisession(&session_ids, &query, None, None)
+                    .semantic_search_multisession(&session_ids, &query, None, None, None)
                     .await
             }
-            "global" => engine.semantic_search_global(&query, None, None).await,
+            "global" => engine.semantic_search_global(&query, None, None, None).await,
             _ => {
                 return Ok(MCPToolResult::error(format!(
                     "Invalid search scope type: {}",
@@ -2421,10 +2421,11 @@ pub async fn semantic_search_global(
     date_from: Option<String>,
     date_to: Option<String>,
     interaction_type: Option<Vec<String>>,
+    recency_bias: Option<f32>,
 ) -> Result<MCPToolResult> {
     info!(
-        "MCP-TOOLS: semantic_search_global() called with query: '{}'",
-        query
+        "MCP-TOOLS: semantic_search_global() called with query: '{}' and recency_bias: {:?}",
+        query, recency_bias
     );
     let system = get_memory_system().await?;
     info!("MCP-TOOLS: Got memory system for semantic_search_global");
@@ -2464,12 +2465,17 @@ pub async fn semantic_search_global(
         limit
     };
 
-    match system
-        .semantic_search_global(&query, search_limit, date_range)
-        .await
-    {
-        Ok(mut results) => {
-            let results_before_filter = results.len();
+    // Use recency_bias (defaults to 0.0 = disabled if not provided)
+    let bias = recency_bias.unwrap_or(0.0);
+    let search_results = system
+        .semantic_query_engine
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("Semantic engine not initialized"))?
+        .semantic_search_global(&query, search_limit, date_range, Some(bias))
+        .await?;
+
+    let mut results = search_results;
+    let results_before_filter = results.len();
 
             // Filter by interaction_type if provided
             if let Some(ref types) = interaction_type {
@@ -2578,12 +2584,6 @@ pub async fn semantic_search_global(
                     }
                 })),
             ))
-        }
-        Err(e) => Ok(MCPToolResult::error(format!(
-            "Semantic search failed: {}",
-            e
-        ))),
-    }
 }
 
 /// Perform semantic search within a specific session
@@ -2595,10 +2595,11 @@ pub async fn semantic_search_session(
     date_from: Option<String>,
     date_to: Option<String>,
     interaction_type: Option<Vec<String>>,
+    recency_bias: Option<f32>,
 ) -> Result<MCPToolResult> {
     info!(
-        "MCP-TOOLS: semantic_search_session() called for session {} with query: '{}'",
-        session_id, query
+        "MCP-TOOLS: semantic_search_session() called for session {} with query: '{}' and recency_bias: {:?}",
+        session_id, query, recency_bias
     );
     let system = get_memory_system().await?;
     info!("MCP-TOOLS: Got memory system for semantic_search_session");
@@ -2638,14 +2639,19 @@ pub async fn semantic_search_session(
         limit
     };
 
-    match system
-        .semantic_search_session(session_id, &query, search_limit, date_range)
-        .await
-    {
-        Ok(mut results) => {
-            let results_before_filter = results.len();
+    // Use recency_bias (defaults to 0.0 = disabled if not provided)
+    let bias = recency_bias.unwrap_or(0.0);
+    let search_results = system
+        .semantic_query_engine
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("Semantic engine not initialized"))?
+        .semantic_search_session(session_id, &query, search_limit, date_range, Some(bias))
+        .await?;
 
-            // Filter by interaction_type if provided
+    let mut results = search_results;
+    let results_before_filter = results.len();
+
+    // Filter by interaction_type if provided
             if let Some(ref types) = interaction_type {
                 info!("Filtering by interaction_types: {:?}", types);
 
@@ -2733,31 +2739,26 @@ pub async fn semantic_search_session(
                 })
                 .collect();
 
-            Ok(MCPToolResult::success(
-                message,
-                Some(serde_json::json!({
-                    "session_id": session_id.to_string(),
-                    "query": query,
-                    "results": search_results,
-                    "scoring_info": {
-                        "algorithm": "combined_score = (similarity_score × 0.7) + (importance_weight × 0.3)",
-                        "quality_levels": {
-                            "Excellent": "≥ 0.85",
-                            "Very Good": "0.70 - 0.84",
-                            "Good": "0.55 - 0.69",
-                            "Moderate": "0.40 - 0.54",
-                            "Fair": "0.30 - 0.39",
-                            "Weak": "< 0.30"
-                        }
-                    }
-                })),
-            ))
-        }
-        Err(e) => Ok(MCPToolResult::error(format!(
-            "Session semantic search failed: {}",
-            e
-        ))),
-    }
+
+    Ok(MCPToolResult::success(
+        message,
+        Some(serde_json::json!({
+            "session_id": session_id.to_string(),
+            "query": query,
+            "results": search_results,
+            "scoring_info": {
+                "algorithm": "combined_score = (similarity_score × 0.7) + (importance_weight × 0.3)",
+                "quality_levels": {
+                    "Excellent": "≥ 0.85",
+                    "Very Good": "0.70 - 0.84",
+                    "Good": "0.55 - 0.69",
+                    "Moderate": "0.40 - 0.54",
+                    "Fair": "0.30 - 0.39",
+                    "Weak": "< 0.30"
+                }
+            }
+        })),
+    ))
 }
 
 /// Find related content across sessions
@@ -2927,6 +2928,7 @@ pub async fn semantic_search_global(
     _date_from: Option<String>,
     _date_to: Option<String>,
     _interaction_type: Option<Vec<String>>,
+    _recency_bias: Option<f32>,
 ) -> Result<MCPToolResult> {
     Ok(MCPToolResult::error(
         "Semantic search requires the 'embeddings' feature to be enabled. Please rebuild with --features embeddings".to_string()
@@ -2941,6 +2943,7 @@ pub async fn semantic_search_session(
     _date_from: Option<String>,
     _date_to: Option<String>,
     _interaction_type: Option<Vec<String>>,
+    _recency_bias: Option<f32>,
 ) -> Result<MCPToolResult> {
     Ok(MCPToolResult::error(
         "Semantic search requires the 'embeddings' feature to be enabled. Please rebuild with --features embeddings".to_string()
@@ -3087,7 +3090,14 @@ pub fn get_all_tool_schemas() -> Vec<serde_json::Value> {
                     "limit": {"type": "number", "description": "Max results (default: 10)"},
                     "date_from": {"type": "string", "description": "Filter from date (ISO 8601)"},
                     "date_to": {"type": "string", "description": "Filter to date (ISO 8601)"},
-                    "interaction_type": {"type": "array", "description": "Filter by interaction types"}
+                    "interaction_type": {"type": "array", "description": "Filter by interaction types"},
+                    "recency_bias": {
+                        "type": "number",
+                        "description": "Temporal decay factor: 0.0=disabled (default), 0.1-0.5=soft bias, 1.0+=aggressive bias toward recent content",
+                        "default": 0.0,
+                        "minimum": 0.0,
+                        "maximum": 10.0
+                    }
                 },
                 "required": ["session_id", "query"]
             }
@@ -3102,7 +3112,14 @@ pub fn get_all_tool_schemas() -> Vec<serde_json::Value> {
                     "limit": {"type": "number", "description": "Max results (default: 10)"},
                     "date_from": {"type": "string", "description": "Filter from date (ISO 8601)"},
                     "date_to": {"type": "string", "description": "Filter to date (ISO 8601)"},
-                    "interaction_type": {"type": "array", "description": "Filter by interaction types"}
+                    "interaction_type": {"type": "array", "description": "Filter by interaction types"},
+                    "recency_bias": {
+                        "type": "number",
+                        "description": "Temporal decay factor: 0.0=disabled (default), 0.1-0.5=soft bias, 1.0+=aggressive bias toward recent content",
+                        "default": 0.0,
+                        "minimum": 0.0,
+                        "maximum": 10.0
+                    }
                 },
                 "required": ["query"]
             }

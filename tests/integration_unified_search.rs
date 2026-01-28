@@ -111,11 +111,11 @@ async fn test_comprehensive_unified_search() {
             if s_type == "workspace" {
                 let ws = sys.workspace_manager.get_workspace(&id.unwrap()).unwrap();
                 let s_ids: Vec<Uuid> = ws.get_all_sessions().into_iter().map(|(i, _)| i).collect();
-                engine.semantic_search_multisession(&s_ids, &q, None, None).await.unwrap()
+                engine.semantic_search_multisession(&s_ids, &q, None, None, None).await.unwrap()
             } else if s_type == "session" {
-                engine.semantic_search_session(id.unwrap(), &q, None, None).await.unwrap()
+                engine.semantic_search_session(id.unwrap(), &q, None, None, None).await.unwrap()
             } else {
-                engine.semantic_search_global(&q, None, None).await.unwrap()
+                engine.semantic_search_global(&q, None, None, None).await.unwrap()
             }
         }
     };
@@ -250,6 +250,7 @@ async fn test_session_isolation_bug_reproduction() {
         session_2,
         "Stripe webhook PayPal payment idempotent",
         None,
+        None,
         None
     ).await.unwrap();
 
@@ -280,6 +281,7 @@ async fn test_session_isolation_bug_reproduction() {
         session_1,
         "JWT authentication TOTP MFA bcrypt",
         None,
+        None,
         None
     ).await.unwrap();
 
@@ -309,6 +311,7 @@ async fn test_session_isolation_bug_reproduction() {
         session_3,
         "Firebase push notification SMS Twilio email",
         None,
+        None,
         None
     ).await.unwrap();
 
@@ -335,6 +338,7 @@ async fn test_session_isolation_bug_reproduction() {
     println!("\n=== TEST 4: Global search for 'authentication payment notification' ===");
     let results = engine.semantic_search_global(
         "authentication payment notification",
+        None,
         None,
         None
     ).await.unwrap();

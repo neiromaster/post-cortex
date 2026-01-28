@@ -77,6 +77,10 @@ serial_test = { version = "3.3", features = ["async"] }
 name = "pcx"
 path = "src/bin/pcx.rs"
 
+[[bench]]
+name = "recency_decay"
+harness = false
+
 [features]
 default = ["embeddings"]
 llm-integration = []
