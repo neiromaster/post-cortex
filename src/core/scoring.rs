@@ -8,8 +8,8 @@
 //! The [`ScoreAdjuster`] trait allows you to compose multiple scoring strategies
 //! without modifying the core search logic.
 
-use chrono::{DateTime, Utc};
 use crate::core::vector_db::VectorMetadata;
+use chrono::{DateTime, Utc};
 
 /// Trait for adjusting search result scores based on various factors
 ///
@@ -213,9 +213,9 @@ impl ScoreAdjuster for CompositeScoreAdjuster {
     fn adjust(&self, base_score: f32, metadata: &VectorMetadata) -> f32 {
         // Apply each adjuster in sequence, feeding the output of one
         // into the input of the next
-        self.adjusters
-            .iter()
-            .fold(base_score, |score, adjuster| adjuster.adjust(score, metadata))
+        self.adjusters.iter().fold(base_score, |score, adjuster| {
+            adjuster.adjust(score, metadata)
+        })
     }
 }
 
@@ -223,7 +223,6 @@ impl ScoreAdjuster for CompositeScoreAdjuster {
 mod tests {
     use super::*;
     use chrono::Duration;
-    use std::collections::HashMap;
 
     #[test]
     fn test_temporal_decay_disabled() {

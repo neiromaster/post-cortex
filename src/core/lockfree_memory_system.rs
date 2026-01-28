@@ -2789,6 +2789,38 @@ impl LockFreeConversationMemorySystem {
         }
     }
 
+    /// Perform semantic search across multiple sessions
+    #[cfg(feature = "embeddings")]
+    pub async fn semantic_search_multisession(
+        &self,
+        session_ids: &[Uuid],
+        query: &str,
+        limit: Option<usize>,
+        date_range: Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        recency_bias: Option<f32>,
+    ) -> Result<Vec<crate::core::content_vectorizer::SemanticSearchResult>, String> {
+        let _timer = self
+            .performance_monitor
+            .start_timer("semantic_search_multisession");
+
+        // Lazy-initialize vectorizer if needed
+        let vectorizer = self.ensure_vectorizer_initialized().await?;
+
+        let options = crate::core::content_vectorizer::SearchOptions {
+            limit: Some(limit.unwrap_or(20)),
+            date_range,
+            recency_bias,
+        };
+
+        match vectorizer
+            .semantic_search_multisession(query, limit.unwrap_or(20), session_ids, options)
+            .await
+        {
+            Ok(results) => Ok(results),
+            Err(e) => Err(format!("Multisession semantic search failed: {e}")),
+        }
+    }
+
     /// Get vectorization statistics
     #[cfg(feature = "embeddings")]
     pub fn get_vectorization_stats(

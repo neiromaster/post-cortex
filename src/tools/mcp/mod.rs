@@ -289,17 +289,26 @@ pub async fn update_conversation_context_with_system(
             }
             "code_change" => {
                 // Accept: file_path/file/description, changes/diff/change_type
-                let file_path = content.get("file_path")
+                let file_path = content
+                    .get("file_path")
                     .or_else(|| content.get("file"))
                     .or_else(|| content.get("description"))
                     .cloned()
                     .unwrap_or_default();
-                let changes = content.get("changes")
+                let changes = content
+                    .get("changes")
                     .or_else(|| content.get("diff"))
                     .or_else(|| content.get("change_type"))
                     .cloned()
                     .unwrap_or_default();
-                let extras = extract_extras(&["file_path", "file", "description", "changes", "diff", "change_type"]);
+                let extras = extract_extras(&[
+                    "file_path",
+                    "file",
+                    "description",
+                    "changes",
+                    "diff",
+                    "change_type",
+                ]);
                 Interaction::CodeChange {
                     file_path,
                     diff: changes,
@@ -369,7 +378,11 @@ pub async fn update_conversation_context_with_system(
                 .filter(|s| !s.is_empty() && s.len() > 2)
                 .collect();
             if !entities.is_empty() {
-                info!("Parsed {} explicit entities: {:?}", entities.len(), entities);
+                info!(
+                    "Parsed {} explicit entities: {:?}",
+                    entities.len(),
+                    entities
+                );
                 update.creates_entities = entities;
             }
         }
@@ -1472,25 +1485,15 @@ pub async fn semantic_search(
             ("global".to_string(), None)
         };
 
-        // Ensure semantic query engine is initialized
-        system
-            .as_ref()
-            .ensure_semantic_engine_initialized()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to initialize semantic engine: {}", e))?;
-
-        let engine = system
-            .semantic_query_engine
-            .get()
-            .ok_or_else(|| anyhow::anyhow!("Semantic engine initialization failed"))?;
-
+        // Use system methods which use the shared vectorizer
         let results = match scope_type.as_str() {
             "session" => {
                 let session_id = scope_id
                     .ok_or_else(|| anyhow::anyhow!("Missing session ID for session scope"))?;
-                engine
+                system
                     .semantic_search_session(session_id, &query, None, None, None)
                     .await
+                    .map_err(|e| anyhow::anyhow!(e))
             }
             "workspace" => {
                 let ws_id = scope_id
@@ -1506,11 +1509,17 @@ pub async fn semantic_search(
                     .map(|(id, _)| id)
                     .collect();
 
-                engine
+                system
                     .semantic_search_multisession(&session_ids, &query, None, None, None)
                     .await
+                    .map_err(|e| anyhow::anyhow!(e))
             }
-            "global" => engine.semantic_search_global(&query, None, None, None).await,
+            "global" => {
+                system
+                    .semantic_search_global(&query, None, None, None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            }
             _ => {
                 return Ok(MCPToolResult::error(format!(
                     "Invalid search scope type: {}",
@@ -2465,125 +2474,122 @@ pub async fn semantic_search_global(
         limit
     };
 
-    // Use recency_bias (defaults to 0.0 = disabled if not provided)
-    let bias = recency_bias.unwrap_or(0.0);
+    // Use system's semantic_search_global which uses the shared vectorizer
     let search_results = system
-        .semantic_query_engine
-        .get()
-        .ok_or_else(|| anyhow::anyhow!("Semantic engine not initialized"))?
-        .semantic_search_global(&query, search_limit, date_range, Some(bias))
-        .await?;
+        .semantic_search_global(&query, search_limit, date_range, recency_bias)
+        .await
+        .map_err(|e| anyhow::anyhow!("Semantic search failed: {}", e))?;
 
     let mut results = search_results;
     let results_before_filter = results.len();
 
-            // Filter by interaction_type if provided
-            if let Some(ref types) = interaction_type {
-                info!("Filtering by interaction_types: {:?}", types);
+    // Filter by interaction_type if provided
+    if let Some(ref types) = interaction_type {
+        info!("Filtering by interaction_types: {:?}", types);
 
-                // Convert interaction types to ContentType
-                let content_types: Vec<ContentType> = types
-                    .iter()
-                    .filter_map(|t| {
-                        let ct = interaction_type_to_content_type(t);
-                        info!("Mapping '{}' -> {:?}", t, ct);
-                        ct
-                    })
-                    .collect();
+        // Convert interaction types to ContentType
+        let content_types: Vec<ContentType> = types
+            .iter()
+            .filter_map(|t| {
+                let ct = interaction_type_to_content_type(t);
+                info!("Mapping '{}' -> {:?}", t, ct);
+                ct
+            })
+            .collect();
 
-                info!("Mapped to ContentTypes: {:?}", content_types);
+        info!("Mapped to ContentTypes: {:?}", content_types);
 
-                if !content_types.is_empty() {
-                    results.retain(|r| content_types.contains(&r.content_type));
-                    info!(
-                        "Filtered from {} to {} results",
-                        results_before_filter,
-                        results.len()
-                    );
-
-                    // Trim to original limit after filtering
-                    let final_limit = limit.unwrap_or(10);
-                    if results.len() > final_limit {
-                        results.truncate(final_limit);
-                        info!("Truncated to {} results after filtering", final_limit);
-                    }
-                } else {
-                    info!("No valid ContentTypes mapped, skipping filter");
-                }
-            } else {
-                info!("No interaction_type filter provided");
-            }
-
-            // Build formatted message with full results
-            let mut message = format!(
-                "Found {} global semantic search results for query: '{}'\n\n",
-                results.len(),
-                query
+        if !content_types.is_empty() {
+            results.retain(|r| content_types.contains(&r.content_type));
+            info!(
+                "Filtered from {} to {} results",
+                results_before_filter,
+                results.len()
             );
 
-            for (idx, r) in results.iter().enumerate() {
-                message.push_str(&format!(
-                    "{}. [Session: {}] [{:?}] Similarity: {:.1}% | Relevance: {:.1}% ({})\n",
-                    idx + 1,
-                    &r.session_id.to_string(),
-                    r.content_type,
-                    r.similarity_score * 100.0,
-                    r.combined_score * 100.0,
-                    r.similarity_quality()
-                ));
-                message.push_str(&format!(
-                    "   Time: {}\n",
-                    r.timestamp.format("%Y-%m-%d %H:%M:%S")
-                ));
-                message.push_str(&format!("   {}\n", r.score_explanation()));
-
-                // Truncate text_content if too long (UTF-8 safe)
-                let content = if r.text_content.chars().count() > 500 {
-                    let truncated: String = r.text_content.chars().take(500).collect();
-                    format!("{}...", truncated)
-                } else {
-                    r.text_content.clone()
-                };
-                message.push_str(&format!("   Content: {}\n\n", content));
+            // Trim to original limit after filtering
+            let final_limit = limit.unwrap_or(10);
+            if results.len() > final_limit {
+                results.truncate(final_limit);
+                info!("Truncated to {} results after filtering", final_limit);
             }
+        } else {
+            info!("No valid ContentTypes mapped, skipping filter");
+        }
+    } else {
+        info!("No interaction_type filter provided");
+    }
 
-            // Also build JSON for data field
-            let search_results: Vec<serde_json::Value> = results
-                .into_iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "content_id": r.content_id,
-                        "session_id": r.session_id.to_string(),
-                        "content_type": format!("{:?}", r.content_type),
-                        "text_content": r.text_content,
-                        "similarity_score": r.similarity_score,
-                        "similarity_quality": r.similarity_quality(),
-                        "importance_score": r.importance_score,
-                        "timestamp": r.timestamp.to_rfc3339(),
-                        "combined_score": r.combined_score,
-                        "score_explanation": r.score_explanation()
-                    })
-                })
-                .collect();
+    // Build formatted message with full results
+    let mut message = format!(
+        "Found {} global semantic search results for query: '{}'\n\n",
+        results.len(),
+        query
+    );
 
-            Ok(MCPToolResult::success(
-                message,
-                Some(serde_json::json!({
-                    "query": query,
-                    "results": search_results,
-                    "scoring_info": {
-                        "algorithm": "combined_score = (similarity_score × 0.7) + (importance_weight × 0.3)",
-                        "quality_levels": {
-                            "Excellent": "≥ 0.85",
-                            "Very Good": "0.70 - 0.84",
-                            "Good": "0.55 - 0.69",
-                            "Moderate": "0.40 - 0.54",
-                            "Fair": "0.30 - 0.39",
-                            "Weak": "< 0.30"
-                        }
-                    }
-                })),
-            ))
+    for (idx, r) in results.iter().enumerate() {
+        message.push_str(&format!(
+            "{}. [Session: {}] [{:?}] Similarity: {:.1}% | Relevance: {:.1}% ({})\n",
+            idx + 1,
+            &r.session_id.to_string(),
+            r.content_type,
+            r.similarity_score * 100.0,
+            r.combined_score * 100.0,
+            r.similarity_quality()
+        ));
+        message.push_str(&format!(
+            "   Time: {}\n",
+            r.timestamp.format("%Y-%m-%d %H:%M:%S")
+        ));
+        message.push_str(&format!("   {}\n", r.score_explanation()));
+
+        // Truncate text_content if too long (UTF-8 safe)
+        let content = if r.text_content.chars().count() > 500 {
+            let truncated: String = r.text_content.chars().take(500).collect();
+            format!("{}...", truncated)
+        } else {
+            r.text_content.clone()
+        };
+        message.push_str(&format!("   Content: {}\n\n", content));
+    }
+
+    // Also build JSON for data field
+    let search_results: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "content_id": r.content_id,
+                "session_id": r.session_id.to_string(),
+                "content_type": format!("{:?}", r.content_type),
+                "text_content": r.text_content,
+                "similarity_score": r.similarity_score,
+                "similarity_quality": r.similarity_quality(),
+                "importance_score": r.importance_score,
+                "timestamp": r.timestamp.to_rfc3339(),
+                "combined_score": r.combined_score,
+                "score_explanation": r.score_explanation()
+            })
+        })
+        .collect();
+
+    Ok(MCPToolResult::success(
+        message,
+        Some(serde_json::json!({
+            "query": query,
+            "results": search_results,
+            "scoring_info": {
+                "algorithm": "combined_score = (similarity_score × 0.7) + (importance_weight × 0.3)",
+                "quality_levels": {
+                    "Excellent": "≥ 0.85",
+                    "Very Good": "0.70 - 0.84",
+                    "Good": "0.55 - 0.69",
+                    "Moderate": "0.40 - 0.54",
+                    "Fair": "0.30 - 0.39",
+                    "Weak": "< 0.30"
+                }
+            }
+        })),
+    ))
 }
 
 /// Perform semantic search within a specific session
@@ -2639,106 +2645,102 @@ pub async fn semantic_search_session(
         limit
     };
 
-    // Use recency_bias (defaults to 0.0 = disabled if not provided)
-    let bias = recency_bias.unwrap_or(0.0);
+    // Use system's semantic_search_session which uses the shared vectorizer
     let search_results = system
-        .semantic_query_engine
-        .get()
-        .ok_or_else(|| anyhow::anyhow!("Semantic engine not initialized"))?
-        .semantic_search_session(session_id, &query, search_limit, date_range, Some(bias))
-        .await?;
+        .semantic_search_session(session_id, &query, search_limit, date_range, recency_bias)
+        .await
+        .map_err(|e| anyhow::anyhow!("Semantic search failed: {}", e))?;
 
     let mut results = search_results;
     let results_before_filter = results.len();
 
     // Filter by interaction_type if provided
-            if let Some(ref types) = interaction_type {
-                info!("Filtering by interaction_types: {:?}", types);
+    if let Some(ref types) = interaction_type {
+        info!("Filtering by interaction_types: {:?}", types);
 
-                // Convert interaction types to ContentType
-                let content_types: Vec<ContentType> = types
-                    .iter()
-                    .filter_map(|t| {
-                        let ct = interaction_type_to_content_type(t);
-                        info!("Mapping '{}' -> {:?}", t, ct);
-                        ct
-                    })
-                    .collect();
+        // Convert interaction types to ContentType
+        let content_types: Vec<ContentType> = types
+            .iter()
+            .filter_map(|t| {
+                let ct = interaction_type_to_content_type(t);
+                info!("Mapping '{}' -> {:?}", t, ct);
+                ct
+            })
+            .collect();
 
-                info!("Mapped to ContentTypes: {:?}", content_types);
+        info!("Mapped to ContentTypes: {:?}", content_types);
 
-                if !content_types.is_empty() {
-                    results.retain(|r| content_types.contains(&r.content_type));
-                    info!(
-                        "Filtered from {} to {} results",
-                        results_before_filter,
-                        results.len()
-                    );
-
-                    // Trim to original limit after filtering
-                    let final_limit = limit.unwrap_or(10);
-                    if results.len() > final_limit {
-                        results.truncate(final_limit);
-                        info!("Truncated to {} results after filtering", final_limit);
-                    }
-                } else {
-                    info!("No valid ContentTypes mapped, skipping filter");
-                }
-            } else {
-                info!("No interaction_type filter provided");
-            }
-
-            // Build formatted message with full results
-            let mut message = format!(
-                "Found {} semantic search results for query: '{}'\n\n",
-                results.len(),
-                query
+        if !content_types.is_empty() {
+            results.retain(|r| content_types.contains(&r.content_type));
+            info!(
+                "Filtered from {} to {} results",
+                results_before_filter,
+                results.len()
             );
 
-            for (idx, r) in results.iter().enumerate() {
-                message.push_str(&format!(
-                    "{}. [{:?}] Similarity: {:.1}% | Relevance: {:.1}% ({})\n",
-                    idx + 1,
-                    r.content_type,
-                    r.similarity_score * 100.0,
-                    r.combined_score * 100.0,
-                    r.similarity_quality()
-                ));
-                message.push_str(&format!(
-                    "   Time: {}\n",
-                    r.timestamp.format("%Y-%m-%d %H:%M:%S")
-                ));
-                message.push_str(&format!("   {}\n", r.score_explanation()));
-
-                // Truncate text_content if too long (UTF-8 safe)
-                let content = if r.text_content.chars().count() > 500 {
-                    let truncated: String = r.text_content.chars().take(500).collect();
-                    format!("{}...", truncated)
-                } else {
-                    r.text_content.clone()
-                };
-                message.push_str(&format!("   Content: {}\n\n", content));
+            // Trim to original limit after filtering
+            let final_limit = limit.unwrap_or(10);
+            if results.len() > final_limit {
+                results.truncate(final_limit);
+                info!("Truncated to {} results after filtering", final_limit);
             }
+        } else {
+            info!("No valid ContentTypes mapped, skipping filter");
+        }
+    } else {
+        info!("No interaction_type filter provided");
+    }
 
-            // Also build JSON for data field
-            let search_results: Vec<serde_json::Value> = results
-                .into_iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "content_id": r.content_id,
-                        "session_id": r.session_id.to_string(),
-                        "content_type": format!("{:?}", r.content_type),
-                        "text_content": r.text_content,
-                        "similarity_score": r.similarity_score,
-                        "similarity_quality": r.similarity_quality(),
-                        "importance_score": r.importance_score,
-                        "timestamp": r.timestamp.to_rfc3339(),
-                        "combined_score": r.combined_score,
-                        "score_explanation": r.score_explanation()
-                    })
-                })
-                .collect();
+    // Build formatted message with full results
+    let mut message = format!(
+        "Found {} semantic search results for query: '{}'\n\n",
+        results.len(),
+        query
+    );
 
+    for (idx, r) in results.iter().enumerate() {
+        message.push_str(&format!(
+            "{}. [{:?}] Similarity: {:.1}% | Relevance: {:.1}% ({})\n",
+            idx + 1,
+            r.content_type,
+            r.similarity_score * 100.0,
+            r.combined_score * 100.0,
+            r.similarity_quality()
+        ));
+        message.push_str(&format!(
+            "   Time: {}\n",
+            r.timestamp.format("%Y-%m-%d %H:%M:%S")
+        ));
+        message.push_str(&format!("   {}\n", r.score_explanation()));
+
+        // Truncate text_content if too long (UTF-8 safe)
+        let content = if r.text_content.chars().count() > 500 {
+            let truncated: String = r.text_content.chars().take(500).collect();
+            format!("{}...", truncated)
+        } else {
+            r.text_content.clone()
+        };
+        message.push_str(&format!("   Content: {}\n\n", content));
+    }
+
+    // Also build JSON for data field
+    let search_results: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "content_id": r.content_id,
+                "session_id": r.session_id.to_string(),
+                "content_type": format!("{:?}", r.content_type),
+                "text_content": r.text_content,
+                "similarity_score": r.similarity_score,
+                "similarity_quality": r.similarity_quality(),
+                "importance_score": r.importance_score,
+                "timestamp": r.timestamp.to_rfc3339(),
+                "combined_score": r.combined_score,
+                "score_explanation": r.score_explanation()
+            })
+        })
+        .collect();
 
     Ok(MCPToolResult::success(
         message,

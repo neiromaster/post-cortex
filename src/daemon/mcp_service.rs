@@ -14,8 +14,7 @@
 use crate::ConversationMemorySystem;
 use crate::daemon::coerce::{CoercionError, coerce_and_validate};
 use crate::daemon::validate::*;
-use crate::tools::mcp::{get_memory_system, MCPToolResult};
-use uuid::Uuid;
+use crate::tools::mcp::{MCPToolResult, get_memory_system};
 use rmcp::{
     RoleServer, ServerHandler,
     handler::server::router::tool::ToolRouter,
@@ -31,6 +30,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use std::sync::Arc;
 use tracing::info;
+use uuid::Uuid;
 
 /// Post-Cortex MCP Service
 #[derive(Clone)]
@@ -522,12 +522,10 @@ fn parse_date_range(
                 .with_timezone(&chrono::Utc);
             Ok(Some((from, to)))
         }
-        (Some(_), None) | (None, Some(_)) => {
-            Err(McpError::invalid_params(
-                "Both date_from and date_to must be provided together".to_string(),
-                Some(serde_json::Value::String("date_from,date_to".to_string())),
-            ))
-        }
+        (Some(_), None) | (None, Some(_)) => Err(McpError::invalid_params(
+            "Both date_from and date_to must be provided together".to_string(),
+            Some(serde_json::Value::String("date_from,date_to".to_string())),
+        )),
         (None, None) => Ok(None),
     }
 }
@@ -820,57 +818,26 @@ impl PostCortexService {
 
                 let uuid = validate_session_id(session_id).map_err(|e| e.to_mcp_error())?;
 
-                // Parse date range if provided
-                let date_range = parse_date_range(req.date_from.clone(), req.date_to.clone())?;
-
                 // Validate recency_bias if provided
-                let validated_recency_bias = validate_recency_bias(req.recency_bias)
-                    .map_err(|e| e.to_mcp_error())?;
+                let validated_recency_bias =
+                    validate_recency_bias(req.recency_bias).map_err(|e| e.to_mcp_error())?;
 
-                // Use recency_bias if provided
-                let search_results = if let Some(bias) = validated_recency_bias {
-                    // Get engine and use _with_recency method
-                    let system = get_memory_system().await
-                        .map_err(|e| McpError::internal_error(format!("Failed to get memory system: {}", e), None))?;
+                // Use shared vectorizer via tools::mcp which uses system methods
+                let search_results = crate::tools::mcp::semantic_search_session(
+                    uuid,
+                    req.query.clone(),
+                    Some(validated_limit),
+                    req.date_from.clone(),
+                    req.date_to.clone(),
+                    req.interaction_type.clone(),
+                    validated_recency_bias,
+                )
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-                    let engine = system
-                        .semantic_query_engine
-                        .get()
-                        .ok_or_else(|| McpError::internal_error("Semantic engine not initialized".to_string(), None))?;
-
-                    let results = engine
-                        .semantic_search_session(
-                            uuid,
-                            &req.query,
-                            Some(validated_limit),
-                            date_range,
-                            Some(bias),
-                        )
-                        .await
-                        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-                    // Format results consistently with JSON
-                    let formatted = crate::daemon::format_helpers::format_search_results(&results);
-
-                    MCPToolResult::success(
-                        format!("Found {} results", results.len()),
-                        Some(serde_json::json!({ "results": formatted })),
-                    )
-                } else {
-                    crate::tools::mcp::semantic_search_session(
-                        uuid,
-                        req.query.clone(),
-                        Some(validated_limit),
-                        req.date_from.clone(),
-                        req.date_to.clone(),
-                        req.interaction_type.clone(),
-                        None,
-                    )
-                    .await
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
-                };
-
-                Ok(CallToolResult::success(vec![Content::text(search_results.message)]))
+                Ok(CallToolResult::success(vec![Content::text(
+                    search_results.message,
+                )]))
             }
             "workspace" => {
                 // For workspace search, we need to get workspace sessions and search with recency bias
@@ -882,14 +849,19 @@ impl PostCortexService {
                     )
                     .with_parameter_path("scope_id".to_string())
                     .with_expected_type("UUID string")
-                    .with_hint("When scope is 'workspace', you must provide scope_id (the workspace UUID)")
+                    .with_hint(
+                        "When scope is 'workspace', you must provide scope_id (the workspace UUID)",
+                    )
                     .to_mcp_error()
                 })?;
 
                 let ws_uuid = Uuid::parse_str(ws_id).map_err(|_| {
                     CoercionError::new(
                         "Invalid UUID",
-                        std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid UUID format"),
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "Invalid UUID format",
+                        ),
                         None,
                     )
                     .with_parameter_path("scope_id".to_string())
@@ -898,13 +870,16 @@ impl PostCortexService {
                 })?;
 
                 // Get system and workspace
-                let system = get_memory_system().await
-                    .map_err(|e| McpError::internal_error(format!("Failed to get memory system: {}", e), None))?;
+                let system = get_memory_system().await.map_err(|e| {
+                    McpError::internal_error(format!("Failed to get memory system: {}", e), None)
+                })?;
 
                 let workspace = system
                     .workspace_manager
                     .get_workspace(&ws_uuid)
-                    .ok_or_else(|| McpError::internal_error(format!("Workspace {} not found", ws_uuid), None))?;
+                    .ok_or_else(|| {
+                        McpError::internal_error(format!("Workspace {} not found", ws_uuid), None)
+                    })?;
 
                 let session_ids: Vec<Uuid> = workspace
                     .get_all_sessions()
@@ -916,16 +891,11 @@ impl PostCortexService {
                 let date_range = parse_date_range(req.date_from.clone(), req.date_to.clone())?;
 
                 // Validate recency_bias if provided
-                let validated_recency_bias = validate_recency_bias(req.recency_bias)
-                    .map_err(|e| e.to_mcp_error())?;
+                let validated_recency_bias =
+                    validate_recency_bias(req.recency_bias).map_err(|e| e.to_mcp_error())?;
 
-                // Use semantic_search_multisession (handles recency_bias internally with 0.0 default)
-                let engine = system
-                    .semantic_query_engine
-                    .get()
-                    .ok_or_else(|| McpError::internal_error("Semantic engine not initialized".to_string(), None))?;
-
-                let results = engine
+                // Use system's semantic_search_multisession which uses the shared vectorizer
+                let results = system
                     .semantic_search_multisession(
                         &session_ids,
                         &req.query,
@@ -934,7 +904,7 @@ impl PostCortexService {
                         validated_recency_bias,
                     )
                     .await
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                    .map_err(|e| McpError::internal_error(e, None))?;
 
                 // Format results consistently
                 let formatted = crate::daemon::format_helpers::format_search_results(&results);
@@ -944,12 +914,14 @@ impl PostCortexService {
                     Some(serde_json::json!({ "results": formatted })),
                 );
 
-                Ok(CallToolResult::success(vec![Content::text(search_results.message)]))
+                Ok(CallToolResult::success(vec![Content::text(
+                    search_results.message,
+                )]))
             }
             "global" | _ => {
                 // Validate recency_bias if provided
-                let validated_recency_bias = validate_recency_bias(req.recency_bias)
-                    .map_err(|e| e.to_mcp_error())?;
+                let validated_recency_bias =
+                    validate_recency_bias(req.recency_bias).map_err(|e| e.to_mcp_error())?;
 
                 // Use semantic_search_global (handles recency_bias internally with 0.0 default)
                 let search_results = crate::tools::mcp::semantic_search_global(
@@ -963,7 +935,9 @@ impl PostCortexService {
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-                Ok(CallToolResult::success(vec![Content::text(search_results.message)]))
+                Ok(CallToolResult::success(vec![Content::text(
+                    search_results.message,
+                )]))
             }
         }
     }
