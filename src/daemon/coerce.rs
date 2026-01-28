@@ -10,6 +10,8 @@
 use serde::Deserialize;
 use serde_json::Value;
 
+pub use crate::daemon::validate::VALID_INTERACTION_TYPES;
+
 /// Coerce and validate a JSON value into the target type.
 ///
 /// This function attempts to deserialize the value directly first (fast path).
@@ -124,6 +126,96 @@ fn coerce_value(val: &Value) -> Result<Value, CoercionError> {
     }
 }
 
+/// Generate recovery suggestions based on error message patterns.
+///
+/// Analyzes common error patterns and provides actionable suggestions
+/// for AI agents to fix their requests.
+///
+/// # Examples
+///
+/// ```rust
+/// let error_msg = "invalid type: string 'abc', expected u32";
+/// let suggestions = generate_recovery_suggestions(error_msg);
+/// // Returns: ["Ensure the value is a valid number", "Check for typos in the value"]
+/// ```
+pub fn generate_recovery_suggestions(
+    error_message: &str,
+    parameter_path: Option<&str>,
+    received_value: Option<&Value>,
+) -> Vec<String> {
+    let mut suggestions = Vec::new();
+
+    // Pattern: UUID validation errors
+    if error_message.contains("UUID") || error_message.contains("36-character") {
+        suggestions.push("Ensure the session_id is a valid 36-character UUID (e.g., '60c598e2-d602-4e07-a328-c458006d48c7')".to_string());
+        suggestions.push("Create a new session using the 'session' tool with action='create' to get a valid UUID".to_string());
+
+        if let Some(Value::String(s)) = received_value {
+            if s.len() != 36 {
+                suggestions.push(format!("Your session_id '{}' has {} characters, but UUIDs require exactly 36 characters with hyphens.", s, s.len()));
+            }
+        }
+    }
+
+    // Pattern: interaction_type validation
+    if error_message.contains("interaction_type") || error_message.contains("Unknown interaction type") {
+        suggestions.push(format!("Valid interaction_type values are: {}", VALID_INTERACTION_TYPES.join(", ")));
+        suggestions.push("Use lowercase with underscores, not CamelCase or spaces".to_string());
+        suggestions.push("Examples: ✅ 'decision_made' ❌ 'DecisionMade' ❌ 'made decision'".to_string());
+    }
+
+    // Pattern: content field errors
+    if error_message.contains("content") && error_message.contains("required") {
+        suggestions.push("For single update mode, provide both 'interaction_type' and 'content' parameters".to_string());
+        suggestions.push("For bulk updates, use 'updates' array instead".to_string());
+        suggestions.push("Content must be an object with key-value pairs".to_string());
+    }
+
+    // Pattern: Type coercion errors
+    if error_message.contains("invalid type") || error_message.contains("expected") {
+        if let Some(path) = parameter_path {
+            suggestions.push(format!("Parameter '{}' has an incorrect type", path));
+        }
+
+        // Check if value is a number when string expected
+        if let Some(Value::Number(n)) = received_value {
+            suggestions.push(format!("Convert the number {} to a string", n));
+        }
+
+        // Check if value is boolean when string expected
+        if let Some(Value::Bool(b)) = received_value {
+            suggestions.push(format!("Convert the boolean {} to a string ('{}')", b, b));
+        }
+    }
+
+    // Pattern: Missing required parameters
+    if error_message.contains("required") || error_message.contains("missing") {
+        suggestions.push("Check that all required parameters are included in your request".to_string());
+        suggestions.push("Review the tool schema to see which parameters are required vs optional".to_string());
+    }
+
+    // Pattern: Session not found
+    if error_message.contains("Session not found") || error_message.contains("session does not exist") {
+        suggestions.push("Create a new session using the 'session' tool with action='create'".to_string());
+        suggestions.push("Or use semantic_search to find existing sessions".to_string());
+    }
+
+    // Pattern: Array/structure errors
+    if error_message.contains("updates") && (error_message.contains("array") || error_message.contains("expected length")) {
+        suggestions.push("When using bulk mode, 'updates' must be an array of update objects".to_string());
+        suggestions.push("Each update in the array must have 'interaction_type' and 'content' fields".to_string());
+    }
+
+    // General fallback suggestions
+    if suggestions.is_empty() {
+        suggestions.push("Review the error message and check your parameter types and values".to_string());
+        suggestions.push("Use dry_run=true to validate your request without making changes".to_string());
+        suggestions.push("Check the tool documentation for the correct parameter format".to_string());
+    }
+
+    suggestions
+}
+
 /// Structured error type for coercion failures.
 ///
 /// Provides rich error information to help AI agents understand
@@ -179,6 +271,7 @@ impl CoercionError {
     /// Convert this error to an MCP error response.
     ///
     /// Creates a structured JSON error that agents can parse and understand.
+    /// Includes automatically generated recovery suggestions.
     pub fn to_mcp_error(&self) -> rmcp::model::ErrorData {
         let mut details = serde_json::json!({
             "message": self.message,
@@ -198,6 +291,17 @@ impl CoercionError {
 
         if let Some(hint) = &self.hint {
             details["hint"] = serde_json::json!(hint);
+        }
+
+        // Generate and include recovery suggestions
+        let suggestions = generate_recovery_suggestions(
+            &self.message,
+            self.parameter_path.as_deref(),
+            self.received_value.as_ref(),
+        );
+
+        if !suggestions.is_empty() {
+            details["suggestions"] = serde_json::json!(suggestions);
         }
 
         rmcp::model::ErrorData::invalid_params(
@@ -310,5 +414,94 @@ mod tests {
         assert_eq!(error_data["expectedType"], "UUID string");
         assert_eq!(error_data["receivedValue"], 123);
         assert_eq!(error_data["hint"], "Use session tool to create");
+    }
+
+    #[test]
+    fn test_recovery_suggestions_uuid_error() {
+        let suggestions = generate_recovery_suggestions(
+            "Invalid UUID format",
+            Some("session_id"),
+            Some(&json!("abc")),
+        );
+
+        assert!(suggestions.iter().any(|s| s.contains("36-character UUID")));
+        assert!(suggestions.iter().any(|s| s.contains("'session' tool")));
+    }
+
+    #[test]
+    fn test_recovery_suggestions_interaction_type_error() {
+        let suggestions = generate_recovery_suggestions(
+            "Unknown interaction type",
+            Some("interaction_type"),
+            Some(&json!("made_decision")),
+        );
+
+        assert!(suggestions.iter().any(|s| s.contains("decision_made")));
+        assert!(suggestions.iter().any(|s| s.contains("lowercase with underscores")));
+    }
+
+    #[test]
+    fn test_recovery_suggestions_type_error() {
+        let suggestions = generate_recovery_suggestions(
+            "invalid type: integer `123`, expected a string",
+            Some("session_id"),
+            Some(&json!(123)),
+        );
+
+        assert!(suggestions.iter().any(|s| s.contains("Convert the number 123")));
+    }
+
+    #[test]
+    fn test_recovery_suggestions_content_required() {
+        let suggestions = generate_recovery_suggestions(
+            "content is required",
+            Some("content"),
+            None,
+        );
+
+        assert!(suggestions.iter().any(|s| s.contains("interaction_type")));
+        assert!(suggestions.iter().any(|s| s.contains("bulk updates")));
+    }
+
+    #[test]
+    fn test_recovery_suggestions_session_not_found() {
+        let suggestions = generate_recovery_suggestions(
+            "Session not found",
+            None,
+            None,
+        );
+
+        assert!(suggestions.iter().any(|s| s.contains("'session' tool")));
+        assert!(suggestions.iter().any(|s| s.contains("semantic_search")));
+    }
+
+    #[test]
+    fn test_recovery_suggestions_includes_suggestions_in_mcp_error() {
+        let error = CoercionError::new(
+            "Invalid UUID format",
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid"),
+            Some(json!("short-id")),
+        )
+        .with_parameter_path("session_id".to_string());
+
+        let mcp_error = error.to_mcp_error();
+        let error_data: serde_json::Value = serde_json::from_str(&mcp_error.message).unwrap();
+
+        // Verify suggestions array exists
+        assert!(error_data["suggestions"].is_array());
+        let suggestions = error_data["suggestions"].as_array().unwrap();
+        assert!(!suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_recovery_suggestions_general_fallback() {
+        let suggestions = generate_recovery_suggestions(
+            "Some unknown error",
+            None,
+            None,
+        );
+
+        assert!(suggestions.iter().any(|s| s.contains("dry_run")));
+        assert!(suggestions.iter().any(|s| s.contains("parameter types")));
     }
 }
