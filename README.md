@@ -53,6 +53,13 @@ Ask Claude: *"Create a Post-Cortex session for this project"*
 
 Claude will automatically store important context and search past knowledge.
 
+### 4. Configure Agent Workflow
+
+For best results, add a `CLAUDE.md` to your project with memory rules. See **[Usage Guide](docs/USAGE_GUIDE.md)** for:
+- Multi-project setup with workspaces
+- Agent workflow (search → explore → log → respond)
+- Working examples and templates
+
 ## MCP Tools (6 Tools)
 
 ### `session` - Manage Sessions

@@ -10,8 +10,6 @@ data/
 *.swo
 *~
 
-.claude/
-CLAUDE.md
 mcp.json
 start-mcp-server.sh
 benches
@@ -48,3 +46,5 @@ PROJECT.md
 backup.*
 export-*
 .worktrees
+settings.local.json
+.claude/settings.local.json
