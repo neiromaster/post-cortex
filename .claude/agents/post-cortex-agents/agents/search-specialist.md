@@ -58,7 +58,7 @@ query_conversation_context(
 semantic_search(
     query="authentication implementation",
     scope="session",
-    scope_id="bf52f62e-8e26-4e9e-8501-c42753d9a9ee",
+    scope_id="<your-session-id>",
     limit=10
 )
 ```
@@ -73,15 +73,18 @@ semantic_search(
 )
 ```
 
-### Progressive Refinement
+### Progressive Refinement (session → workspace → global)
 ```python
-# 1. Start broad
-global_results = semantic_search(query=query, scope="global", limit=5)
+# 1. Start narrow: current session
+session_results = semantic_search(query=query, scope="session", scope_id=session_id, limit=10)
 
-# 2. If found, deep dive into best session
-if global_results:
-    best_session = global_results[0].session_id
-    detailed = semantic_search(query=query, scope="session", scope_id=best_session, limit=20)
+# 2. If not found: broaden to workspace
+if not session_results:
+    workspace_results = semantic_search(query=query, scope="workspace", scope_id=workspace_id, limit=10)
+
+# 3. If still not found: search globally
+if not session_results and not workspace_results:
+    global_results = semantic_search(query=query, scope="global", limit=10)
 ```
 
 ## Empty Results Protocol

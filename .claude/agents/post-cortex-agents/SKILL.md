@@ -45,16 +45,17 @@ Every operation requires a `session_id`. Get it from:
 
 ## Multi-Step Workflows
 
-### Knowledge Retrieval
+### Knowledge Retrieval (session → workspace → global)
 ```
 1. semantic_search(query, scope="session", scope_id=session_id)
-2. IF no results: semantic_search(query, scope="global")
-3. Synthesize and respond
+2. IF no results: semantic_search(query, scope="workspace", scope_id=workspace_id)
+3. IF no results: semantic_search(query, scope="global")
+4. Synthesize and respond
 ```
 
 ### Context Capture
 ```
-1. Identify type: qa | decision_made | problem_solved | code_change
+1. Identify type: qa | decision_made | problem_solved | code_change | requirement_added | concept_defined
 2. Structure content as key-value pairs
 3. update_conversation_context(session_id, interaction_type, content)
 ```

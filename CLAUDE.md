@@ -14,6 +14,8 @@ Project instructions for AI assistants working with Post-Cortex.
 | **Workspace ID** | `c7c6dfa7-85c6-42b0-9b37-f2034c569a71` |
 | **Project** | post-cortex |
 
+> **Note:** These IDs are project-specific. Replace with your own when adapting this file for a different project. See [USAGE_GUIDE.md](docs/USAGE_GUIDE.md#1-create-session-and-workspace) for setup instructions.
+
 ---
 
 ## Mandatory Rules
@@ -42,6 +44,8 @@ Project instructions for AI assistants working with Post-Cortex.
 | Made a decision | `decision_made` |
 | Fixed a bug | `problem_solved` |
 | Changed code | `code_change` |
+| New requirement | `requirement_added` |
+| Concept explained | `concept_defined` |
 
 ### RULE 3: Self-Check
 
@@ -90,6 +94,8 @@ prompt: "Log qa:
          Answer: Uses MiniLM embeddings with cosine similarity
          Session ID: bf52f62e-8e26-4e9e-8501-c42753d9a9ee"
 ```
+
+> **Tip:** Use `recency_bias` for time-sensitive searches (e.g., recent bugs). See [USAGE_GUIDE.md](docs/USAGE_GUIDE.md#handling-knowledge-obsolescence) for recommended values.
 
 ---
 

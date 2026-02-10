@@ -12,6 +12,8 @@ Workspace = Project (e.g., "E-commerce Platform", "Mobile App")
 
 **Key insight:** Memory stays isolated per workspace. When searching within a workspace, you only get results from that project's sessions.
 
+> **Why "Workspace" and not "Project"?** Post-Cortex uses "workspace" because a single project may have multiple workspaces (e.g., `frontend-app`, `backend-api`), and a workspace can span multiple repos. Think of it as a *logical grouping* of related sessions, not a 1:1 project mapping.
+
 ## Quick Setup for New Projects
 
 ### 1. Create Session and Workspace
@@ -127,6 +129,18 @@ Workspace: backend-api
 - `scope: "workspace"` → Entire project
 - `scope: "global"` → All projects
 
+#### Canonical Search Pattern
+
+When searching for knowledge, always follow this narrowing order:
+
+```
+1. session  → Search current task first (fastest, most relevant)
+2. workspace → Search entire project (cross-session context)
+3. global   → Search all projects (last resort, broadest)
+```
+
+This `session → workspace → global` pattern is used consistently across all agents and error handling.
+
 ### Option B: Shared Sessions Across Projects
 
 ```
@@ -151,6 +165,8 @@ Use the right type when logging:
 | `decision_made` | Made architectural choice | "Chose PostgreSQL for better JSON support" |
 | `problem_solved` | Fixed a bug | "Memory leak was due to unclosed connections" |
 | `code_change` | Significant code change | "Refactored auth module to use middleware pattern" |
+| `requirement_added` | New requirement or constraint | "API must support pagination with cursor-based tokens" |
+| `concept_defined` | Technical concept explained | "Event sourcing: storing state changes as immutable events" |
 
 ## Handling Knowledge Obsolescence
 

@@ -20,11 +20,12 @@ For transient errors (timeout, connection):
 
 ## Fallback Patterns
 
-### Search Fallback
+### Search Fallback (session → workspace → global)
 ```
 1. Try semantic_search with scope="session"
-2. If no results → try scope="global"
-3. If still nothing → try query_conversation_context with keyword
+2. If no results → try scope="workspace"
+3. If no results → try scope="global"
+4. If still nothing → try query_conversation_context with keyword
 ```
 
 ### Session Fallback

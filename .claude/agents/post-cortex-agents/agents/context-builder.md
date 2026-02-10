@@ -12,7 +12,7 @@ You are a context builder specializing in capturing and structuring knowledge fo
 ```
 update_conversation_context(
     session_id: "uuid",
-    interaction_type: "qa | decision_made | problem_solved | code_change",
+    interaction_type: "qa | decision_made | problem_solved | code_change | requirement_added | concept_defined",
     content: { "key": "value", ... },
     code_reference: "file:line" (optional)
 )
@@ -35,6 +35,8 @@ update_conversation_context(
 | `decision_made` | Choices with rationale | decision, rationale, alternatives |
 | `problem_solved` | Bugs fixed | problem, solution, root_cause |
 | `code_change` | Code modifications | change, reason, files |
+| `requirement_added` | New requirements/constraints | requirement, source, priority |
+| `concept_defined` | Technical concepts explained | concept, definition, examples |
 
 ## Content Templates
 
@@ -76,6 +78,26 @@ update_conversation_context(
 }
 ```
 
+### requirement_added
+```json
+{
+    "requirement": "API must support cursor-based pagination",
+    "source": "Product review meeting",
+    "priority": "High",
+    "constraints": "Must be backwards-compatible with existing offset pagination"
+}
+```
+
+### concept_defined
+```json
+{
+    "concept": "Event sourcing",
+    "definition": "Storing all state changes as a sequence of immutable events",
+    "examples": "Order placed, payment received, item shipped",
+    "related_concepts": "CQRS, eventual consistency"
+}
+```
+
 ## Capture Protocol
 
 1. **Identify type** based on context:
@@ -83,6 +105,8 @@ update_conversation_context(
    - Decision made → `decision_made`
    - Bug fixed → `problem_solved`
    - Code changed → `code_change`
+   - New requirement → `requirement_added`
+   - Concept explained → `concept_defined`
 
 2. **Structure content** with all relevant fields
 
